@@ -1,0 +1,11 @@
+build/
+out/
+.vs/
+*.user
+*.suo
+*.ninja
+
+trajectory.csv
+trajectory.svg
+gui_trajectory.csv
+gui_trajectory.svg

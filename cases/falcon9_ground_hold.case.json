@@ -1,0 +1,823 @@
+{
+  "earth_mu_m3s2": 398600441800000,
+  "earth_radius_m": 6378137,
+  "earth_rotation_rad_per_s": 7.2921159000000004e-05,
+  "launch_site": {
+    "altitude_m": 0,
+    "latitude_deg": 28.562000000000001,
+    "longitude_deg": -80.577200000000005
+  },
+  "name": "Falcon 9 payload to 200 km LEO",
+  "optimization": {
+    "initial_step_fraction": 0.05,
+    "max_iterations": 300,
+    "mode": "optimize",
+    "objective": {
+      "direction": "maximize",
+      "enabled": true,
+      "metric": "payload_mass_kg",
+      "weight": 1.0
+    },
+    "optimizer": "sqp",
+    "targets": [
+      {
+        "max_value": 0,
+        "metric": "phases[6].terminal_altitude_m",
+        "min_value": 0,
+        "mode": "equal",
+        "value": 200000,
+        "weight": 8
+      },
+      {
+        "max_value": 0,
+        "metric": "phases[6].terminal_speed_mps",
+        "min_value": 0,
+        "mode": "equal",
+        "value": 7788.5,
+        "weight": 4
+      },
+      {
+        "max_value": 0,
+        "metric": "phases[6].inclination_deg",
+        "min_value": 0,
+        "mode": "equal",
+        "value": 28.562000000000001,
+        "weight": 1
+      },
+      {
+        "max_value": 230000,
+        "metric": "phases[6].periapsis_altitude_m",
+        "min_value": 180000,
+        "mode": "range",
+        "value": 0,
+        "weight": 2
+      }
+    ],
+    "tolerance": 0.02,
+    "variables": [
+      {
+        "enabled": true,
+        "max_value": 65,
+        "min_value": 30,
+        "path": "phases[1].duration_s"
+      },
+      {
+        "enabled": true,
+        "max_value": 90,
+        "min_value": 80,
+        "path": "phases[1].steering_model.elevation.c0"
+      },
+      {
+        "enabled": true,
+        "max_value": -0.05,
+        "min_value": -0.8,
+        "path": "phases[1].steering_model.elevation.c1"
+      },
+      {
+        "enabled": true,
+        "max_value": 0.002,
+        "min_value": -0.002,
+        "path": "phases[1].steering_model.elevation.c2"
+      },
+      {
+        "enabled": true,
+        "max_value": 65,
+        "min_value": 30,
+        "path": "phases[2].duration_s"
+      },
+      {
+        "enabled": true,
+        "max_value": 80,
+        "min_value": 45,
+        "path": "phases[2].steering_model.elevation.c0"
+      },
+      {
+        "enabled": true,
+        "max_value": 0.05,
+        "min_value": -0.8,
+        "path": "phases[2].steering_model.elevation.c1"
+      },
+      {
+        "enabled": true,
+        "max_value": 0.002,
+        "min_value": -0.002,
+        "path": "phases[2].steering_model.elevation.c2"
+      },
+      {
+        "enabled": true,
+        "max_value": 65,
+        "min_value": 30,
+        "path": "phases[3].duration_s"
+      },
+      {
+        "enabled": true,
+        "max_value": 60,
+        "min_value": 5,
+        "path": "phases[3].steering_model.elevation.c0"
+      },
+      {
+        "enabled": true,
+        "max_value": 0.2,
+        "min_value": -0.6,
+        "path": "phases[3].steering_model.elevation.c1"
+      },
+      {
+        "enabled": true,
+        "max_value": 0.002,
+        "min_value": -0.002,
+        "path": "phases[3].steering_model.elevation.c2"
+      },
+      {
+        "enabled": true,
+        "max_value": 130,
+        "min_value": 70,
+        "path": "phases[4].duration_s"
+      },
+      {
+        "enabled": true,
+        "max_value": 35,
+        "min_value": 5,
+        "path": "phases[4].steering_model.elevation.c0"
+      },
+      {
+        "enabled": true,
+        "max_value": 0.05,
+        "min_value": -0.12,
+        "path": "phases[4].steering_model.elevation.c1"
+      },
+      {
+        "enabled": true,
+        "max_value": 0.0005,
+        "min_value": -0.0005,
+        "path": "phases[4].steering_model.elevation.c2"
+      },
+      {
+        "enabled": true,
+        "max_value": 130,
+        "min_value": 70,
+        "path": "phases[5].duration_s"
+      },
+      {
+        "enabled": true,
+        "max_value": 25,
+        "min_value": 0,
+        "path": "phases[5].steering_model.elevation.c0"
+      },
+      {
+        "enabled": true,
+        "max_value": 0.05,
+        "min_value": -0.12,
+        "path": "phases[5].steering_model.elevation.c1"
+      },
+      {
+        "enabled": true,
+        "max_value": 0.0005,
+        "min_value": -0.0005,
+        "path": "phases[5].steering_model.elevation.c2"
+      },
+      {
+        "enabled": true,
+        "max_value": 150,
+        "min_value": 70,
+        "path": "phases[6].duration_s"
+      },
+      {
+        "enabled": true,
+        "max_value": 20,
+        "min_value": 0,
+        "path": "phases[6].steering_model.elevation.c0"
+      },
+      {
+        "enabled": true,
+        "max_value": 0.05,
+        "min_value": -0.1,
+        "path": "phases[6].steering_model.elevation.c1"
+      },
+      {
+        "enabled": true,
+        "max_value": 0.0005,
+        "min_value": -0.0005,
+        "path": "phases[6].steering_model.elevation.c2"
+      },
+      {
+        "enabled": true,
+        "max_value": 30000,
+        "min_value": 1000,
+        "path": "vehicle.stages[2].dry_mass_kg"
+      }
+    ]
+  },
+  "phases": [
+    {
+      "actions": [
+        {
+          "stage_index": -1,
+          "stage_name": "",
+          "time_s": 3,
+          "type": "set_hold_down_clamp_active",
+          "value": false
+        }
+      ],
+      "duration_s": 3,
+      "force_models": {
+        "gravity": true,
+        "normal_force": true,
+        "thrust": false
+      },
+      "hold_down_clamp_initial_active": true,
+      "inherit_initial_state": false,
+      "integrator": "ode",
+      "name": "pad hold",
+      "optimize_enabled": false,
+      "steering_model": {
+        "azimuth": {
+          "c0": 90,
+          "c1": 0,
+          "c2": 0
+        },
+        "elevation": {
+          "c0": 90,
+          "c1": 0,
+          "c2": 0
+        },
+        "fixed_direction_eci": [
+          1,
+          0,
+          0
+        ],
+        "pitch": {
+          "c0": 0,
+          "c1": 0,
+          "c2": 0
+        },
+        "points": [],
+        "roll": {
+          "c0": 0,
+          "c1": 0,
+          "c2": 0
+        },
+        "segments": [],
+        "type": "generic_poly",
+        "yaw": {
+          "c0": 0,
+          "c1": 0,
+          "c2": 0
+        }
+      },
+      "throttle_model": {
+        "c0": 0,
+        "c1": 0,
+        "c2": 0,
+        "points": [],
+        "target_t2w": 1,
+        "type": "poly"
+      }
+    },
+    {
+      "actions": [
+        {
+          "stage_index": -1,
+          "stage_name": "",
+          "time_s": 0,
+          "type": "set_engine_enabled",
+          "value": true
+        }
+      ],
+      "duration_s": 46.5,
+      "force_models": {
+        "gravity": true,
+        "normal_force": true,
+        "thrust": true
+      },
+      "hold_down_clamp_initial_active": false,
+      "inherit_initial_state": true,
+      "integrator": "ode",
+      "name": "booster ascent 1",
+      "optimize_enabled": true,
+      "steering_model": {
+        "azimuth": {
+          "c0": 90,
+          "c1": 0,
+          "c2": 0
+        },
+        "elevation": {
+          "c0": 87.4375,
+          "c1": -0.47999999999999998,
+          "c2": 0
+        },
+        "fixed_direction_eci": [
+          1,
+          0,
+          0
+        ],
+        "pitch": {
+          "c0": 0,
+          "c1": 0,
+          "c2": 0
+        },
+        "points": [],
+        "roll": {
+          "c0": 0,
+          "c1": 0,
+          "c2": 0
+        },
+        "segments": [],
+        "type": "generic_poly",
+        "yaw": {
+          "c0": 0,
+          "c1": 0,
+          "c2": 0
+        }
+      },
+      "throttle_model": {
+        "c0": 1,
+        "c1": 0,
+        "c2": 0,
+        "points": [],
+        "target_t2w": 1,
+        "type": "poly"
+      }
+    },
+    {
+      "actions": [],
+      "duration_s": 46.5,
+      "force_models": {
+        "gravity": true,
+        "normal_force": true,
+        "thrust": true
+      },
+      "hold_down_clamp_initial_active": false,
+      "inherit_initial_state": true,
+      "integrator": "ode",
+      "name": "booster ascent 2",
+      "optimize_enabled": true,
+      "steering_model": {
+        "azimuth": {
+          "c0": 90,
+          "c1": 0,
+          "c2": 0
+        },
+        "elevation": {
+          "c0": 65.1175,
+          "c1": -0.47999999999999998,
+          "c2": 0
+        },
+        "fixed_direction_eci": [
+          1,
+          0,
+          0
+        ],
+        "pitch": {
+          "c0": 0,
+          "c1": 0,
+          "c2": 0
+        },
+        "points": [],
+        "roll": {
+          "c0": 0,
+          "c1": 0,
+          "c2": 0
+        },
+        "segments": [],
+        "type": "generic_poly",
+        "yaw": {
+          "c0": 0,
+          "c1": 0,
+          "c2": 0
+        }
+      },
+      "throttle_model": {
+        "c0": 1,
+        "c1": 0,
+        "c2": 0,
+        "points": [],
+        "target_t2w": 1,
+        "type": "poly"
+      }
+    },
+    {
+      "actions": [],
+      "duration_s": 46.5,
+      "force_models": {
+        "gravity": true,
+        "normal_force": true,
+        "thrust": true
+      },
+      "hold_down_clamp_initial_active": false,
+      "inherit_initial_state": true,
+      "integrator": "ode",
+      "name": "booster ascent 3",
+      "optimize_enabled": true,
+      "steering_model": {
+        "azimuth": {
+          "c0": 90,
+          "c1": 0,
+          "c2": 0
+        },
+        "elevation": {
+          "c0": 42.7975,
+          "c1": -0.47999999999999998,
+          "c2": 0
+        },
+        "fixed_direction_eci": [
+          1,
+          0,
+          0
+        ],
+        "pitch": {
+          "c0": 0,
+          "c1": 0,
+          "c2": 0
+        },
+        "points": [],
+        "roll": {
+          "c0": 0,
+          "c1": 0,
+          "c2": 0
+        },
+        "segments": [],
+        "type": "generic_poly",
+        "yaw": {
+          "c0": 0,
+          "c1": 0,
+          "c2": 0
+        }
+      },
+      "throttle_model": {
+        "c0": 1,
+        "c1": 0,
+        "c2": 0,
+        "points": [],
+        "target_t2w": 1,
+        "type": "poly"
+      }
+    },
+    {
+      "actions": [
+        {
+          "stage_index": -1,
+          "stage_name": "",
+          "time_s": 0,
+          "type": "set_engine_enabled",
+          "value": true
+        },
+        {
+          "stage_index": 0,
+          "stage_name": "booster",
+          "time_s": 0,
+          "type": "set_stage_active",
+          "value": false
+        },
+        {
+          "stage_index": 0,
+          "stage_name": "booster",
+          "time_s": 0,
+          "type": "set_stage_attached",
+          "value": false
+        },
+        {
+          "stage_index": 1,
+          "stage_name": "second stage",
+          "time_s": 0,
+          "type": "set_stage_active",
+          "value": true
+        }
+      ],
+      "duration_s": 97.5,
+      "force_models": {
+        "gravity": true,
+        "normal_force": true,
+        "thrust": true
+      },
+      "hold_down_clamp_initial_active": false,
+      "inherit_initial_state": true,
+      "integrator": "ode",
+      "name": "second-stage insertion 1",
+      "optimize_enabled": true,
+      "steering_model": {
+        "azimuth": {
+          "c0": 90,
+          "c1": 0,
+          "c2": 0
+        },
+        "elevation": {
+          "c0": 18,
+          "c1": -0.063750000000000001,
+          "c2": 0
+        },
+        "fixed_direction_eci": [
+          1,
+          0,
+          0
+        ],
+        "pitch": {
+          "c0": 0,
+          "c1": 0,
+          "c2": 0
+        },
+        "points": [],
+        "roll": {
+          "c0": 0,
+          "c1": 0,
+          "c2": 0
+        },
+        "segments": [],
+        "type": "generic_poly",
+        "yaw": {
+          "c0": 0,
+          "c1": 0,
+          "c2": 0
+        }
+      },
+      "throttle_model": {
+        "c0": 1,
+        "c1": 0,
+        "c2": 0,
+        "points": [],
+        "target_t2w": 1,
+        "type": "poly"
+      }
+    },
+    {
+      "actions": [],
+      "duration_s": 97.5,
+      "force_models": {
+        "gravity": true,
+        "normal_force": true,
+        "thrust": true
+      },
+      "hold_down_clamp_initial_active": false,
+      "inherit_initial_state": true,
+      "integrator": "ode",
+      "name": "second-stage insertion 2",
+      "optimize_enabled": true,
+      "steering_model": {
+        "azimuth": {
+          "c0": 90,
+          "c1": 0,
+          "c2": 0
+        },
+        "elevation": {
+          "c0": 11.784375,
+          "c1": -0.063750000000000001,
+          "c2": 0
+        },
+        "fixed_direction_eci": [
+          1,
+          0,
+          0
+        ],
+        "pitch": {
+          "c0": 0,
+          "c1": 0,
+          "c2": 0
+        },
+        "points": [],
+        "roll": {
+          "c0": 0,
+          "c1": 0,
+          "c2": 0
+        },
+        "segments": [],
+        "type": "generic_poly",
+        "yaw": {
+          "c0": 0,
+          "c1": 0,
+          "c2": 0
+        }
+      },
+      "throttle_model": {
+        "c0": 1,
+        "c1": 0,
+        "c2": 0,
+        "points": [],
+        "target_t2w": 1,
+        "type": "poly"
+      }
+    },
+    {
+      "actions": [],
+      "duration_s": 97.5,
+      "force_models": {
+        "gravity": true,
+        "normal_force": true,
+        "thrust": true
+      },
+      "hold_down_clamp_initial_active": false,
+      "inherit_initial_state": true,
+      "integrator": "ode",
+      "name": "second-stage insertion 3",
+      "optimize_enabled": true,
+      "steering_model": {
+        "azimuth": {
+          "c0": 90,
+          "c1": 0,
+          "c2": 0
+        },
+        "elevation": {
+          "c0": 5.56875,
+          "c1": -0.063750000000000001,
+          "c2": 0
+        },
+        "fixed_direction_eci": [
+          1,
+          0,
+          0
+        ],
+        "pitch": {
+          "c0": 0,
+          "c1": 0,
+          "c2": 0
+        },
+        "points": [],
+        "roll": {
+          "c0": 0,
+          "c1": 0,
+          "c2": 0
+        },
+        "segments": [],
+        "type": "generic_poly",
+        "yaw": {
+          "c0": 0,
+          "c1": 0,
+          "c2": 0
+        }
+      },
+      "throttle_model": {
+        "c0": 1,
+        "c1": 0,
+        "c2": 0,
+        "points": [],
+        "target_t2w": 1,
+        "type": "poly"
+      }
+    },
+    {
+      "actions": [],
+      "duration_s": 2654.8216826489947,
+      "force_models": {
+        "gravity": true,
+        "normal_force": false,
+        "thrust": false
+      },
+      "hold_down_clamp_initial_active": false,
+      "inherit_initial_state": true,
+      "integrator": "ode",
+      "name": "orbital coast half orbit",
+      "optimize_enabled": false,
+      "steering_model": {
+        "azimuth": {
+          "c0": 90,
+          "c1": 0,
+          "c2": 0
+        },
+        "elevation": {
+          "c0": 0,
+          "c1": 0,
+          "c2": 0
+        },
+        "fixed_direction_eci": [
+          1,
+          0,
+          0
+        ],
+        "pitch": {
+          "c0": 0,
+          "c1": 0,
+          "c2": 0
+        },
+        "points": [],
+        "roll": {
+          "c0": 0,
+          "c1": 0,
+          "c2": 0
+        },
+        "segments": [],
+        "type": "generic_poly",
+        "yaw": {
+          "c0": 0,
+          "c1": 0,
+          "c2": 0
+        }
+      },
+      "throttle_model": {
+        "c0": 0,
+        "c1": 0,
+        "c2": 0,
+        "points": [],
+        "target_t2w": 1,
+        "type": "poly"
+      }
+    }
+  ],
+  "step_s": 1,
+  "vehicle": {
+    "dry_mass_kg": 37600,
+    "engine": {
+      "direction_body": [
+        1,
+        0,
+        0
+      ],
+      "enabled": true,
+      "feed_tanks": [
+        {
+          "stage": "booster",
+          "tank": "first-stage propellant"
+        }
+      ],
+      "isp_s": 283,
+      "max_thrust_n": 7605000
+    },
+    "name": "Falcon 9 Block 5 approximate with payload",
+    "stages": [
+      {
+        "active": true,
+        "attached": true,
+        "dry_mass_kg": 25600,
+        "engine": {
+          "direction_body": [
+            1,
+            0,
+            0
+          ],
+          "enabled": true,
+          "feed_tanks": [
+            {
+              "stage": "booster",
+              "tank": "first-stage propellant"
+            }
+          ],
+          "isp_s": 283,
+          "max_thrust_n": 7605000
+        },
+        "name": "booster",
+        "tanks": [
+          {
+            "capacity_kg": 395700,
+            "initial_kg": 395700,
+            "name": "first-stage propellant",
+            "propellant": "LOX/RP-1"
+          }
+        ]
+      },
+      {
+        "active": false,
+        "attached": true,
+        "dry_mass_kg": 4000,
+        "engine": {
+          "direction_body": [
+            1,
+            0,
+            0
+          ],
+          "enabled": true,
+          "feed_tanks": [
+            {
+              "stage": "second stage",
+              "tank": "second-stage propellant"
+            }
+          ],
+          "isp_s": 348,
+          "max_thrust_n": 981000
+        },
+        "name": "second stage",
+        "tanks": [
+          {
+            "capacity_kg": 92670,
+            "initial_kg": 92670,
+            "name": "second-stage propellant",
+            "propellant": "LOX/RP-1"
+          }
+        ]
+      },
+      {
+        "active": false,
+        "attached": true,
+        "dry_mass_kg": 10483.59375,
+        "engine": {
+          "direction_body": [
+            1,
+            0,
+            0
+          ],
+          "enabled": false,
+          "feed_tanks": [],
+          "isp_s": 0,
+          "max_thrust_n": 0
+        },
+        "name": "payload",
+        "tanks": []
+      }
+    ],
+    "tank_to_tank_connections": [],
+    "tanks": [
+      {
+        "capacity_kg": 395700,
+        "initial_kg": 395700,
+        "name": "first-stage propellant",
+        "propellant": "LOX/RP-1"
+      }
+    ]
+  }
+}
