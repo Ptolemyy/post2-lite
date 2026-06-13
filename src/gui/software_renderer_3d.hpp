@@ -28,11 +28,12 @@ public:
 
     ProjectedPoint3D project(const post2::core::Vec3& position_m) const;
     post2::core::Vec3 eye_direction() const;
+    post2::core::Vec3 eye_position() const;
+    post2::core::Vec3 ray_direction_for_pixel(double screen_x, double screen_y) const;
 
 private:
     double min_distance_m() const;
     double max_distance_m() const;
-    post2::core::Vec3 eye_position() const;
 
     double yaw_deg_ = 35.0;
     double pitch_deg_ = 22.0;
@@ -57,7 +58,7 @@ private:
         COLORREF color,
         int width) const;
     void draw_earth(HDC hdc, const Camera3D& camera) const;
-    void draw_earth_grid(HDC hdc, const Camera3D& camera) const;
+    void draw_earth_axis(HDC hdc, const Camera3D& camera) const;
     void draw_marker(
         HDC hdc,
         const Camera3D& camera,

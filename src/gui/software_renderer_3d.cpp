@@ -291,6 +291,38 @@ bool point_visible_from_camera(const Vec3& eye_m, const Vec3& position_m)
     return first_hit_t <= 1.0e-6 || first_hit_t >= 1.0 - 1.0e-6;
 }
 
+bool intersect_sphere_nearest(
+    const Vec3& ray_origin_m,
+    const Vec3& ray_direction,
+    double sphere_radius_m,
+    Vec3* hit_m)
+{
+    const double a = post2::vehicle::dot(ray_direction, ray_direction);
+    if (a <= 1.0e-12) {
+        return false;
+    }
+
+    const double b = 2.0 * post2::vehicle::dot(ray_origin_m, ray_direction);
+    const double c =
+        post2::vehicle::dot(ray_origin_m, ray_origin_m) - sphere_radius_m * sphere_radius_m;
+    const double discriminant = b * b - 4.0 * a * c;
+    if (discriminant < 0.0) {
+        return false;
+    }
+
+    const double root = std::sqrt(discriminant);
+    double t = (-b - root) / (2.0 * a);
+    if (t <= 1.0e-6) {
+        t = (-b + root) / (2.0 * a);
+    }
+    if (t <= 1.0e-6) {
+        return false;
+    }
+
+    *hit_m = ray_origin_m + ray_direction * t;
+    return true;
+}
+
 } // namespace
 
 void Camera3D::reset(double scene_radius_m)
@@ -385,6 +417,23 @@ Vec3 Camera3D::eye_direction() const
     return normalized_or(eye_position(), {1.0, 0.0, 0.0});
 }
 
+Vec3 Camera3D::ray_direction_for_pixel(double screen_x, double screen_y) const
+{
+    const Vec3 eye = eye_position();
+    const Vec3 forward = normalized_or(Vec3{0.0, 0.0, 0.0} - eye, {-1.0, 0.0, 0.0});
+    const Vec3 right = normalized_or(cross(forward, {0.0, 0.0, 1.0}), {0.0, 1.0, 0.0});
+    const Vec3 up = normalized_or(cross(right, forward), {0.0, 0.0, 1.0});
+    const double min_extent_px = static_cast<double>(std::min(rect_width(viewport_), rect_height(viewport_)));
+    const double focal_px = (min_extent_px * 0.5) / std::tan((fov_deg_ * kDegToRad) * 0.5);
+    const double center_x = static_cast<double>(viewport_.left + viewport_.right) * 0.5;
+    const double center_y = static_cast<double>(viewport_.top + viewport_.bottom) * 0.5;
+    const Vec3 direction =
+        forward +
+        right * ((screen_x - center_x) / focal_px) +
+        up * ((center_y - screen_y) / focal_px);
+    return normalized_or(direction, forward);
+}
+
 double Camera3D::min_distance_m() const
 {
     return 1.4 * scene_radius_m_;
@@ -442,7 +491,7 @@ void SoftwareRenderer3D::draw(HDC hdc, const Camera3D& camera, const post2::core
     draw_marker(hdc, camera, state_log.back().state.position_m, RGB(148, 163, 184), false);
 
     draw_earth(hdc, camera);
-    draw_earth_grid(hdc, camera);
+    draw_earth_axis(hdc, camera);
 
     draw_trajectory_segments(hdc, camera, state_log, true, RGB(220, 38, 38), 3);
     draw_marker(hdc, camera, state_log.front().state.position_m, RGB(22, 163, 74), true);
@@ -478,8 +527,7 @@ void SoftwareRenderer3D::draw_trajectory_segments(
             continue;
         }
 
-        const bool segment_near_side = a.near_side || b.near_side;
-        if (segment_near_side != near_side) {
+        if (a.near_side != b.near_side || a.near_side != near_side) {
             previous_index = next_index;
             continue;
         }
@@ -517,31 +565,23 @@ void SoftwareRenderer3D::draw_earth(HDC hdc, const Camera3D& camera) const
         return;
     }
 
-    std::vector<std::uint32_t> pixels(static_cast<std::size_t>(width) * height, 0U);
-
-    const Vec3 eye_dir = camera.eye_direction();
-    const Vec3 forward = { -eye_dir.x, -eye_dir.y, -eye_dir.z };
-    const Vec3 right = normalized_or(cross(forward, {0.0, 0.0, 1.0}), {0.0, 1.0, 0.0});
-    const Vec3 up = normalized_or(cross(right, forward), {0.0, 0.0, 1.0});
-    const double inv_radius = 1.0 / static_cast<double>(radius_px);
+    const std::uint32_t background_color = (244U << 16) | (247U << 8) | 251U;
+    std::vector<std::uint32_t> pixels(static_cast<std::size_t>(width) * height, background_color);
+    const Vec3 eye = camera.eye_position();
 
     for (int y = 0; y < height; ++y) {
         const double screen_y = static_cast<double>(top + y) + 0.5;
-        const double dy = (static_cast<double>(center.screen.y) - screen_y) * inv_radius;
         for (int x = 0; x < width; ++x) {
             const double screen_x = static_cast<double>(left + x) + 0.5;
-            const double dx = (screen_x - static_cast<double>(center.screen.x)) * inv_radius;
-            const double radial = dx * dx + dy * dy;
-            if (radial > 1.0) {
+            const Vec3 ray_direction = camera.ray_direction_for_pixel(screen_x, screen_y);
+            Vec3 hit = {};
+            if (!intersect_sphere_nearest(eye, ray_direction, post2::core::kEarthRadiusM, &hit)) {
                 continue;
             }
 
-            const double limb = std::sqrt(std::max(0.0, 1.0 - radial));
-            const Vec3 normal = {
-                right.x * dx + up.x * dy + eye_dir.x * limb,
-                right.y * dx + up.y * dy + eye_dir.y * limb,
-                right.z * dx + up.z * dy + eye_dir.z * limb,
-            };
+            const Vec3 normal = hit / post2::core::kEarthRadiusM;
+            const Vec3 to_eye = normalized_or(eye - hit, {normal.x, normal.y, normal.z});
+            const double limb = clamp(post2::vehicle::dot(normal, to_eye), 0.0, 1.0);
             const double lon = std::atan2(normal.y, normal.x);
             const double lat = std::asin(clamp(normal.z, -1.0, 1.0));
             const double u = lon / (2.0 * kPi) + 0.5;
@@ -594,42 +634,36 @@ void SoftwareRenderer3D::draw_earth(HDC hdc, const Camera3D& camera) const
     select_and_delete_pen(hdc, old_pen, earth_pen);
 }
 
-void SoftwareRenderer3D::draw_earth_grid(HDC hdc, const Camera3D& camera) const
+void SoftwareRenderer3D::draw_earth_axis(HDC hdc, const Camera3D& camera) const
 {
-    HPEN grid_pen = CreatePen(PS_SOLID, 1, RGB(158, 184, 210));
-    HPEN old_pen = static_cast<HPEN>(SelectObject(hdc, grid_pen));
-    const double radius = post2::core::kEarthRadiusM;
+    const double radius_m = post2::core::kEarthRadiusM;
+    const double axis_extent_m = radius_m * 1.16;
+    HPEN outline_pen = CreatePen(PS_SOLID, 2, RGB(15, 23, 42));
+    HPEN axis_pen = CreatePen(PS_SOLID, 1, RGB(226, 232, 240));
+    HPEN old_pen = static_cast<HPEN>(SelectObject(hdc, outline_pen));
 
-    auto draw_visible_segment = [&](const Vec3& a_world, const Vec3& b_world) {
-        const ProjectedPoint3D a = camera.project(a_world);
-        const ProjectedPoint3D b = camera.project(b_world);
-        if (!a.valid || !b.valid || !a.near_side || !b.near_side) {
+    auto draw_axis_stub = [&](const Vec3& surface_m, const Vec3& outer_m) {
+        const ProjectedPoint3D surface = camera.project(surface_m);
+        const ProjectedPoint3D outer = camera.project(outer_m);
+        if (!surface.valid || !outer.valid || !surface.near_side || !outer.near_side) {
             return;
         }
-        MoveToEx(hdc, a.screen.x, a.screen.y, nullptr);
-        LineTo(hdc, b.screen.x, b.screen.y);
+
+        SelectObject(hdc, outline_pen);
+        MoveToEx(hdc, surface.screen.x, surface.screen.y, nullptr);
+        LineTo(hdc, outer.screen.x, outer.screen.y);
+
+        SelectObject(hdc, axis_pen);
+        MoveToEx(hdc, surface.screen.x, surface.screen.y, nullptr);
+        LineTo(hdc, outer.screen.x, outer.screen.y);
     };
 
-    for (int lat_deg = -60; lat_deg <= 60; lat_deg += 30) {
-        const double lat = static_cast<double>(lat_deg) * kDegToRad;
-        Vec3 previous = {};
-        bool has_previous = false;
-        for (int lon_deg = 0; lon_deg <= 360; lon_deg += 4) {
-            const double lon = static_cast<double>(lon_deg) * kDegToRad;
-            const Vec3 point = {
-                radius * std::cos(lat) * std::cos(lon),
-                radius * std::cos(lat) * std::sin(lon),
-                radius * std::sin(lat),
-            };
-            if (has_previous) {
-                draw_visible_segment(previous, point);
-            }
-            previous = point;
-            has_previous = true;
-        }
-    }
+    draw_axis_stub({0.0, 0.0, radius_m}, {0.0, 0.0, axis_extent_m});
+    draw_axis_stub({0.0, 0.0, -radius_m}, {0.0, 0.0, -axis_extent_m});
 
-    select_and_delete_pen(hdc, old_pen, grid_pen);
+    SelectObject(hdc, old_pen);
+    DeleteObject(axis_pen);
+    DeleteObject(outline_pen);
 }
 
 void SoftwareRenderer3D::draw_marker(
