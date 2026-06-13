@@ -392,7 +392,14 @@ void write_json(std::ostringstream& output, const JsonValue& value, bool pretty,
 bool parse_json(const std::string& text, JsonValue* value, std::string* error)
 {
     try {
-        *value = JsonParser(text).parse();
+        std::string json_text = text;
+        if (json_text.size() >= 3 &&
+            static_cast<unsigned char>(json_text[0]) == 0xEF &&
+            static_cast<unsigned char>(json_text[1]) == 0xBB &&
+            static_cast<unsigned char>(json_text[2]) == 0xBF) {
+            json_text.erase(0, 3);
+        }
+        *value = JsonParser(json_text).parse();
         return true;
     } catch (const std::exception& ex) {
         if (error) {

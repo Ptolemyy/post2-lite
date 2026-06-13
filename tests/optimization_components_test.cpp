@@ -50,6 +50,23 @@ post2::core::CaseConfig make_drop_case()
     return config;
 }
 
+post2::core::CaseConfig make_payload_drop_case()
+{
+    post2::core::CaseConfig config = make_drop_case();
+    post2::vehicle::StageConfig bus;
+    bus.name = "bus";
+    bus.dry_mass_kg = 1000.0;
+    bus.active = false;
+    bus.attached = true;
+    post2::vehicle::StageConfig payload;
+    payload.name = "payload";
+    payload.dry_mass_kg = 100.0;
+    payload.active = false;
+    payload.attached = true;
+    config.vehicle.stages = {bus, payload};
+    return config;
+}
+
 } // namespace
 
 int main()
@@ -204,6 +221,12 @@ int main()
         drop_case.optimization.constraint_tolerance = 0.01;
         drop_case.optimization.stationarity_tolerance = 0.02;
         drop_case.optimization.max_restoration_iterations = 3;
+        drop_case.optimization.continuation.enabled = true;
+        drop_case.optimization.continuation.variable_path = "phases[0].duration_s";
+        drop_case.optimization.continuation.direction = "decrease";
+        drop_case.optimization.continuation.steps = 5;
+        drop_case.optimization.continuation.multistart_enabled = true;
+        drop_case.optimization.continuation.multistart_count = 3;
         drop_case.optimization.targets.push_back({
             "terminal_altitude_m",
             "upper",
@@ -223,6 +246,12 @@ int main()
             parsed.optimization.parallel_fd ||
             !near(parsed.optimization.constraint_tolerance, 0.01, 1.0e-12) ||
             parsed.optimization.max_restoration_iterations != 3 ||
+            !parsed.optimization.continuation.enabled ||
+            parsed.optimization.continuation.variable_path != "phases[0].duration_s" ||
+            parsed.optimization.continuation.direction != "decrease" ||
+            parsed.optimization.continuation.steps != 5 ||
+            !parsed.optimization.continuation.multistart_enabled ||
+            parsed.optimization.continuation.multistart_count != 3 ||
             parsed.optimization.targets.back().scope != "terminal") {
             std::cerr << "optimization JSON round trip failed: " << error << '\n';
             return 1;
@@ -331,6 +360,112 @@ int main()
             result.final_metrics.empty() ||
             !has_message(result.messages, "optimizer: fmincon")) {
             std::cerr << "public fmincon pipeline failed\n";
+            return 1;
+        }
+    }
+
+    {
+        post2::core::CaseConfig continuation_case = make_payload_drop_case();
+        const auto baseline = service.simulate(continuation_case);
+        if (!baseline.ok) {
+            std::cerr << "payload continuation baseline simulation failed: " << baseline.error << '\n';
+            return 1;
+        }
+        continuation_case.optimization.optimizer = "sqp";
+        continuation_case.optimization.max_iterations = 2;
+        continuation_case.optimization.tolerance = 0.02;
+        continuation_case.optimization.constraint_tolerance = 0.02;
+        continuation_case.optimization.mode = "optimize";
+        continuation_case.optimization.variables.push_back({"phases[0].duration_s", true, 0.5, 2.0});
+        continuation_case.optimization.variables.push_back({"vehicle.stages[1].dry_mass_kg", true, 100.0, 180.0});
+        continuation_case.optimization.targets.push_back({
+            "terminal_altitude_m",
+            "equal",
+            baseline.state_log.back().altitude_m,
+            0.0,
+            0.0,
+            1.0,
+        });
+        continuation_case.optimization.objective.enabled = true;
+        continuation_case.optimization.objective.metric = "payload_mass_kg";
+        continuation_case.optimization.objective.direction = "maximize";
+        continuation_case.optimization.continuation.enabled = true;
+        continuation_case.optimization.continuation.variable_path = "vehicle.stages[1].dry_mass_kg";
+        continuation_case.optimization.continuation.direction = "increase";
+        continuation_case.optimization.continuation.steps = 2;
+        continuation_case.optimization.continuation.multistart_enabled = true;
+        continuation_case.optimization.continuation.multistart_count = 2;
+
+        const auto result = post2::core::optimize_case(&continuation_case, service);
+        double payload_mass = 0.0;
+        if (!result.ok ||
+            !result.found_feasible ||
+            !has_message(result.messages, "continuation: enabled") ||
+            !post2::core::read_optimization_variable(
+                continuation_case,
+                "vehicle.stages[1].dry_mass_kg",
+                &payload_mass,
+                nullptr) ||
+            payload_mass < 179.0 ||
+            result.variable_changes.size() < 2) {
+            std::cerr << "payload continuation did not reach the upper bound\n";
+            return 1;
+        }
+    }
+
+    {
+        post2::core::CaseConfig continuation_case = make_drop_case();
+        const auto baseline = service.simulate(continuation_case);
+        if (!baseline.ok) {
+            std::cerr << "non-payload continuation baseline simulation failed: " << baseline.error << '\n';
+            return 1;
+        }
+        continuation_case.optimization.optimizer = "fmincon";
+        continuation_case.optimization.max_iterations = 2;
+        continuation_case.optimization.tolerance = 0.02;
+        continuation_case.optimization.constraint_tolerance = 0.02;
+        continuation_case.optimization.variables.push_back({"phases[0].duration_s", true, 0.5, 2.0});
+        continuation_case.optimization.variables.push_back({"vehicle.dry_mass_kg", true, 500.0, 1000.0});
+        continuation_case.optimization.targets.push_back({
+            "terminal_altitude_m",
+            "equal",
+            baseline.state_log.back().altitude_m,
+            0.0,
+            0.0,
+            1.0,
+        });
+        continuation_case.optimization.continuation.enabled = true;
+        continuation_case.optimization.continuation.variable_path = "vehicle.dry_mass_kg";
+        continuation_case.optimization.continuation.direction = "decrease";
+        continuation_case.optimization.continuation.steps = 2;
+
+        const auto result = post2::core::optimize_case(&continuation_case, service);
+        double dry_mass = 0.0;
+        if (!result.ok ||
+            !result.found_feasible ||
+            !post2::core::read_optimization_variable(
+                continuation_case,
+                "vehicle.dry_mass_kg",
+                &dry_mass,
+                nullptr) ||
+            dry_mass > 501.0 ||
+            result.variable_changes.size() < 2) {
+            std::cerr << "non-payload decreasing continuation did not reach the lower bound\n";
+            return 1;
+        }
+    }
+
+    {
+        post2::core::CaseConfig invalid_continuation = make_drop_case();
+        invalid_continuation.optimization.variables.push_back({"phases[0].duration_s", true, 0.5, 2.0});
+        invalid_continuation.optimization.targets.push_back({"terminal_altitude_m", "equal", 995.0, 0.0, 0.0, 1.0});
+        invalid_continuation.optimization.continuation.enabled = true;
+        invalid_continuation.optimization.continuation.variable_path = "vehicle.dry_mass_kg";
+        const auto result = post2::core::optimize_case(&invalid_continuation, service);
+        if (result.ok ||
+            result.error.find("continuation variable must be an enabled optimization variable") ==
+                std::string::npos) {
+            std::cerr << "invalid continuation variable did not fail clearly\n";
             return 1;
         }
     }

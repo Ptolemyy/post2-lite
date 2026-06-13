@@ -1,6 +1,7 @@
 #include "post2/core/case_config_io.hpp"
 #include "post2/core/frames.hpp"
 #include "post2/core/io.hpp"
+#include "post2/core/ksp_vehicle_site_import.hpp"
 #include "post2/core/optimization.hpp"
 #include "post2/core/trajectory_service.hpp"
 #include "post2/vehicle/runtime_state.hpp"
@@ -12,9 +13,12 @@
 #include <array>
 #include <cctype>
 #include <memory>
+#include <mutex>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <commdlg.h>
@@ -25,6 +29,7 @@ namespace {
 
 using post2::core::CoreMode;
 using post2::core::CaseConfig;
+using post2::core::OptimizationResult;
 using post2::core::SimulationConfig;
 using post2::core::SimulationResult;
 
@@ -38,6 +43,7 @@ constexpr int kMenuModeLocal = 1101;
 constexpr int kMenuModeRemote = 1102;
 constexpr int kMenuRemoteEndpoint = 1103;
 constexpr int kMenuVehicleEdit = 1301;
+constexpr int kMenuVehicleImportKsp = 1302;
 constexpr int kMenuRunTrajectory = 1501;
 constexpr int kMenuOptimizationSettings = 1502;
 constexpr int kMenuOptimizationExecute = 1503;
@@ -116,6 +122,7 @@ constexpr int kOptStepFractionEdit = 2105;
 constexpr int kOptTargetList = 2106;
 constexpr int kOptTargetAdd = 2107;
 constexpr int kOptTargetDelete = 2108;
+constexpr int kOptTargetEdit = 2124;
 constexpr int kOptTargetMetricCombo = 2109;
 constexpr int kOptTargetModeCombo = 2110;
 constexpr int kOptTargetValueEdit = 2111;
@@ -126,6 +133,12 @@ constexpr int kOptObjectiveEnabled = 2115;
 constexpr int kOptObjectiveMetricCombo = 2116;
 constexpr int kOptObjectiveDirectionCombo = 2117;
 constexpr int kOptObjectiveWeightEdit = 2118;
+constexpr int kOptContinuationStrategyCombo = 2119;
+constexpr int kOptContinuationVariableCombo = 2120;
+constexpr int kOptContinuationDirectionCombo = 2121;
+constexpr int kOptContinuationStepsEdit = 2122;
+constexpr int kOptContinuationStartsEdit = 2123;
+constexpr UINT kOptimizationFinishedMessage = WM_APP + 1;
 constexpr const wchar_t* kSceneWindowClassName = L"Post2LiteOpenGLScene";
 
 // Middle column holding pre-takeoff and final vehicle stats.
@@ -174,6 +187,15 @@ post2::gui::ChartPanel g_chart_q;
 post2::gui::ChartPanel g_chart_throttle;
 post2::gui::ChartPanel g_chart_speed;
 post2::gui::ChartPanel g_chart_mass;
+
+struct PendingOptimizationResult {
+    CaseConfig case_config;
+    OptimizationResult result;
+};
+
+std::mutex g_optimization_mutex;
+bool g_optimization_running = false;
+std::optional<PendingOptimizationResult> g_pending_optimization;
 
 void populate_charts();
 void switch_view(HWND hwnd, ViewKind view);
@@ -345,18 +367,29 @@ struct OptimizationSettingsDialogState {
     HWND tolerance_edit = nullptr;
     HWND step_fraction_edit = nullptr;
     HWND target_list = nullptr;
-    HWND target_metric_combo = nullptr;
-    HWND target_mode_combo = nullptr;
-    HWND target_value_edit = nullptr;
-    HWND target_min_edit = nullptr;
-    HWND target_max_edit = nullptr;
-    HWND target_weight_edit = nullptr;
     HWND objective_enabled = nullptr;
     HWND objective_metric_combo = nullptr;
     HWND objective_direction_combo = nullptr;
     HWND objective_weight_edit = nullptr;
+    HWND continuation_strategy_combo = nullptr;
+    HWND continuation_variable_combo = nullptr;
+    HWND continuation_direction_combo = nullptr;
+    HWND continuation_steps_edit = nullptr;
+    HWND continuation_starts_edit = nullptr;
     post2::core::OptimizationConfig config;
     int selected_target_index = 0;
+    bool accepted = false;
+};
+
+struct OptimizationTargetEditorDialogState {
+    HWND hwnd = nullptr;
+    HWND metric_combo = nullptr;
+    HWND mode_combo = nullptr;
+    HWND value_edit = nullptr;
+    HWND min_edit = nullptr;
+    HWND max_edit = nullptr;
+    HWND weight_edit = nullptr;
+    post2::core::OptimizationTargetConfig target;
     bool accepted = false;
 };
 
@@ -428,21 +461,6 @@ std::string remote_endpoint_text()
     return g_remote_host + ":" + std::to_string(g_remote_port);
 }
 
-bool should_render_earth_fixed_view()
-{
-    for (const auto& phase : g_case.phases) {
-        if (phase.hold_down_clamp_initial_active) {
-            return true;
-        }
-        for (const auto& action : phase.actions) {
-            if (action.type == "set_hold_down_clamp_active") {
-                return true;
-            }
-        }
-    }
-    return false;
-}
-
 void ensure_case_initialized()
 {
     if (!g_case_initialized || g_case.phases.empty()) {
@@ -510,6 +528,18 @@ void set_outputs_text(const std::string& text)
     if (window_is_live(g_outputs_edit)) {
         SetWindowTextW(g_outputs_edit, widen(g_outputs_text).c_str());
     }
+}
+
+bool optimization_is_running()
+{
+    std::lock_guard<std::mutex> lock(g_optimization_mutex);
+    return g_optimization_running;
+}
+
+std::string optimizing_status_text()
+{
+    return std::string("optimizing... | mode: ") + post2::core::core_mode_name(g_mode) +
+        " | remote: " + remote_endpoint_text();
 }
 
 std::string format_metric_lines(const std::vector<post2::core::OptimizationMetricValue>& metrics)
@@ -593,15 +623,83 @@ void run_simulation(HWND hwnd)
 void execute_optimization(HWND hwnd)
 {
     ensure_case_initialized();
-    const auto service = post2::core::make_trajectory_service(g_mode, g_remote_host, g_remote_port);
-    const auto result = post2::core::optimize_case(&g_case, *service);
+
+    bool already_running = false;
+    {
+        std::lock_guard<std::mutex> lock(g_optimization_mutex);
+        if (g_optimization_running) {
+            already_running = true;
+        } else {
+            g_optimization_running = true;
+            g_pending_optimization.reset();
+        }
+    }
+    if (already_running) {
+        MessageBoxW(hwnd, L"Optimization is already running.", L"POST2 Lite", MB_ICONINFORMATION);
+        return;
+    }
+
+    CaseConfig working_case = g_case;
+    const CoreMode mode = g_mode;
+    const std::string remote_host = g_remote_host;
+    const int remote_port = g_remote_port;
+
+    g_status = optimizing_status_text();
+    set_outputs_text("Optimizing...");
+    InvalidateRect(hwnd, nullptr, TRUE);
+
+    std::thread([hwnd,
+                 working_case = std::move(working_case),
+                 mode,
+                 remote_host,
+                 remote_port]() mutable {
+        OptimizationResult result;
+        try {
+            const auto service =
+                post2::core::make_trajectory_service(mode, remote_host, remote_port);
+            result = post2::core::optimize_case(&working_case, *service);
+        } catch (const std::exception& ex) {
+            result.error = ex.what();
+        } catch (...) {
+            result.error = "unknown optimization error";
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(g_optimization_mutex);
+            g_pending_optimization =
+                PendingOptimizationResult{std::move(working_case), std::move(result)};
+        }
+        PostMessageW(hwnd, kOptimizationFinishedMessage, 0, 0);
+    }).detach();
+}
+
+void finish_optimization(HWND hwnd)
+{
+    std::optional<PendingOptimizationResult> pending;
+    {
+        std::lock_guard<std::mutex> lock(g_optimization_mutex);
+        pending = std::move(g_pending_optimization);
+        g_pending_optimization.reset();
+        g_optimization_running = false;
+    }
+    if (!pending.has_value()) {
+        return;
+    }
+
+    g_case = std::move(pending->case_config);
+    const OptimizationResult& result = pending->result;
     set_outputs_text(format_optimization_outputs(result));
     if (!result.ok) {
         g_result = result.final_simulation;
-        g_status = "optimize failed: " + result.error;
+        g_status = "optimize failed: " +
+            (result.error.empty() ? std::string("optimization failed") : result.error);
         sync_scene_window(hwnd);
         InvalidateRect(hwnd, nullptr, TRUE);
-        MessageBoxW(hwnd, widen(result.error).c_str(), L"Optimize failed", MB_ICONERROR);
+        MessageBoxW(
+            hwnd,
+            widen(result.error.empty() ? "Optimization failed." : result.error).c_str(),
+            L"Optimize failed",
+            MB_ICONERROR);
         return;
     }
 
@@ -2251,6 +2349,54 @@ void save_case_config(HWND hwnd)
     MessageBoxW(hwnd, widen("Wrote " + path).c_str(), L"POST2 Lite", MB_ICONINFORMATION);
 }
 
+bool choose_ksp_vehicle_site_file(HWND parent, std::string* path)
+{
+    std::array<wchar_t, MAX_PATH> buffer = {};
+    wcscpy_s(buffer.data(), buffer.size(), L"vehicle_launchsite.json");
+
+    OPENFILENAMEW ofn = {};
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = parent;
+    ofn.lpstrFilter = L"KSP vehicle/site JSON (*.json)\0*.json\0All files (*.*)\0*.*\0";
+    ofn.lpstrFile = buffer.data();
+    ofn.nMaxFile = static_cast<DWORD>(buffer.size());
+    ofn.lpstrDefExt = L"json";
+    ofn.Flags = OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR | OFN_FILEMUSTEXIST;
+
+    if (!GetOpenFileNameW(&ofn)) {
+        return false;
+    }
+
+    *path = narrow(buffer.data());
+    return true;
+}
+
+void import_ksp_vehicle_site(HWND hwnd)
+{
+    ensure_case_initialized();
+    std::string path;
+    if (!choose_ksp_vehicle_site_file(hwnd, &path)) {
+        return;
+    }
+
+    post2::core::KspVehicleSiteImport imported;
+    std::string error;
+    if (!post2::core::load_ksp_vehicle_site_import_file(
+            path,
+            g_case.vehicle.aero,
+            &imported,
+            &error)) {
+        MessageBoxW(hwnd, widen(error).c_str(), L"KSP import failed", MB_ICONERROR);
+        return;
+    }
+
+    post2::core::apply_ksp_vehicle_site_import(&g_case, imported);
+    sync_legacy_from_case();
+    refresh_phase_list();
+    load_selected_phase_controls();
+    run_simulation(hwnd);
+}
+
 void create_case_json_controls(CaseJsonDialogState* state)
 {
     HFONT font = static_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
@@ -2458,13 +2604,95 @@ void add_metric_items(HWND combo)
     }
 }
 
+bool is_stage_dry_mass_variable(const std::string& path)
+{
+    return path.find("vehicle.stages[") == 0 &&
+        path.rfind(".dry_mass_kg") != std::string::npos;
+}
+
+std::string default_continuation_variable_path(
+    const post2::core::OptimizationConfig& optimization)
+{
+    std::string first_enabled;
+    std::string last_stage_dry_mass;
+    for (const auto& variable : optimization.variables) {
+        if (!variable.enabled) {
+            continue;
+        }
+        if (first_enabled.empty()) {
+            first_enabled = variable.path;
+        }
+        std::string lower = variable.path;
+        std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char ch) {
+            return static_cast<char>(std::tolower(ch));
+        });
+        if (lower.find("payload") != std::string::npos) {
+            return variable.path;
+        }
+        if (is_stage_dry_mass_variable(variable.path)) {
+            last_stage_dry_mass = variable.path;
+        }
+    }
+    return last_stage_dry_mass.empty() ? first_enabled : last_stage_dry_mass;
+}
+
+bool optimization_has_enabled_variable(
+    const post2::core::OptimizationConfig& optimization,
+    const std::string& path)
+{
+    return std::any_of(
+        optimization.variables.begin(),
+        optimization.variables.end(),
+        [&](const post2::core::OptimizationVariableConfig& variable) {
+            return variable.enabled && variable.path == path;
+        });
+}
+
+void add_continuation_variable_items(
+    HWND combo,
+    const post2::core::OptimizationConfig& optimization)
+{
+    for (const auto& variable : optimization.variables) {
+        if (variable.enabled) {
+            const std::wstring wide = widen(variable.path);
+            add_combo_item(combo, wide.c_str());
+        }
+    }
+}
+
+void sync_optimization_continuation_controls(OptimizationSettingsDialogState* state)
+{
+    if (!state || !state->continuation_strategy_combo) {
+        return;
+    }
+    const std::string strategy = get_combo_text(state->continuation_strategy_combo);
+    const bool enabled = strategy != "single";
+    const bool multistart = strategy == "continuation+multistart";
+    EnableWindow(state->continuation_variable_combo, enabled);
+    EnableWindow(state->continuation_direction_combo, enabled);
+    EnableWindow(state->continuation_steps_edit, enabled);
+    EnableWindow(state->continuation_starts_edit, enabled && multistart);
+}
+
 void refresh_optimization_target_list(OptimizationSettingsDialogState* state)
 {
     SendMessageW(state->target_list, LB_RESETCONTENT, 0, 0);
     for (std::size_t i = 0; i < state->config.targets.size(); ++i) {
         const auto& target = state->config.targets[i];
         std::ostringstream label;
-        label << i + 1 << ": " << target.metric << " " << target.mode;
+        label << i + 1 << ": " << target.metric << " ";
+        if (target.mode == "equal" || target.mode == "equality") {
+            label << "== " << target.value;
+        } else if (target.mode == "range") {
+            label << "[" << target.min_value << ", " << target.max_value << "]";
+        } else if (target.mode == "upper" || target.mode == "upper_bound") {
+            label << "<= " << target.max_value;
+        } else if (target.mode == "lower" || target.mode == "lower_bound") {
+            label << ">= " << target.min_value;
+        } else {
+            label << target.mode;
+        }
+        label << " | w " << target.weight;
         SendMessageW(state->target_list, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(widen(label.str()).c_str()));
     }
     if (state->config.targets.empty()) {
@@ -2478,59 +2706,241 @@ void refresh_optimization_target_list(OptimizationSettingsDialogState* state)
     }
 }
 
-void load_selected_optimization_target(OptimizationSettingsDialogState* state)
+post2::core::OptimizationTargetConfig default_optimization_target_config()
 {
-    const bool has_target =
-        state->selected_target_index >= 0 &&
-        static_cast<std::size_t>(state->selected_target_index) < state->config.targets.size();
-    EnableWindow(state->target_metric_combo, has_target);
-    EnableWindow(state->target_mode_combo, has_target);
-    EnableWindow(state->target_value_edit, has_target);
-    EnableWindow(state->target_min_edit, has_target);
-    EnableWindow(state->target_max_edit, has_target);
-    EnableWindow(state->target_weight_edit, has_target);
-    if (!has_target) {
-        SendMessageW(state->target_metric_combo, CB_SETCURSEL, 0, 0);
-        SendMessageW(state->target_mode_combo, CB_SETCURSEL, 0, 0);
-        SetWindowTextW(state->target_value_edit, L"");
-        SetWindowTextW(state->target_min_edit, L"");
-        SetWindowTextW(state->target_max_edit, L"");
-        SetWindowTextW(state->target_weight_edit, L"");
-        return;
-    }
-
-    const auto& target = state->config.targets[static_cast<std::size_t>(state->selected_target_index)];
-    select_combo_text(state->target_metric_combo, target.metric);
-    select_combo_text(state->target_mode_combo, target.mode);
-    SetWindowTextW(state->target_value_edit, format_double(target.value).c_str());
-    SetWindowTextW(state->target_min_edit, format_double(target.min_value).c_str());
-    SetWindowTextW(state->target_max_edit, format_double(target.max_value).c_str());
-    SetWindowTextW(state->target_weight_edit, format_double(target.weight).c_str());
+    return {"terminal_altitude_m", "equal", 200000.0, 0.0, 0.0, 1.0};
 }
 
-bool save_selected_optimization_target(OptimizationSettingsDialogState* state)
+void sync_optimization_target_editor_mode_controls(OptimizationTargetEditorDialogState* state)
 {
-    if (state->selected_target_index < 0 ||
-        static_cast<std::size_t>(state->selected_target_index) >= state->config.targets.size()) {
+    if (!state) {
+        return;
+    }
+    const std::string mode = get_combo_text(state->mode_combo);
+    EnableWindow(state->value_edit, mode == "equal" || mode == "equality");
+    EnableWindow(state->min_edit, mode == "range" || mode == "lower" || mode == "lower_bound");
+    EnableWindow(state->max_edit, mode == "range" || mode == "upper" || mode == "upper_bound");
+    EnableWindow(state->weight_edit, TRUE);
+}
+
+bool read_optional_double_field(
+    HWND dialog,
+    HWND edit,
+    const wchar_t* label,
+    const wchar_t* title,
+    double* value)
+{
+    const std::wstring text = get_window_text(edit);
+    if (text.empty()) {
         return true;
     }
+    return read_double_field(dialog, edit, label, title, value);
+}
 
-    auto target = state->config.targets[static_cast<std::size_t>(state->selected_target_index)];
-    target.metric = get_combo_text(state->target_metric_combo);
-    target.mode = get_combo_text(state->target_mode_combo);
-    if (!read_double_field(state->hwnd, state->target_value_edit, L"Target value", L"Optimize", &target.value) ||
-        !read_double_field(state->hwnd, state->target_min_edit, L"Target min", L"Optimize", &target.min_value) ||
-        !read_double_field(state->hwnd, state->target_max_edit, L"Target max", L"Optimize", &target.max_value) ||
-        !read_double_field(state->hwnd, state->target_weight_edit, L"Target weight", L"Optimize", &target.weight)) {
+void create_optimization_target_editor_controls(OptimizationTargetEditorDialogState* state)
+{
+    HFONT font = static_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
+
+    create_label(state->hwnd, 18, 22, 70, L"Metric", font);
+    state->metric_combo = create_combo(state->hwnd, kOptTargetMetricCombo, 104, 18, 290, font);
+    add_metric_items(state->metric_combo);
+    select_combo_text(state->metric_combo, state->target.metric);
+
+    create_label(state->hwnd, 18, 62, 70, L"Mode", font);
+    state->mode_combo = create_combo(state->hwnd, kOptTargetModeCombo, 104, 58, 150, font);
+    add_combo_item(state->mode_combo, L"equal");
+    add_combo_item(state->mode_combo, L"range");
+    add_combo_item(state->mode_combo, L"upper");
+    add_combo_item(state->mode_combo, L"lower");
+    select_combo_text(state->mode_combo, state->target.mode);
+
+    create_label(state->hwnd, 18, 104, 70, L"Value", font);
+    state->value_edit = create_edit(
+        state->hwnd, kOptTargetValueEdit, 104, 100, 130, format_double(state->target.value), font);
+
+    create_label(state->hwnd, 18, 144, 70, L"Min", font);
+    state->min_edit = create_edit(
+        state->hwnd, kOptTargetMinEdit, 104, 140, 130, format_double(state->target.min_value), font);
+    create_label(state->hwnd, 252, 144, 42, L"Max", font);
+    state->max_edit = create_edit(
+        state->hwnd, kOptTargetMaxEdit, 306, 140, 130, format_double(state->target.max_value), font);
+
+    create_label(state->hwnd, 18, 184, 70, L"Weight", font);
+    state->weight_edit = create_edit(
+        state->hwnd, kOptTargetWeightEdit, 104, 180, 130, format_double(state->target.weight), font);
+
+    HWND ok_button = create_button(state->hwnd, IDOK, 270, 230, 76, 28, L"OK", font);
+    SendMessageW(ok_button, BM_SETSTYLE, BS_DEFPUSHBUTTON, TRUE);
+    create_button(state->hwnd, IDCANCEL, 360, 230, 76, 28, L"Cancel", font);
+
+    sync_optimization_target_editor_mode_controls(state);
+}
+
+bool accept_optimization_target_editor_dialog(OptimizationTargetEditorDialogState* state)
+{
+    auto target = state->target;
+    target.metric = get_combo_text(state->metric_combo);
+    target.mode = get_combo_text(state->mode_combo);
+    if (!read_double_field(state->hwnd, state->weight_edit, L"Target weight", L"Target", &target.weight)) {
+        return false;
+    }
+    if (target.mode == "equal" || target.mode == "equality") {
+        if (!read_double_field(state->hwnd, state->value_edit, L"Target value", L"Target", &target.value) ||
+            !read_optional_double_field(state->hwnd, state->min_edit, L"Target min", L"Target", &target.min_value) ||
+            !read_optional_double_field(state->hwnd, state->max_edit, L"Target max", L"Target", &target.max_value)) {
+            return false;
+        }
+    } else if (target.mode == "range") {
+        if (!read_optional_double_field(state->hwnd, state->value_edit, L"Target value", L"Target", &target.value) ||
+            !read_double_field(state->hwnd, state->min_edit, L"Target min", L"Target", &target.min_value) ||
+            !read_double_field(state->hwnd, state->max_edit, L"Target max", L"Target", &target.max_value)) {
+            return false;
+        }
+    } else if (target.mode == "upper" || target.mode == "upper_bound") {
+        if (!read_optional_double_field(state->hwnd, state->value_edit, L"Target value", L"Target", &target.value) ||
+            !read_optional_double_field(state->hwnd, state->min_edit, L"Target min", L"Target", &target.min_value) ||
+            !read_double_field(state->hwnd, state->max_edit, L"Target max", L"Target", &target.max_value)) {
+            return false;
+        }
+    } else if (target.mode == "lower" || target.mode == "lower_bound") {
+        if (!read_optional_double_field(state->hwnd, state->value_edit, L"Target value", L"Target", &target.value) ||
+            !read_double_field(state->hwnd, state->min_edit, L"Target min", L"Target", &target.min_value) ||
+            !read_optional_double_field(state->hwnd, state->max_edit, L"Target max", L"Target", &target.max_value)) {
+            return false;
+        }
+    } else {
+        MessageBoxW(state->hwnd, L"Unsupported target mode.", L"Target", MB_ICONWARNING);
+        SetFocus(state->mode_combo);
         return false;
     }
     if (target.mode == "range" && target.min_value > target.max_value) {
-        MessageBoxW(state->hwnd, L"Target min cannot exceed max.", L"Optimize", MB_ICONWARNING);
-        SetFocus(state->target_min_edit);
+        MessageBoxW(state->hwnd, L"Target min cannot exceed max.", L"Target", MB_ICONWARNING);
+        SetFocus(state->min_edit);
         return false;
     }
-    state->config.targets[static_cast<std::size_t>(state->selected_target_index)] = std::move(target);
+
+    state->target = std::move(target);
+    state->accepted = true;
+    DestroyWindow(state->hwnd);
     return true;
+}
+
+LRESULT CALLBACK optimization_target_editor_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam)
+{
+    auto* state = reinterpret_cast<OptimizationTargetEditorDialogState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+
+    switch (message) {
+    case WM_NCCREATE: {
+        auto* create = reinterpret_cast<CREATESTRUCTW*>(lparam);
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(create->lpCreateParams));
+        return TRUE;
+    }
+    case WM_CREATE:
+        state = reinterpret_cast<OptimizationTargetEditorDialogState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+        state->hwnd = hwnd;
+        create_optimization_target_editor_controls(state);
+        return 0;
+    case WM_COMMAND:
+        switch (LOWORD(wparam)) {
+        case IDOK:
+            accept_optimization_target_editor_dialog(state);
+            return 0;
+        case IDCANCEL:
+            DestroyWindow(hwnd);
+            return 0;
+        case kOptTargetModeCombo:
+            if (HIWORD(wparam) == CBN_SELCHANGE) {
+                sync_optimization_target_editor_mode_controls(state);
+                return 0;
+            }
+            break;
+        default:
+            break;
+        }
+        break;
+    case WM_CLOSE:
+        DestroyWindow(hwnd);
+        return 0;
+    default:
+        break;
+    }
+
+    return DefWindowProcW(hwnd, message, wparam, lparam);
+}
+
+void register_optimization_target_editor_class()
+{
+    static bool registered = false;
+    if (registered) {
+        return;
+    }
+
+    WNDCLASSW wc = {};
+    wc.lpfnWndProc = optimization_target_editor_proc;
+    wc.hInstance = g_instance;
+    wc.lpszClassName = L"Post2OptimizationTargetEditorWindow";
+    wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+    wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+    RegisterClassW(&wc);
+    registered = true;
+}
+
+bool show_optimization_target_editor_dialog(
+    HWND parent,
+    post2::core::OptimizationTargetConfig* target,
+    const wchar_t* title)
+{
+    register_optimization_target_editor_class();
+
+    OptimizationTargetEditorDialogState state;
+    state.target = *target;
+
+    RECT parent_rect;
+    GetWindowRect(parent, &parent_rect);
+    constexpr int dialog_width = 480;
+    constexpr int dialog_height = 320;
+    const int x = parent_rect.left + ((parent_rect.right - parent_rect.left) - dialog_width) / 2;
+    const int y = parent_rect.top + ((parent_rect.bottom - parent_rect.top) - dialog_height) / 2;
+
+    HWND dialog = CreateWindowExW(
+        WS_EX_DLGMODALFRAME | WS_EX_WINDOWEDGE,
+        L"Post2OptimizationTargetEditorWindow",
+        title,
+        WS_CAPTION | WS_SYSMENU | WS_POPUP,
+        x,
+        y,
+        dialog_width,
+        dialog_height,
+        parent,
+        nullptr,
+        g_instance,
+        &state);
+
+    if (!dialog) {
+        MessageBoxW(parent, L"Failed to create target editor.", L"POST2 Lite", MB_ICONERROR);
+        return false;
+    }
+
+    EnableWindow(parent, FALSE);
+    ShowWindow(dialog, SW_SHOW);
+    SetFocus(state.metric_combo);
+
+    MSG msg;
+    while (IsWindow(dialog) && GetMessageW(&msg, nullptr, 0, 0) > 0) {
+        if (!IsDialogMessageW(dialog, &msg)) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+    }
+
+    EnableWindow(parent, TRUE);
+    SetForegroundWindow(parent);
+
+    if (state.accepted) {
+        *target = std::move(state.target);
+    }
+
+    return state.accepted;
 }
 
 void create_optimization_settings_controls(OptimizationSettingsDialogState* state)
@@ -2567,67 +2977,109 @@ void create_optimization_settings_controls(OptimizationSettingsDialogState* stat
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | LBS_NOTIFY | WS_VSCROLL,
         18,
         128,
-        252,
-        190,
+        676,
+        210,
         state->hwnd,
         control_id(kOptTargetList),
         g_instance,
         nullptr);
     set_child_font(state->target_list, font);
-    create_button(state->hwnd, kOptTargetAdd, 18, 330, 70, 26, L"Add", font);
-    create_button(state->hwnd, kOptTargetDelete, 102, 330, 70, 26, L"Delete", font);
+    create_button(state->hwnd, kOptTargetAdd, 18, 350, 70, 26, L"Add", font);
+    create_button(state->hwnd, kOptTargetEdit, 102, 350, 70, 26, L"Edit", font);
+    create_button(state->hwnd, kOptTargetDelete, 186, 350, 70, 26, L"Delete", font);
 
-    create_label(state->hwnd, 298, 132, 60, L"Metric", font);
-    state->target_metric_combo = create_combo(state->hwnd, kOptTargetMetricCombo, 384, 128, 204, font);
-    add_metric_items(state->target_metric_combo);
-    create_label(state->hwnd, 298, 170, 60, L"Mode", font);
-    state->target_mode_combo = create_combo(state->hwnd, kOptTargetModeCombo, 384, 166, 120, font);
-    add_combo_item(state->target_mode_combo, L"equal");
-    add_combo_item(state->target_mode_combo, L"range");
-    add_combo_item(state->target_mode_combo, L"upper");
-    add_combo_item(state->target_mode_combo, L"lower");
-
-    create_label(state->hwnd, 298, 208, 60, L"Value", font);
-    state->target_value_edit = create_edit(state->hwnd, kOptTargetValueEdit, 384, 204, 120, L"", font);
-    create_label(state->hwnd, 298, 246, 60, L"Min", font);
-    state->target_min_edit = create_edit(state->hwnd, kOptTargetMinEdit, 384, 242, 120, L"", font);
-    create_label(state->hwnd, 526, 246, 42, L"Max", font);
-    state->target_max_edit = create_edit(state->hwnd, kOptTargetMaxEdit, 574, 242, 120, L"", font);
-    create_label(state->hwnd, 298, 284, 60, L"Weight", font);
-    state->target_weight_edit = create_edit(state->hwnd, kOptTargetWeightEdit, 384, 280, 120, L"", font);
-
-    state->objective_enabled = create_checkbox(state->hwnd, kOptObjectiveEnabled, 18, 388, 120, L"Objective", font);
+    state->objective_enabled = create_checkbox(state->hwnd, kOptObjectiveEnabled, 18, 400, 120, L"Objective", font);
     Button_SetCheck(state->objective_enabled, state->config.objective.enabled ? BST_CHECKED : BST_UNCHECKED);
-    create_label(state->hwnd, 158, 390, 54, L"Metric", font);
-    state->objective_metric_combo = create_combo(state->hwnd, kOptObjectiveMetricCombo, 218, 386, 190, font);
+    create_label(state->hwnd, 158, 402, 54, L"Metric", font);
+    state->objective_metric_combo = create_combo(state->hwnd, kOptObjectiveMetricCombo, 218, 398, 190, font);
     add_metric_items(state->objective_metric_combo);
     select_combo_text(state->objective_metric_combo, state->config.objective.metric);
-    create_label(state->hwnd, 430, 390, 70, L"Direction", font);
-    state->objective_direction_combo = create_combo(state->hwnd, kOptObjectiveDirectionCombo, 506, 386, 120, font);
+    create_label(state->hwnd, 430, 402, 70, L"Direction", font);
+    state->objective_direction_combo = create_combo(state->hwnd, kOptObjectiveDirectionCombo, 506, 398, 120, font);
     add_combo_item(state->objective_direction_combo, L"minimize");
     add_combo_item(state->objective_direction_combo, L"maximize");
     select_combo_text(state->objective_direction_combo, state->config.objective.direction);
-    create_label(state->hwnd, 18, 430, 54, L"Weight", font);
+    create_label(state->hwnd, 18, 442, 54, L"Weight", font);
     state->objective_weight_edit = create_edit(
-        state->hwnd, kOptObjectiveWeightEdit, 82, 426, 120, format_double(state->config.objective.weight), font);
+        state->hwnd, kOptObjectiveWeightEdit, 82, 438, 120, format_double(state->config.objective.weight), font);
 
-    HWND ok_button = create_button(state->hwnd, IDOK, 542, 478, 76, 28, L"OK", font);
+    create_label(state->hwnd, 18, 482, 60, L"Strategy", font);
+    state->continuation_strategy_combo =
+        create_combo(state->hwnd, kOptContinuationStrategyCombo, 82, 478, 166, font);
+    add_combo_item(state->continuation_strategy_combo, L"single");
+    add_combo_item(state->continuation_strategy_combo, L"continuation");
+    add_combo_item(state->continuation_strategy_combo, L"continuation+multistart");
+    select_combo_text(
+        state->continuation_strategy_combo,
+        state->config.continuation.enabled
+            ? (state->config.continuation.multistart_enabled
+                ? "continuation+multistart"
+                : "continuation")
+            : "single");
+
+    create_label(state->hwnd, 270, 482, 58, L"Variable", font);
+    state->continuation_variable_combo =
+        create_combo(state->hwnd, kOptContinuationVariableCombo, 334, 478, 360, font);
+    add_continuation_variable_items(state->continuation_variable_combo, state->config);
+    const std::string continuation_variable =
+        state->config.continuation.variable_path.empty()
+            ? default_continuation_variable_path(state->config)
+            : state->config.continuation.variable_path;
+    select_combo_text(state->continuation_variable_combo, continuation_variable);
+
+    create_label(state->hwnd, 18, 522, 60, L"Direction", font);
+    state->continuation_direction_combo =
+        create_combo(state->hwnd, kOptContinuationDirectionCombo, 82, 518, 120, font);
+    add_combo_item(state->continuation_direction_combo, L"increase");
+    add_combo_item(state->continuation_direction_combo, L"decrease");
+    select_combo_text(state->continuation_direction_combo, state->config.continuation.direction);
+
+    create_label(state->hwnd, 230, 522, 44, L"Steps", font);
+    state->continuation_steps_edit = create_edit(
+        state->hwnd,
+        kOptContinuationStepsEdit,
+        284,
+        518,
+        70,
+        widen(std::to_string(state->config.continuation.steps)),
+        font);
+    create_label(state->hwnd, 384, 522, 44, L"Starts", font);
+    state->continuation_starts_edit = create_edit(
+        state->hwnd,
+        kOptContinuationStartsEdit,
+        442,
+        518,
+        70,
+        widen(std::to_string(state->config.continuation.multistart_count)),
+        font);
+
+    HWND ok_button = create_button(state->hwnd, IDOK, 542, 560, 76, 28, L"OK", font);
     SendMessageW(ok_button, BM_SETSTYLE, BS_DEFPUSHBUTTON, TRUE);
-    create_button(state->hwnd, IDCANCEL, 632, 478, 76, 28, L"Cancel", font);
+    create_button(state->hwnd, IDCANCEL, 632, 560, 76, 28, L"Cancel", font);
 
     refresh_optimization_target_list(state);
-    load_selected_optimization_target(state);
+    sync_optimization_continuation_controls(state);
 }
 
 bool accept_optimization_settings_dialog(OptimizationSettingsDialogState* state)
 {
-    if (!save_selected_optimization_target(state)) {
-        return false;
-    }
-
     state->config.mode = get_combo_text(state->mode_combo);
     state->config.optimizer = get_combo_text(state->optimizer_combo);
+    const std::string continuation_strategy =
+        get_combo_text(state->continuation_strategy_combo);
     if (!read_int_field(state->hwnd, state->max_iterations_edit, L"Max iterations", L"Optimize", &state->config.max_iterations) ||
+        !read_int_field(
+            state->hwnd,
+            state->continuation_steps_edit,
+            L"Continuation steps",
+            L"Optimize",
+            &state->config.continuation.steps) ||
+        !read_int_field(
+            state->hwnd,
+            state->continuation_starts_edit,
+            L"Continuation starts",
+            L"Optimize",
+            &state->config.continuation.multistart_count) ||
         !read_double_field(state->hwnd, state->tolerance_edit, L"Tolerance", L"Optimize", &state->config.tolerance) ||
         !read_double_field(
             state->hwnd,
@@ -2646,12 +3098,32 @@ bool accept_optimization_settings_dialog(OptimizationSettingsDialogState* state)
     state->config.objective.enabled = Button_GetCheck(state->objective_enabled) == BST_CHECKED;
     state->config.objective.metric = get_combo_text(state->objective_metric_combo);
     state->config.objective.direction = get_combo_text(state->objective_direction_combo);
+    state->config.continuation.enabled = continuation_strategy != "single";
+    state->config.continuation.multistart_enabled =
+        continuation_strategy == "continuation+multistart";
+    state->config.continuation.variable_path =
+        get_combo_text(state->continuation_variable_combo);
+    state->config.continuation.direction =
+        get_combo_text(state->continuation_direction_combo);
     if (state->config.max_iterations <= 0) {
         MessageBoxW(state->hwnd, L"Max iterations must be positive.", L"Optimize", MB_ICONWARNING);
         return false;
     }
+    if (state->config.continuation.steps <= 0 ||
+        state->config.continuation.multistart_count <= 0) {
+        MessageBoxW(state->hwnd, L"Continuation steps and starts must be positive.", L"Optimize", MB_ICONWARNING);
+        return false;
+    }
     if (state->config.tolerance <= 0.0 || state->config.initial_step_fraction <= 0.0) {
         MessageBoxW(state->hwnd, L"Tolerance and step fraction must be positive.", L"Optimize", MB_ICONWARNING);
+        return false;
+    }
+    if (state->config.continuation.enabled &&
+        !optimization_has_enabled_variable(
+            state->config,
+            state->config.continuation.variable_path)) {
+        MessageBoxW(state->hwnd, L"Continuation variable must be an enabled optimization variable.", L"Optimize", MB_ICONWARNING);
+        SetFocus(state->continuation_variable_combo);
         return false;
     }
 
@@ -2685,27 +3157,44 @@ LRESULT CALLBACK optimization_settings_proc(HWND hwnd, UINT message, WPARAM wpar
             return 0;
         case kOptTargetList:
             if (HIWORD(wparam) == LBN_SELCHANGE) {
-                const int previous = state->selected_target_index;
                 const LRESULT selected = SendMessageW(state->target_list, LB_GETCURSEL, 0, 0);
                 if (selected != LB_ERR) {
-                    if (!save_selected_optimization_target(state)) {
-                        SendMessageW(state->target_list, LB_SETCURSEL, static_cast<WPARAM>(previous), 0);
-                        return 0;
-                    }
                     state->selected_target_index = static_cast<int>(selected);
-                    load_selected_optimization_target(state);
+                }
+                return 0;
+            }
+            if (HIWORD(wparam) == LBN_DBLCLK) {
+                const LRESULT selected = SendMessageW(state->target_list, LB_GETCURSEL, 0, 0);
+                if (selected != LB_ERR) {
+                    state->selected_target_index = static_cast<int>(selected);
+                    auto target = state->config.targets[static_cast<std::size_t>(state->selected_target_index)];
+                    if (show_optimization_target_editor_dialog(state->hwnd, &target, L"Edit Target")) {
+                        state->config.targets[static_cast<std::size_t>(state->selected_target_index)] = std::move(target);
+                        refresh_optimization_target_list(state);
+                    }
                 }
                 return 0;
             }
             break;
         case kOptTargetAdd:
-            if (!save_selected_optimization_target(state)) {
-                return 0;
+        {
+            auto target = default_optimization_target_config();
+            if (show_optimization_target_editor_dialog(state->hwnd, &target, L"Add Target")) {
+                state->config.targets.push_back(std::move(target));
+                state->selected_target_index = static_cast<int>(state->config.targets.size() - 1);
+                refresh_optimization_target_list(state);
             }
-            state->config.targets.push_back({"terminal_altitude_m", "equal", 200000.0, 0.0, 0.0, 1.0});
-            state->selected_target_index = static_cast<int>(state->config.targets.size() - 1);
-            refresh_optimization_target_list(state);
-            load_selected_optimization_target(state);
+            return 0;
+        }
+        case kOptTargetEdit:
+            if (state->selected_target_index >= 0 &&
+                static_cast<std::size_t>(state->selected_target_index) < state->config.targets.size()) {
+                auto target = state->config.targets[static_cast<std::size_t>(state->selected_target_index)];
+                if (show_optimization_target_editor_dialog(state->hwnd, &target, L"Edit Target")) {
+                    state->config.targets[static_cast<std::size_t>(state->selected_target_index)] = std::move(target);
+                    refresh_optimization_target_list(state);
+                }
+            }
             return 0;
         case kOptTargetDelete:
             if (state->selected_target_index >= 0 &&
@@ -2715,9 +3204,14 @@ LRESULT CALLBACK optimization_settings_proc(HWND hwnd, UINT message, WPARAM wpar
                     state->selected_target_index = static_cast<int>(state->config.targets.size()) - 1;
                 }
                 refresh_optimization_target_list(state);
-                load_selected_optimization_target(state);
             }
             return 0;
+        case kOptContinuationStrategyCombo:
+            if (HIWORD(wparam) == CBN_SELCHANGE) {
+                sync_optimization_continuation_controls(state);
+                return 0;
+            }
+            break;
         default:
             break;
         }
@@ -2760,7 +3254,7 @@ bool show_optimization_settings_dialog(HWND parent)
     RECT parent_rect;
     GetWindowRect(parent, &parent_rect);
     constexpr int dialog_width = 740;
-    constexpr int dialog_height = 560;
+    constexpr int dialog_height = 630;
     const int x = parent_rect.left + ((parent_rect.right - parent_rect.left) - dialog_width) / 2;
     const int y = parent_rect.top + ((parent_rect.bottom - parent_rect.top) - dialog_height) / 2;
 
@@ -4099,6 +4593,7 @@ HMENU create_main_menu()
     AppendMenuW(launch_menu, MF_STRING, kMenuLaunchSettings, L"Launch site...");
 
     AppendMenuW(vehicle_menu, MF_STRING, kMenuVehicleEdit, L"Edit vehicle...");
+    AppendMenuW(vehicle_menu, MF_STRING, kMenuVehicleImportKsp, L"Import KSP vehicle/site JSON...");
 
     AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(file_menu), L"File");
     AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(mode_menu), L"Mode");
@@ -4199,7 +4694,7 @@ LRESULT CALLBACK scene_window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARA
             g_result.state_log,
             g_case.earth_rotation_at_epoch_rad,
             g_case.earth_rotation_rad_per_s,
-            should_render_earth_fixed_view());
+            false);
         EndPaint(hwnd, &ps);
         return 0;
     }
@@ -4360,7 +4855,40 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
     case WM_ERASEBKGND:
         return 1;
 
+    case kOptimizationFinishedMessage:
+        finish_optimization(hwnd);
+        return 0;
+
     case WM_COMMAND:
+        if (optimization_is_running()) {
+            switch (LOWORD(wparam)) {
+            case kViewButton3D:        switch_view(hwnd, ViewKind::Scene3D); return 0;
+            case kViewButtonProfile:   switch_view(hwnd, ViewKind::Profile2D); return 0;
+            case kViewButtonQ:         switch_view(hwnd, ViewKind::DynamicPressure); return 0;
+            case kViewButtonThrottle:  switch_view(hwnd, ViewKind::Throttle); return 0;
+            case kViewButtonSpeed:     switch_view(hwnd, ViewKind::Speed); return 0;
+            case kViewButtonMass:      switch_view(hwnd, ViewKind::Mass); return 0;
+            case kMenuOptimizationExecute:
+                execute_optimization(hwnd);
+                return 0;
+            case kMenuExportCsv:
+                export_current(hwnd, false);
+                return 0;
+            case kMenuExportSvg:
+                export_current(hwnd, true);
+                return 0;
+            case kMenuExit:
+                DestroyWindow(hwnd);
+                return 0;
+            default:
+                MessageBoxW(
+                    hwnd,
+                    L"Optimization is running. Wait for it to finish before editing the case.",
+                    L"POST2 Lite",
+                    MB_ICONINFORMATION);
+                return 0;
+            }
+        }
         switch (LOWORD(wparam)) {
         case kViewButton3D:        switch_view(hwnd, ViewKind::Scene3D); return 0;
         case kViewButtonProfile:   switch_view(hwnd, ViewKind::Profile2D); return 0;
@@ -4466,6 +4994,9 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
                 run_simulation(hwnd);
             }
             return 0;
+        case kMenuVehicleImportKsp:
+            import_ksp_vehicle_site(hwnd);
+            return 0;
         case kMenuExit:
             DestroyWindow(hwnd);
             return 0;
@@ -4544,7 +5075,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show_command)
         WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
         CW_USEDEFAULT,
         CW_USEDEFAULT,
-        1100,
+        1400,
         820,
         nullptr,
         nullptr,

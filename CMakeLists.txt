@@ -11,6 +11,7 @@ add_library(post2_core STATIC
     src/core/control_models.cpp
     src/core/io.cpp
     src/core/json.cpp
+    src/core/ksp_vehicle_site_import.cpp
     src/core/finite_difference.cpp
     src/core/nlp_evaluator.cpp
     src/core/nlp_problem.cpp
@@ -108,4 +109,24 @@ if(BUILD_TESTING)
     )
     target_link_libraries(post2_optimization_components_test PRIVATE post2_core)
     add_test(NAME post2_optimization_components_test COMMAND post2_optimization_components_test)
+
+    add_executable(post2_ksp_vehicle_site_import_test
+        tests/ksp_vehicle_site_import_test.cpp
+    )
+    target_link_libraries(post2_ksp_vehicle_site_import_test PRIVATE post2_core)
+    add_test(
+        NAME post2_ksp_vehicle_site_import_test
+        COMMAND post2_ksp_vehicle_site_import_test
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/ksp_vehicle_site_v1_wrapped.json
+    )
+
+    add_test(
+        NAME post2_shell_ksp_vehicle_site_import_smoke
+        COMMAND post2_shell simulate
+            --import-ksp-vehicle-site ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/ksp_vehicle_site_v1_wrapped.json
+            --duration 1
+            --dt 1
+            --no-csv
+            --no-svg
+    )
 endif()

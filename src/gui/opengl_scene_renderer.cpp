@@ -123,6 +123,19 @@ Vec3 position_for_display(
         earth_rotation_rad_per_s);
 }
 
+double takeoff_time_s_for_display(const post2::core::StateLog& state_log)
+{
+    if (state_log.empty()) {
+        return 0.0;
+    }
+    for (const auto& entry : state_log.entries()) {
+        if (!entry.hold_down_clamp_active) {
+            return entry.time_s;
+        }
+    }
+    return state_log.front().time_s;
+}
+
 struct EarthTexture {
     int width = 0;
     int height = 0;
@@ -666,7 +679,13 @@ void OpenGLSceneRenderer::draw_scene(
         glEnable(GL_DEPTH_TEST);
         glDepthFunc(GL_LEQUAL);
         glDepthMask(GL_TRUE);
-        draw_earth();
+        const double earth_rotation_for_display_rad = earth_fixed_view
+            ? 0.0
+            : post2::core::frames::earth_rotation_angle_rad(
+                earth_rotation_at_epoch_rad,
+                earth_rotation_rad_per_s,
+                takeoff_time_s_for_display(state_log));
+        draw_earth(earth_rotation_for_display_rad);
         draw_axis();
         draw_trajectory(state_log, earth_rotation_at_epoch_rad, earth_rotation_rad_per_s, earth_fixed_view);
         draw_markers(state_log, earth_rotation_at_epoch_rad, earth_rotation_rad_per_s, earth_fixed_view);
@@ -675,8 +694,11 @@ void OpenGLSceneRenderer::draw_scene(
     draw_border();
 }
 
-void OpenGLSceneRenderer::draw_earth() const
+void OpenGLSceneRenderer::draw_earth(double rotation_rad) const
 {
+    glPushMatrix();
+    glRotated(rotation_rad / kDegToRad, 0.0, 0.0, 1.0);
+
     glDepthMask(GL_TRUE);
     glColor3f(1.0f, 1.0f, 1.0f);
     if (texture_loaded_ && earth_texture_ != 0) {
@@ -693,6 +715,7 @@ void OpenGLSceneRenderer::draw_earth() const
         emit_earth_sphere_mesh();
     }
     glDisable(GL_TEXTURE_2D);
+    glPopMatrix();
 }
 
 void OpenGLSceneRenderer::draw_axis() const

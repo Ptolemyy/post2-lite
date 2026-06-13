@@ -373,6 +373,14 @@ JsonValue optimization_to_json(const OptimizationConfig& optimization)
             {"direction", string(optimization.objective.direction)},
             {"weight", number(optimization.objective.weight)},
         })},
+        {"continuation", JsonValue::object({
+            {"enabled", boolean(optimization.continuation.enabled)},
+            {"variable_path", string(optimization.continuation.variable_path)},
+            {"direction", string(optimization.continuation.direction)},
+            {"steps", number(static_cast<double>(optimization.continuation.steps))},
+            {"multistart_enabled", boolean(optimization.continuation.multistart_enabled)},
+            {"multistart_count", number(static_cast<double>(optimization.continuation.multistart_count))},
+        })},
     });
 }
 
@@ -1043,6 +1051,24 @@ bool parse_optimization(const JsonValue& value, OptimizationConfig* target, std:
             !read_number(*objective, "weight", &parsed.objective.weight, error)) {
             return false;
         }
+    }
+
+    if (const JsonValue* continuation = find_member(value, "continuation")) {
+        if (!continuation->is_object()) {
+            return fail(error, "optimization.continuation must be an object");
+        }
+        double steps = static_cast<double>(parsed.continuation.steps);
+        double multistart_count = static_cast<double>(parsed.continuation.multistart_count);
+        if (!read_bool(*continuation, "enabled", &parsed.continuation.enabled, error) ||
+            !read_string(*continuation, "variable_path", &parsed.continuation.variable_path, error) ||
+            !read_string(*continuation, "direction", &parsed.continuation.direction, error) ||
+            !read_number(*continuation, "steps", &steps, error) ||
+            !read_bool(*continuation, "multistart_enabled", &parsed.continuation.multistart_enabled, error) ||
+            !read_number(*continuation, "multistart_count", &multistart_count, error)) {
+            return false;
+        }
+        parsed.continuation.steps = static_cast<int>(steps);
+        parsed.continuation.multistart_count = static_cast<int>(multistart_count);
     }
 
     *target = std::move(parsed);

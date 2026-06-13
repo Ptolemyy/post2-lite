@@ -512,6 +512,32 @@ int main()
         return 1;
     }
 
+    post2::core::CaseConfig impact_case;
+    impact_case.step_s = 10.0;
+    impact_case.vehicle = post2::vehicle::default_vehicle_config();
+    impact_case.phases.clear();
+    post2::core::PhaseConfig impact_phase;
+    impact_phase.name = "impact";
+    impact_phase.duration_s = 50.0;
+    impact_phase.inherit_initial_state = false;
+    impact_phase.initial_state_eci = post2::core::State{
+        {post2::core::kEarthRadiusM + 1000.0, 0.0, 0.0},
+        {-100.0, 0.0, 0.0},
+    };
+    impact_phase.force_models.thrust = false;
+    impact_phase.force_models.normal_force = false;
+    impact_phase.force_models.gravity_model.type = "point_mass";
+    impact_case.phases.push_back(impact_phase);
+    const auto impact_result = service.simulate(impact_case);
+    if (impact_result.ok ||
+        impact_result.error != "vehicle impacted Earth during propagation" ||
+        impact_result.state_log.empty() ||
+        impact_result.state_log.back().altitude_m < -50.0 ||
+        impact_result.state_log.back().time_s >= impact_phase.duration_s) {
+        std::cerr << "impact event did not terminate propagation at the surface\n";
+        return 1;
+    }
+
     post2::core::CaseConfig drop_case;
     drop_case.step_s = 0.5;
     drop_case.vehicle = post2::vehicle::default_vehicle_config();

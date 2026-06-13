@@ -88,7 +88,7 @@ private:
         double earth_rotation_at_epoch_rad,
         double earth_rotation_rad_per_s,
         bool earth_fixed_view);
-    void draw_earth() const;
+    void draw_earth(double rotation_rad) const;
     void draw_axis() const;
     void draw_trajectory(
         const post2::core::StateLog& state_log,

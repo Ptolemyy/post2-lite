@@ -7,7 +7,6 @@
 #include "post2/vehicle/vehicle.hpp"
 
 #include <algorithm>
-#include <cctype>
 #include <cmath>
 #include <limits>
 #include <sstream>
@@ -349,41 +348,6 @@ bool resolve_path(CaseConfig* config, const std::string& path, ResolvedPath* tar
     return fail(error, "unsupported variable path: " + path);
 }
 
-bool parse_vehicle_stage_dry_mass_path(const std::string& path, std::size_t* stage_index)
-{
-    std::string_view text(path);
-    if (!consume_identifier(&text, "vehicle") || !consume_dot(&text)) {
-        return false;
-    }
-    if (!consume_indexed(&text, "stages", stage_index) || !consume_dot(&text)) {
-        return false;
-    }
-    return text == "dry_mass_kg";
-}
-
-bool contains_payload_name(std::string name)
-{
-    std::transform(name.begin(), name.end(), name.begin(), [](unsigned char ch) {
-        return static_cast<char>(std::tolower(ch));
-    });
-    return name.find("payload") != std::string::npos;
-}
-
-bool metric_value(
-    const std::vector<OptimizationMetricValue>& metrics,
-    const std::string& metric,
-    double* value)
-{
-    const auto it = std::find_if(metrics.begin(), metrics.end(), [&](const OptimizationMetricValue& candidate) {
-        return candidate.metric == metric;
-    });
-    if (it == metrics.end()) {
-        return false;
-    }
-    *value = it->value;
-    return true;
-}
-
 bool parse_phase_metric(
     const std::string& metric,
     std::size_t* phase_index,
@@ -506,14 +470,6 @@ double clamp(double value, double min_value, double max_value)
 // the initial Hessian H = I meaningful across heterogeneous units
 // (kg vs sec vs deg) and gives a uniform finite-difference step.
 
-double to_z_scalar(double x, double lb, double ub)
-{
-    if (ub <= lb) {
-        return 0.0;
-    }
-    return 2.0 * (x - lb) / (ub - lb) - 1.0;
-}
-
 // ---- fmincon: constraint extraction ------------------------------------
 
 struct EqConstraint {
@@ -569,25 +525,6 @@ ConstraintSet constraint_set_from_problem(const NlpProblem& problem)
 }
 
 // ---- fmincon: point evaluation -----------------------------------------
-
-struct VariableSpec {
-    std::string path;
-    double x0 = 0.0;
-    double lb = 0.0;
-    double ub = 0.0;
-    int phase_index = -1;
-};
-
-std::vector<VariableSpec> variable_specs_from_problem(const NlpProblem& problem)
-{
-    std::vector<VariableSpec> vars;
-    vars.reserve(problem.variables.size());
-    for (const auto& variable : problem.variables) {
-        vars.push_back({variable.path, variable.initial_value, variable.lower, variable.upper,
-            variable.phase_index});
-    }
-    return vars;
-}
 
 struct PointEval {
     bool ok = false;
@@ -1948,6 +1885,25 @@ bool validate_optimization_config(const OptimizationConfig& optimization, std::s
     if (optimization.mode == "target" && optimization.targets.empty()) {
         return fail(error, "target mode requires at least one target");
     }
+    if (optimization.continuation.enabled) {
+        if (optimization.continuation.variable_path.empty()) {
+            return fail(error, "continuation variable path is required");
+        }
+        if (optimization.continuation.direction != "increase" &&
+            optimization.continuation.direction != "decrease") {
+            return fail(error, "unsupported continuation direction: " +
+                optimization.continuation.direction);
+        }
+        if (optimization.continuation.steps <= 0) {
+            return fail(error, "continuation steps must be positive");
+        }
+        if (optimization.continuation.multistart_count <= 0) {
+            return fail(error, "continuation multistart count must be positive");
+        }
+        if (optimization.targets.empty()) {
+            return fail(error, "continuation requires at least one target");
+        }
+    }
     return true;
 }
 
@@ -1986,6 +1942,458 @@ OptimizerOptions optimizer_options_from_config(
     options.finite_difference.parallel =
         optimization.parallel_fd && service.supports_parallel_simulation();
     return options;
+}
+
+const OptimizationVariableConfig* find_enabled_variable(
+    const OptimizationConfig& optimization,
+    const std::string& path)
+{
+    const auto found = std::find_if(
+        optimization.variables.begin(),
+        optimization.variables.end(),
+        [&](const OptimizationVariableConfig& variable) {
+            return variable.path == path && variable.enabled;
+        });
+    return found == optimization.variables.end() ? nullptr : &(*found);
+}
+
+bool has_enabled_variables(const OptimizationConfig& optimization)
+{
+    return std::any_of(
+        optimization.variables.begin(),
+        optimization.variables.end(),
+        [](const OptimizationVariableConfig& variable) {
+            return variable.enabled;
+        });
+}
+
+OptimizationConfig target_only_continuation_config(
+    const OptimizationConfig& optimization,
+    const std::string& fixed_variable_path)
+{
+    OptimizationConfig target_only = optimization;
+    target_only.mode = "target";
+    target_only.objective.enabled = false;
+    target_only.continuation.enabled = false;
+    target_only.variables.clear();
+    for (const auto& variable : optimization.variables) {
+        if (variable.path != fixed_variable_path) {
+            target_only.variables.push_back(variable);
+        }
+    }
+    return target_only;
+}
+
+void add_requested_metrics(
+    OptimizationResult* result,
+    const OptimizationConfig& optimization,
+    const CaseConfig& config)
+{
+    if (!result || !result->final_simulation.ok) {
+        return;
+    }
+    auto add_metric = [&](const std::string& metric) {
+        const auto existing = std::find_if(
+            result->final_metrics.begin(),
+            result->final_metrics.end(),
+            [&](const OptimizationMetricValue& candidate) {
+                return candidate.metric == metric;
+            });
+        if (existing != result->final_metrics.end()) {
+            return;
+        }
+        double value = 0.0;
+        if (!evaluate_trajectory_metric(result->final_simulation.state_log, config, metric, &value)) {
+            return;
+        }
+        const auto payload_it = std::find_if(
+            result->final_metrics.begin(),
+            result->final_metrics.end(),
+            [](const OptimizationMetricValue& candidate) {
+                return candidate.metric == "payload_mass_kg";
+            });
+        result->final_metrics.insert(payload_it, {metric, value});
+    };
+    for (const auto& target : optimization.targets) {
+        add_metric(target.metric);
+    }
+    if (optimization.objective.enabled) {
+        add_metric(optimization.objective.metric);
+    }
+}
+
+void add_variable_changes(
+    const CaseConfig& before,
+    const CaseConfig& after,
+    const OptimizationConfig& optimization,
+    std::vector<OptimizationVariableChange>* changes)
+{
+    if (!changes) {
+        return;
+    }
+    changes->clear();
+    for (const auto& variable : optimization.variables) {
+        if (!variable.enabled) {
+            continue;
+        }
+        double old_value = 0.0;
+        double new_value = 0.0;
+        std::string error;
+        if (!read_optimization_variable(before, variable.path, &old_value, &error) ||
+            !read_optimization_variable(after, variable.path, &new_value, &error)) {
+            continue;
+        }
+        changes->push_back({variable.path, old_value, new_value});
+    }
+}
+
+OptimizationResult evaluate_fixed_target_case(
+    CaseConfig* config,
+    ITrajectoryService& service,
+    const OptimizationRunOptions& run_options)
+{
+    OptimizationResult result;
+    if (!config) {
+        result.error = "case config is null";
+        return result;
+    }
+
+    NlpProblem problem;
+    if (!build_nlp_problem_from_case(*config, &problem, &result.error)) {
+        return result;
+    }
+    OptimizerOptions optimizer_options =
+        optimizer_options_from_config(config->optimization, run_options, service);
+    NlpEvaluator evaluator(*config, service);
+    const auto eval = evaluator.evaluate(problem, {});
+    result.evaluations = evaluator.evaluations();
+    result.final_simulation = eval.simulation;
+    result.final_metrics = eval.metrics;
+    result.best_score = eval.objective + eval.max_violation;
+    result.max_constraint_violation = eval.max_violation;
+    result.l1_constraint_violation = eval.l1_violation;
+    result.found_feasible = eval.ok &&
+        eval.max_violation <= optimizer_options.constraint_tolerance;
+    result.ok = result.found_feasible;
+    append_limited_message(&result.messages,
+        "continuation: fixed target evaluation with no free variables");
+    if (!eval.ok) {
+        result.error = eval.error.empty() ? "fixed target evaluation failed" : eval.error;
+    } else if (!result.found_feasible) {
+        std::ostringstream msg;
+        msg << "infeasible: best max_violation = " << eval.max_violation
+            << " > tolerance = " << optimizer_options.constraint_tolerance;
+        result.error = msg.str();
+        append_limited_message(&result.messages, result.error);
+    }
+    return result;
+}
+
+struct ContinuationCandidate {
+    bool valid = false;
+    double value = 0.0;
+    CaseConfig case_config;
+    OptimizationResult result;
+};
+
+bool farther_along_continuation(double candidate, double best, bool increasing)
+{
+    return increasing ? candidate > best : candidate < best;
+}
+
+double signed_distance_to_target(double value, double target, bool increasing)
+{
+    return increasing ? target - value : value - target;
+}
+
+OptimizationResult optimize_case_with_continuation(
+    CaseConfig* config,
+    ITrajectoryService& service,
+    const OptimizationConfig& optimization,
+    OptimizationRunOptions options)
+{
+    OptimizationResult result;
+    const CaseConfig initial_case = *config;
+    const auto& continuation = optimization.continuation;
+    append_limited_message(&result.messages, "continuation: enabled");
+
+    const OptimizationVariableConfig* fixed_variable =
+        find_enabled_variable(optimization, continuation.variable_path);
+    if (!fixed_variable) {
+        result.error = "continuation variable must be an enabled optimization variable: " +
+            continuation.variable_path;
+        return result;
+    }
+    if (fixed_variable->min_value >= fixed_variable->max_value) {
+        result.error = "continuation variable bounds must have min < max: " +
+            fixed_variable->path;
+        return result;
+    }
+    if (optimization.targets.empty()) {
+        result.error = "continuation requires at least one target";
+        return result;
+    }
+
+    std::string read_error;
+    double current_value = 0.0;
+    if (!read_optimization_variable(*config, fixed_variable->path, &current_value, &read_error)) {
+        result.error = read_error;
+        return result;
+    }
+
+    const bool increasing = continuation.direction != "decrease";
+    const double lower = fixed_variable->min_value;
+    const double upper = fixed_variable->max_value;
+    const double range = upper - lower;
+    const double start_value = clamp(current_value, lower, upper);
+    const double target_value = increasing ? upper : lower;
+    const int steps = std::max(1, continuation.steps);
+    const int start_count = continuation.multistart_enabled
+        ? std::max(1, continuation.multistart_count)
+        : 1;
+
+    OptimizationRunOptions local_options = options;
+    local_options.run_final_simulation = true;
+
+    auto absorb_result = [&](const OptimizationResult& step_result) {
+        result.iterations += step_result.iterations;
+        result.evaluations += step_result.evaluations;
+        for (const auto& message : step_result.messages) {
+            append_limited_message(&result.messages, message);
+        }
+    };
+
+    ContinuationCandidate best_feasible;
+    bool have_feasible = false;
+    ContinuationCandidate best_infeasible;
+    bool have_infeasible = false;
+
+    auto consider_candidate = [&](const ContinuationCandidate& candidate) {
+        if (!candidate.valid) {
+            return;
+        }
+        if (candidate.result.found_feasible) {
+            if (!have_feasible ||
+                farther_along_continuation(candidate.value, best_feasible.value, increasing) ||
+                (std::abs(candidate.value - best_feasible.value) <=
+                    std::max(1.0e-9, range * 1.0e-9) &&
+                    candidate.result.max_constraint_violation <
+                        best_feasible.result.max_constraint_violation)) {
+                best_feasible = candidate;
+                have_feasible = true;
+            }
+        } else if (!have_infeasible ||
+            candidate.result.max_constraint_violation <
+                best_infeasible.result.max_constraint_violation) {
+            best_infeasible = candidate;
+            have_infeasible = true;
+        }
+    };
+
+    auto solve_fixed_value = [&](const CaseConfig& base_case,
+                                 double value,
+                                 const char* label) {
+        ContinuationCandidate candidate;
+        candidate.value = clamp(value, lower, upper);
+        candidate.case_config = base_case;
+
+        std::string write_error;
+        if (!write_optimization_variable(
+                &candidate.case_config,
+                fixed_variable->path,
+                candidate.value,
+                &write_error)) {
+            candidate.result.error = write_error;
+            return candidate;
+        }
+        candidate.case_config.optimization =
+            target_only_continuation_config(optimization, fixed_variable->path);
+
+        {
+            std::ostringstream msg;
+            msg << "continuation: " << label << ' ' << fixed_variable->path
+                << " = " << candidate.value;
+            append_limited_message(&result.messages, msg.str());
+        }
+
+        if (has_enabled_variables(candidate.case_config.optimization)) {
+            candidate.result =
+                optimize_case(&candidate.case_config, service, local_options);
+        } else {
+            candidate.result =
+                evaluate_fixed_target_case(&candidate.case_config, service, local_options);
+        }
+        absorb_result(candidate.result);
+        candidate.valid = candidate.result.final_simulation.ok ||
+            candidate.result.found_feasible ||
+            !candidate.result.variable_changes.empty();
+        return candidate;
+    };
+
+    auto run_sweep_from_seed = [&](double seed_value) {
+        seed_value = clamp(seed_value, lower, upper);
+        {
+            std::ostringstream msg;
+            msg << "continuation: trying seed " << seed_value;
+            append_limited_message(&result.messages, msg.str());
+        }
+
+        ContinuationCandidate seed =
+            solve_fixed_value(initial_case, seed_value, "seed");
+        consider_candidate(seed);
+
+        if (!seed.result.found_feasible) {
+            bool found_retreat = false;
+            const double retreat_target = start_value;
+            for (int i = 1; i <= steps; ++i) {
+                const double alpha = static_cast<double>(i) / static_cast<double>(steps);
+                const double try_value = seed_value + (retreat_target - seed_value) * alpha;
+                if (std::abs(try_value - seed.value) <= std::max(1.0e-9, range * 1.0e-9)) {
+                    continue;
+                }
+                ContinuationCandidate retreat =
+                    solve_fixed_value(initial_case, try_value, "retreat");
+                consider_candidate(retreat);
+                if (retreat.result.found_feasible) {
+                    seed = retreat;
+                    found_retreat = true;
+                    break;
+                }
+            }
+            if (!found_retreat && !seed.result.found_feasible) {
+                append_limited_message(&result.messages,
+                    "continuation: seed did not find a feasible target-only trajectory");
+                return;
+            }
+        }
+
+        CaseConfig warm_case = seed.case_config;
+        double accepted_value = seed.value;
+        double step = std::max(range / static_cast<double>(steps), range * 1.0e-4);
+        const double min_step = std::max(1.0e-9, range * 1.0e-4);
+        const int max_attempts = steps * 3 + 8;
+        for (int attempt = 0; attempt < max_attempts; ++attempt) {
+            const double remaining =
+                signed_distance_to_target(accepted_value, target_value, increasing);
+            if (remaining <= min_step) {
+                break;
+            }
+            const double step_now = std::min(step, remaining);
+            const double try_value = increasing
+                ? accepted_value + step_now
+                : accepted_value - step_now;
+            if (std::abs(try_value - accepted_value) <= min_step * 0.25) {
+                break;
+            }
+
+            ContinuationCandidate trial =
+                solve_fixed_value(warm_case, try_value, "step");
+            consider_candidate(trial);
+            if (trial.result.found_feasible) {
+                warm_case = trial.case_config;
+                accepted_value = trial.value;
+                step = std::min(step * 1.5,
+                    std::max(min_step, signed_distance_to_target(
+                        accepted_value, target_value, increasing)));
+                std::ostringstream msg;
+                msg << "continuation: accepted " << fixed_variable->path
+                    << " = " << accepted_value;
+                append_limited_message(&result.messages, msg.str());
+            } else {
+                step *= 0.5;
+                std::ostringstream msg;
+                msg << "continuation: rejected " << fixed_variable->path
+                    << " = " << try_value << ", reducing step";
+                append_limited_message(&result.messages, msg.str());
+                if (step <= min_step) {
+                    break;
+                }
+            }
+        }
+
+        std::ostringstream msg;
+        msg << "continuation: settled seed at " << fixed_variable->path
+            << " = " << accepted_value;
+        append_limited_message(&result.messages, msg.str());
+    };
+
+    std::vector<double> seeds;
+    auto add_seed = [&](double seed) {
+        seed = clamp(seed, lower, upper);
+        const double duplicate_tolerance = std::max(1.0e-9, range * 1.0e-6);
+        for (double existing : seeds) {
+            if (std::abs(existing - seed) <= duplicate_tolerance) {
+                return;
+            }
+        }
+        seeds.push_back(seed);
+    };
+    add_seed(start_value);
+    if (continuation.multistart_enabled && start_count > 1) {
+        for (int i = 1; i < start_count; ++i) {
+            const double alpha = static_cast<double>(i) /
+                static_cast<double>(start_count - 1);
+            add_seed(start_value + (target_value - start_value) * alpha);
+        }
+    }
+
+    {
+        std::ostringstream msg;
+        msg << "continuation: " << seeds.size()
+            << (continuation.multistart_enabled ? " multistart seeds" : " seed");
+        append_limited_message(&result.messages, msg.str());
+    }
+    for (double seed : seeds) {
+        run_sweep_from_seed(seed);
+    }
+
+    ContinuationCandidate final_candidate;
+    if (have_feasible) {
+        final_candidate = best_feasible;
+        result.found_feasible = true;
+        result.ok = true;
+    } else if (have_infeasible) {
+        final_candidate = best_infeasible;
+        result.found_feasible = false;
+        result.ok = false;
+        result.error =
+            "continuation failed to find a feasible target-only warm start";
+    } else {
+        result.error = "continuation failed before producing a valid candidate";
+        return result;
+    }
+
+    *config = final_candidate.case_config;
+    config->optimization = optimization;
+    result.best_score = final_candidate.result.best_score;
+    result.max_constraint_violation =
+        final_candidate.result.max_constraint_violation;
+    result.l1_constraint_violation =
+        final_candidate.result.l1_constraint_violation;
+
+    add_variable_changes(initial_case, *config, optimization, &result.variable_changes);
+
+    if (options.run_final_simulation) {
+        result.final_simulation = service.simulate(*config);
+        ++result.evaluations;
+        if (!result.final_simulation.ok) {
+            result.error = "final simulation failed: " + result.final_simulation.error;
+            result.ok = false;
+            return result;
+        }
+        result.final_metrics = evaluate_trajectory_metrics(
+            result.final_simulation.state_log,
+            *config);
+    } else {
+        result.final_simulation = final_candidate.result.final_simulation;
+        result.final_metrics = final_candidate.result.final_metrics;
+    }
+    add_requested_metrics(&result, optimization, *config);
+
+    if (!result.found_feasible && result.error.empty()) {
+        result.error = "continuation: no feasible candidate";
+    }
+    return result;
 }
 
 } // namespace
@@ -2052,6 +2460,9 @@ OptimizationResult optimize_case(
     if (!validate_optimization_config(optimization, &result.error)) {
         return result;
     }
+    if (optimization.continuation.enabled) {
+        return optimize_case_with_continuation(config, service, optimization, options);
+    }
 
     NlpProblem problem;
     if (!build_nlp_problem_from_case(*config, &problem, &result.error)) {
@@ -2116,35 +2527,7 @@ OptimizationResult optimize_case(
         result.final_simulation = optimizer_result.final_eval.simulation;
         result.final_metrics = optimizer_result.final_eval.metrics;
     }
-
-    auto add_requested_metric = [&](const std::string& metric) {
-        const auto existing = std::find_if(
-            result.final_metrics.begin(),
-            result.final_metrics.end(),
-            [&](const OptimizationMetricValue& candidate) {
-                return candidate.metric == metric;
-            });
-        if (existing != result.final_metrics.end()) {
-            return;
-        }
-        double value = 0.0;
-        if (!evaluate_trajectory_metric(result.final_simulation.state_log, *config, metric, &value)) {
-            return;
-        }
-        const auto payload_it = std::find_if(
-            result.final_metrics.begin(),
-            result.final_metrics.end(),
-            [](const OptimizationMetricValue& candidate) {
-                return candidate.metric == "payload_mass_kg";
-            });
-        result.final_metrics.insert(payload_it, {metric, value});
-    };
-    for (const auto& target : optimization.targets) {
-        add_requested_metric(target.metric);
-    }
-    if (optimization.objective.enabled) {
-        add_requested_metric(optimization.objective.metric);
-    }
+    add_requested_metrics(&result, optimization, *config);
 
     if (!optimizer_result.found_feasible) {
         std::ostringstream msg;
@@ -2174,7 +2557,6 @@ OptimizerResult AugmentedLagrangianBfgsOptimizer::solve(
         return result;
     }
 
-    const std::vector<VariableSpec> vars = variable_specs_from_problem(problem);
     const ConstraintSet cs = constraint_set_from_problem(problem);
     const NlpPoint point = make_initial_nlp_point(problem);
     const std::vector<double>& z = point.z;
@@ -2201,276 +2583,22 @@ OptimizerResult AugmentedLagrangianBfgsOptimizer::solve(
         }
     };
 
-    const bool maximize_payload =
-        problem.optimization.mode == "optimize" &&
-        problem.optimization.objective.enabled &&
-        problem.optimization.objective.metric == "payload_mass_kg" &&
-        problem.optimization.objective.direction == "maximize";
-    int payload_var_index = -1;
-    if (maximize_payload && !problem.base_case.vehicle.stages.empty()) {
-        std::size_t payload_stage_index = problem.base_case.vehicle.stages.size() - 1;
-        for (std::size_t i = 0; i < problem.base_case.vehicle.stages.size(); ++i) {
-            if (contains_payload_name(problem.base_case.vehicle.stages[i].name)) {
-                payload_stage_index = i;
-                break;
-            }
-        }
-        for (std::size_t i = 0; i < vars.size(); ++i) {
-            std::size_t stage_index = 0;
-            if (parse_vehicle_stage_dry_mass_path(vars[i].path, &stage_index) &&
-                stage_index == payload_stage_index) {
-                payload_var_index = static_cast<int>(i);
-                break;
-            }
-        }
+    LocalOptimResult run = run_local_augmented_lagrangian(
+        z,
+        problem,
+        evaluator,
+        cs,
+        options,
+        total_iteration_budget,
+        tol,
+        &result.messages);
+    result.iterations += run.iterations;
+    if (!run.error.empty()) {
+        append_limited_message(&result.messages, run.error);
     }
+    consider_run(std::move(run));
 
-    int continuation_evaluations = 0;
-    if (payload_var_index >= 0 && vars.size() > 1) {
-        const VariableSpec& payload_var = vars[static_cast<std::size_t>(payload_var_index)];
-
-        NlpProblem inner_problem = problem;
-        inner_problem.variables.clear();
-        std::vector<double> inner_z;
-        inner_problem.variables.reserve(problem.variables.size() - 1);
-        inner_z.reserve(problem.variables.size() - 1);
-        for (std::size_t i = 0; i < problem.variables.size(); ++i) {
-            if (static_cast<int>(i) == payload_var_index) {
-                continue;
-            }
-            inner_problem.variables.push_back(problem.variables[i]);
-            inner_z.push_back(z[i]);
-        }
-
-        constexpr int sweep_steps = 8;
-        constexpr int bisect_iters = 6;
-        const int per_step_iters = std::max(40, total_iteration_budget / 4);
-        const double payload_range = payload_var.ub - payload_var.lb;
-
-        auto build_full_z = [&](const std::vector<double>& inner_z_solved,
-                                double payload_x) -> std::vector<double> {
-            std::vector<double> full(vars.size());
-            std::size_t k = 0;
-            for (std::size_t i = 0; i < vars.size(); ++i) {
-                if (static_cast<int>(i) == payload_var_index) {
-                    full[i] = to_z_scalar(payload_x, vars[i].lb, vars[i].ub);
-                } else {
-                    full[i] = inner_z_solved[k++];
-                }
-            }
-            return full;
-        };
-
-        CaseConfig sweep_working = evaluator.base_case();
-        auto solve_at_payload = [&](double x_payload,
-                                    const std::vector<double>& warm_inner_z) -> LocalOptimResult {
-            write_optimization_variable(&sweep_working, payload_var.path, x_payload, nullptr);
-            NlpEvaluator inner_evaluator = evaluator.clone_with_base_case(sweep_working);
-            LocalOptimResult r = run_local_augmented_lagrangian(
-                warm_inner_z,
-                inner_problem,
-                inner_evaluator,
-                cs,
-                options,
-                per_step_iters,
-                tol,
-                &result.messages);
-            continuation_evaluations += inner_evaluator.evaluations();
-            result.iterations += r.iterations;
-            if (!r.error.empty()) {
-                append_limited_message(&result.messages, r.error);
-            }
-            return r;
-        };
-
-        auto run_continuation_from = [&](double payload_start,
-                                         const std::vector<double>& start_inner_z) {
-            double payload_cur = clamp(payload_start, payload_var.lb, payload_var.ub);
-
-            std::ostringstream msg;
-            msg << "continuation: trying start payload " << payload_cur << " kg";
-            append_limited_message(&result.messages, msg.str());
-
-            LocalOptimResult init = solve_at_payload(payload_cur, start_inner_z);
-            bool have_feasible_start = init.found_feasible;
-            std::vector<double> inner_z_best = init.report_z.empty() ? start_inner_z : init.report_z;
-            PointEval pe_best = init.report_pe;
-            double payload_best = payload_cur;
-
-            if (!have_feasible_start) {
-                for (int i = 1; i <= sweep_steps && !have_feasible_start; ++i) {
-                    const double down = payload_cur -
-                        static_cast<double>(i) * (payload_cur - payload_var.lb)
-                            / static_cast<double>(sweep_steps);
-                    const double try_payload = std::max(payload_var.lb, down);
-                    LocalOptimResult r = solve_at_payload(try_payload, inner_z_best);
-                    if (r.found_feasible) {
-                        payload_best = try_payload;
-                        inner_z_best = r.report_z;
-                        pe_best = r.report_pe;
-                        have_feasible_start = true;
-                        std::ostringstream found_msg;
-                        found_msg << "continuation: feasibility found at payload = "
-                            << try_payload << " kg";
-                        append_limited_message(&result.messages, found_msg.str());
-                    }
-                }
-            } else {
-                std::ostringstream feasible_msg;
-                feasible_msg << "continuation: start payload " << payload_cur << " kg is feasible";
-                append_limited_message(&result.messages, feasible_msg.str());
-            }
-
-            if (have_feasible_start) {
-                const double step_floor = std::max(1.0, payload_range * 0.001);
-                double step = std::max(step_floor,
-                    payload_range / static_cast<double>(sweep_steps));
-                const int max_attempts = sweep_steps + bisect_iters + 8;
-                const int iter_cap = total_iteration_budget * 3;
-                const int start_iterations = result.iterations;
-                for (int attempt = 0; attempt < max_attempts && step > step_floor; ++attempt) {
-                    if (payload_best >= payload_var.ub - step_floor) {
-                        break;
-                    }
-                    if (result.iterations - start_iterations > iter_cap) {
-                        append_limited_message(&result.messages,
-                            "continuation: iteration budget exhausted, stopping sweep");
-                        break;
-                    }
-                    const double try_payload = std::min(payload_var.ub, payload_best + step);
-                    if (try_payload <= payload_best + step_floor * 0.25) {
-                        break;
-                    }
-                    LocalOptimResult r = solve_at_payload(try_payload, inner_z_best);
-                    if (r.found_feasible) {
-                        payload_best = try_payload;
-                        inner_z_best = r.report_z;
-                        pe_best = r.report_pe;
-                        std::ostringstream feasible_msg;
-                        feasible_msg << "continuation: payload " << try_payload
-                            << " kg feasible (step grew to " << (step * 1.5) << ")";
-                        append_limited_message(&result.messages, feasible_msg.str());
-                        step = std::min(step * 1.5, payload_var.ub - payload_best);
-                    } else {
-                        std::ostringstream infeasible_msg;
-                        infeasible_msg << "continuation: payload " << try_payload
-                            << " kg infeasible (step halved to " << (step * 0.5) << ")";
-                        append_limited_message(&result.messages, infeasible_msg.str());
-                        step *= 0.5;
-                    }
-                }
-                {
-                    std::ostringstream settled_msg;
-                    settled_msg << "continuation: settled at payload = " << payload_best << " kg";
-                    append_limited_message(&result.messages, settled_msg.str());
-                }
-
-                LocalOptimResult continuation_run;
-                continuation_run.found_feasible = true;
-                continuation_run.report_pe = pe_best;
-                continuation_run.report_z = build_full_z(inner_z_best, payload_best);
-                continuation_run.iterations = result.iterations;
-                consider_run(std::move(continuation_run));
-            } else {
-                LocalOptimResult continuation_run;
-                continuation_run.found_feasible = false;
-                continuation_run.report_pe = init.report_pe;
-                continuation_run.report_z = build_full_z(inner_z_best, payload_cur);
-                continuation_run.iterations = result.iterations;
-                consider_run(std::move(continuation_run));
-            }
-        };
-
-        std::vector<double> continuation_starts;
-        auto add_continuation_start = [&](double x_start) {
-            x_start = clamp(x_start, payload_var.lb, payload_var.ub);
-            const double duplicate_tolerance = std::max(1.0, payload_range * 1.0e-4);
-            for (const double existing : continuation_starts) {
-                if (std::abs(existing - x_start) <= duplicate_tolerance) {
-                    return;
-                }
-            }
-            continuation_starts.push_back(x_start);
-        };
-
-        const double payload_cur = clamp(vars[static_cast<std::size_t>(payload_var_index)].x0,
-            payload_var.lb, payload_var.ub);
-        add_continuation_start(payload_cur);
-        if (payload_range > 1.0) {
-            add_continuation_start(payload_var.lb + 0.75 * payload_range);
-        }
-
-        for (const double start_payload : continuation_starts) {
-            run_continuation_from(start_payload, inner_z);
-        }
-
-        std::vector<std::vector<double>> direct_starts;
-        auto add_direct_start = [&](std::vector<double> candidate) {
-            for (const auto& existing : direct_starts) {
-                double max_diff = 0.0;
-                for (std::size_t i = 0; i < candidate.size(); ++i) {
-                    max_diff = std::max(max_diff, std::abs(candidate[i] - existing[i]));
-                }
-                if (max_diff < 1.0e-9) {
-                    return;
-                }
-            }
-            direct_starts.push_back(std::move(candidate));
-        };
-        auto add_payload_direct_seed = [&](double x_seed) {
-            std::vector<double> seeded = z;
-            x_seed = clamp(x_seed, payload_var.lb, payload_var.ub);
-            seeded[static_cast<std::size_t>(payload_var_index)] =
-                to_z_scalar(x_seed, payload_var.lb, payload_var.ub);
-            add_direct_start(std::move(seeded));
-        };
-
-        add_direct_start(z);
-        add_payload_direct_seed(payload_var.lb + 0.65 * payload_range);
-        add_payload_direct_seed(payload_var.lb + 0.75 * payload_range);
-        if (payload_range > 1000.0) {
-            add_payload_direct_seed(payload_var.ub - 1000.0);
-        }
-        add_payload_direct_seed(payload_var.ub);
-        {
-            std::ostringstream msg;
-            msg << "direct payload multistart: " << direct_starts.size() << " starts";
-            append_limited_message(&result.messages, msg.str());
-        }
-        for (const auto& start : direct_starts) {
-            LocalOptimResult run = run_local_augmented_lagrangian(
-                start,
-                problem,
-                evaluator,
-                cs,
-                options,
-                total_iteration_budget,
-                tol,
-                &result.messages);
-            result.iterations += run.iterations;
-            if (!run.error.empty()) {
-                append_limited_message(&result.messages, run.error);
-            }
-            consider_run(std::move(run));
-        }
-    } else {
-        LocalOptimResult run = run_local_augmented_lagrangian(
-            z,
-            problem,
-            evaluator,
-            cs,
-            options,
-            total_iteration_budget,
-            tol,
-            &result.messages);
-        result.iterations += run.iterations;
-        if (!run.error.empty()) {
-            append_limited_message(&result.messages, run.error);
-        }
-        consider_run(std::move(run));
-    }
-
-    result.evaluations = evaluator.evaluations() + continuation_evaluations;
+    result.evaluations = evaluator.evaluations();
     if (!have_report) {
         result.error = "fmincon: no valid candidate";
         return result;

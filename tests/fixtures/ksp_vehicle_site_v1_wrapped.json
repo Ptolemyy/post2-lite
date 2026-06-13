@@ -1,0 +1,370 @@
+{
+  "entries": [
+    "metadata",
+    {
+      "entries": [
+        "format",
+        "post2_lite_kos_vehicle_export_v1"
+      ],
+      "$type": "kOS.Safe.Encapsulation.Lexicon"
+    },
+    "launch_site",
+    {
+      "entries": [
+        "latitude_deg",
+        12.5,
+        "longitude_deg",
+        -45.25,
+        "altitude_m",
+        123.0,
+        "body_radius_m",
+        6378137.0,
+        "body_mu_m3ps2",
+        398600441800000.0,
+        "body_rotation_period_s",
+        86164.0905
+      ],
+      "$type": "kOS.Safe.Encapsulation.Lexicon"
+    },
+    "vehicle",
+    {
+      "entries": [
+        "ship_name",
+        "Wrapped Import Test"
+      ],
+      "$type": "kOS.Safe.Encapsulation.Lexicon"
+    },
+    "staging_hints",
+    {
+      "entries": [
+        "launch_engine_ksp_stage",
+        6,
+        "upper_engine_ksp_stage",
+        3,
+        "booster_separation_ksp_stage",
+        4
+      ],
+      "$type": "kOS.Safe.Encapsulation.Lexicon"
+    },
+    "parts",
+    {
+      "items": [
+        {
+          "entries": [
+            "index",
+            0,
+            "title",
+            "Payload bus",
+            "name",
+            "payloadBus",
+            "ksp_stage",
+            -1,
+            "decoupled_in",
+            -1,
+            "physical_stage",
+            1,
+            "physical_stage_name",
+            "upper_stack",
+            "dry_mass_kg",
+            50.0,
+            "wet_mass_kg",
+            60.0,
+            "mass_kg",
+            60.0,
+            "has_engine",
+            false,
+            "module_names",
+            {
+              "items": [
+                "ModuleCommand"
+              ],
+              "$type": "kOS.Safe.Encapsulation.ListValue"
+            },
+            "resources",
+            {
+              "items": [
+                {
+                  "entries": [
+                    "name",
+                    "XenonGas",
+                    "amount_kg",
+                    10.0,
+                    "capacity_kg",
+                    10.0
+                  ],
+                  "$type": "kOS.Safe.Encapsulation.Lexicon"
+                }
+              ],
+              "$type": "kOS.Safe.Encapsulation.ListValue"
+            }
+          ],
+          "$type": "kOS.Safe.Encapsulation.Lexicon"
+        },
+        {
+          "entries": [
+            "index",
+            1,
+            "title",
+            "Payload ion engine",
+            "name",
+            "payloadIon",
+            "ksp_stage",
+            0,
+            "decoupled_in",
+            -1,
+            "physical_stage",
+            1,
+            "physical_stage_name",
+            "upper_stack",
+            "dry_mass_kg",
+            5.0,
+            "wet_mass_kg",
+            5.0,
+            "mass_kg",
+            5.0,
+            "has_engine",
+            true,
+            "module_names",
+            {
+              "items": [
+                "ModuleEnginesRF"
+              ],
+              "$type": "kOS.Safe.Encapsulation.ListValue"
+            },
+            "resources",
+            {
+              "items": [],
+              "$type": "kOS.Safe.Encapsulation.ListValue"
+            },
+            "engine",
+            {
+              "entries": [
+                "possible_thrust_vac_n",
+                1.0,
+                "possible_thrust_sl_n",
+                0.0,
+                "vacuum_isp_s",
+                3000.0,
+                "sealevel_isp_s",
+                0.0
+              ],
+              "$type": "kOS.Safe.Encapsulation.Lexicon"
+            }
+          ],
+          "$type": "kOS.Safe.Encapsulation.Lexicon"
+        },
+        {
+          "entries": [
+            "index",
+            2,
+            "title",
+            "Upper stage",
+            "name",
+            "upperStage",
+            "ksp_stage",
+            3,
+            "decoupled_in",
+            0,
+            "physical_stage",
+            1,
+            "physical_stage_name",
+            "upper_stack",
+            "dry_mass_kg",
+            100.0,
+            "wet_mass_kg",
+            300.0,
+            "mass_kg",
+            300.0,
+            "has_engine",
+            true,
+            "module_names",
+            {
+              "items": [
+                "ModuleEnginesRF",
+                "ModuleFuelTanks"
+              ],
+              "$type": "kOS.Safe.Encapsulation.ListValue"
+            },
+            "resources",
+            {
+              "items": [
+                {
+                  "entries": [
+                    "name",
+                    "UpperProp",
+                    "amount_kg",
+                    200.0,
+                    "capacity_kg",
+                    200.0
+                  ],
+                  "$type": "kOS.Safe.Encapsulation.Lexicon"
+                }
+              ],
+              "$type": "kOS.Safe.Encapsulation.ListValue"
+            },
+            "engine",
+            {
+              "entries": [
+                "possible_thrust_vac_n",
+                1000.0,
+                "possible_thrust_sl_n",
+                800.0,
+                "vacuum_isp_s",
+                320.0,
+                "sealevel_isp_s",
+                280.0
+              ],
+              "$type": "kOS.Safe.Encapsulation.Lexicon"
+            }
+          ],
+          "$type": "kOS.Safe.Encapsulation.Lexicon"
+        },
+        {
+          "entries": [
+            "index",
+            3,
+            "title",
+            "Booster tank",
+            "name",
+            "boosterTank",
+            "ksp_stage",
+            4,
+            "decoupled_in",
+            4,
+            "physical_stage",
+            0,
+            "physical_stage_name",
+            "booster",
+            "dry_mass_kg",
+            200.0,
+            "wet_mass_kg",
+            1200.0,
+            "mass_kg",
+            1200.0,
+            "has_engine",
+            false,
+            "module_names",
+            {
+              "items": [
+                "ModuleFuelTanks"
+              ],
+              "$type": "kOS.Safe.Encapsulation.ListValue"
+            },
+            "resources",
+            {
+              "items": [
+                {
+                  "entries": [
+                    "name",
+                    "BoosterProp",
+                    "amount_kg",
+                    1000.0,
+                    "capacity_kg",
+                    1000.0
+                  ],
+                  "$type": "kOS.Safe.Encapsulation.Lexicon"
+                }
+              ],
+              "$type": "kOS.Safe.Encapsulation.ListValue"
+            }
+          ],
+          "$type": "kOS.Safe.Encapsulation.Lexicon"
+        },
+        {
+          "entries": [
+            "index",
+            4,
+            "title",
+            "Launch engine misclassified as support",
+            "name",
+            "launchEngine",
+            "ksp_stage",
+            6,
+            "decoupled_in",
+            4,
+            "physical_stage",
+            -1,
+            "physical_stage_name",
+            "ground_support",
+            "dry_mass_kg",
+            10.0,
+            "wet_mass_kg",
+            10.0,
+            "mass_kg",
+            10.0,
+            "has_engine",
+            true,
+            "module_names",
+            {
+              "items": [
+                "ModuleEnginesRF"
+              ],
+              "$type": "kOS.Safe.Encapsulation.ListValue"
+            },
+            "resources",
+            {
+              "items": [],
+              "$type": "kOS.Safe.Encapsulation.ListValue"
+            },
+            "engine",
+            {
+              "entries": [
+                "possible_thrust_vac_n",
+                5000.0,
+                "possible_thrust_sl_n",
+                4500.0,
+                "vacuum_isp_s",
+                250.0,
+                "sealevel_isp_s",
+                230.0
+              ],
+              "$type": "kOS.Safe.Encapsulation.Lexicon"
+            }
+          ],
+          "$type": "kOS.Safe.Encapsulation.Lexicon"
+        },
+        {
+          "entries": [
+            "index",
+            5,
+            "title",
+            "Launch clamp",
+            "name",
+            "launchClamp1",
+            "ksp_stage",
+            5,
+            "decoupled_in",
+            4,
+            "physical_stage",
+            0,
+            "physical_stage_name",
+            "booster",
+            "dry_mass_kg",
+            500.0,
+            "wet_mass_kg",
+            500.0,
+            "mass_kg",
+            500.0,
+            "has_engine",
+            false,
+            "module_names",
+            {
+              "items": [
+                "LaunchClamp"
+              ],
+              "$type": "kOS.Safe.Encapsulation.ListValue"
+            },
+            "resources",
+            {
+              "items": [],
+              "$type": "kOS.Safe.Encapsulation.ListValue"
+            }
+          ],
+          "$type": "kOS.Safe.Encapsulation.Lexicon"
+        }
+      ],
+      "$type": "kOS.Safe.Encapsulation.ListValue"
+    }
+  ],
+  "$type": "kOS.Safe.Encapsulation.Lexicon"
+}

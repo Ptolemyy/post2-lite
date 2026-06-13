@@ -180,6 +180,15 @@ struct OptimizationObjectiveConfig {
     double weight = 1.0;
 };
 
+struct OptimizationContinuationConfig {
+    bool enabled = false;
+    std::string variable_path;
+    std::string direction = "increase";
+    int steps = 8;
+    bool multistart_enabled = false;
+    int multistart_count = 2;
+};
+
 struct OptimizationConfig {
     std::string mode = "target";
     std::string optimizer = "fmincon";
@@ -196,6 +205,7 @@ struct OptimizationConfig {
     std::vector<OptimizationVariableConfig> variables;
     std::vector<OptimizationTargetConfig> targets;
     OptimizationObjectiveConfig objective;
+    OptimizationContinuationConfig continuation;
 };
 
 struct CaseConfig {

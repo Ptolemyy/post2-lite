@@ -1,5 +1,6 @@
 #include "post2/core/io.hpp"
 #include "post2/core/case_config_io.hpp"
+#include "post2/core/ksp_vehicle_site_import.hpp"
 #include "post2/core/optimization.hpp"
 #include "post2/core/trajectory_service.hpp"
 #include "post2/vehicle/runtime_state.hpp"
@@ -80,6 +81,8 @@ void print_help()
         << "  --case PATH               Load a case JSON file\n"
         << "  --save-case PATH          Save the current case JSON to PATH\n"
         << "  --vehicle-config PATH     Load vehicle config key-value text file\n"
+        << "  --import-ksp-vehicle-site PATH\n"
+        << "                            Import vehicle, payload, launch site, and body constants from kOS JSON\n"
         << "  --save-vehicle-config PATH\n"
         << "                            Save the current vehicle config to PATH\n"
         << "  --vehicle-name NAME       Override vehicle name\n"
@@ -516,6 +519,24 @@ bool parse_options(int argc, char** argv, Options* options)
             if (!post2::vehicle::load_vehicle_config_file(value, &options->config.vehicle, &error)) {
                 std::cerr << "Vehicle config load failed: " << error << '\n';
                 return false;
+            }
+        } else if (arg == "--import-ksp-vehicle-site") {
+            std::string error;
+            const auto preserved_aero = options->has_case_config
+                ? options->case_config.vehicle.aero
+                : options->config.vehicle.aero;
+            post2::core::KspVehicleSiteImport imported;
+            if (!post2::core::load_ksp_vehicle_site_import_file(
+                    value,
+                    preserved_aero,
+                    &imported,
+                    &error)) {
+                std::cerr << "KSP vehicle/site import failed: " << error << '\n';
+                return false;
+            }
+            post2::core::apply_ksp_vehicle_site_import(&options->config, imported);
+            if (options->has_case_config) {
+                post2::core::apply_ksp_vehicle_site_import(&options->case_config, imported);
             }
         } else if (arg == "--save-vehicle-config") {
             options->save_vehicle_config_path = value;

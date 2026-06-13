@@ -7,6 +7,7 @@
 #include "post2/integrators/dopri5.hpp"
 #include "post2/integrators/integrator.hpp"
 #include "post2/integrators/ode_integrator.hpp"
+#include "post2/propagation/builtin_events.hpp"
 #include "post2/propagation/force_model_set.hpp"
 #include "post2/propagation/force_models.hpp"
 #include "post2/propagation/vehicle_consumption.hpp"
@@ -24,6 +25,27 @@
 namespace post2::core {
 
 namespace {
+
+double minimum_effective_step_s(double nominal_step_s)
+{
+    const double scaled = (std::isfinite(nominal_step_s) && nominal_step_s > 0.0)
+        ? nominal_step_s * 1.0e-6
+        : 1.0e-6;
+    return std::max(1.0e-9, std::min(1.0e-6, scaled));
+}
+
+int max_phase_integration_steps(double duration_s, double nominal_step_s)
+{
+    if (!std::isfinite(duration_s) || duration_s <= 0.0) {
+        return 1000;
+    }
+    const double nominal = (std::isfinite(nominal_step_s) && nominal_step_s > 0.0)
+        ? nominal_step_s
+        : 1.0;
+    const double expected_steps = std::ceil(duration_s / nominal);
+    const double budget = 100.0 + 50.0 * expected_steps;
+    return static_cast<int>(std::clamp(budget, 1000.0, 100000.0));
+}
 
 Vec3 cross_product(const Vec3& lhs, const Vec3& rhs)
 {
@@ -537,9 +559,18 @@ StateLog propagate_phase(
     }
 
     const bool use_adaptive_step_suggestions = phase.integrator == "dopri5";
+    const double min_effective_step_s = minimum_effective_step_s(case_config.step_s);
+    const int max_step_count =
+        max_phase_integration_steps(phase.duration_s, case_config.step_s);
+    int step_count = 0;
     double time_s = phase_start_time_s;
     double suggested_step_s = case_config.step_s;
     while (time_s < phase_end_time_s) {
+        ++step_count;
+        if (step_count > max_step_count) {
+            throw std::runtime_error("integrator exceeded phase step budget");
+        }
+
         const double phase_time_s = time_s - phase_start_time_s;
         apply_due_actions(actions, phase_time_s, simulation_config, &control, &runtime);
 
@@ -583,6 +614,7 @@ StateLog propagate_phase(
         post2::propagation::DerivativeResult last_eval;
         Vec3 last_acceleration_eci_mps2{0.0, 0.0, 0.0};
         post2::integrators::ExtendedState integrated;
+        bool altitude_zero_event_hit = false;
         if (control.hold_down_clamp_active) {
             // Engine still burns while clamped: integrate tank masses with
             // forward Euler (motion pinned to launch site rotates with Earth
@@ -622,6 +654,11 @@ StateLog propagate_phase(
                     events.push_back(std::move(ev));
                     event_tank_indices.push_back(i);
                 }
+            }
+            const post2::propagation::EnvironmentState env_for_events =
+                make_environment_state(simulation_config, phase, time_s, current_state);
+            if (!phase.force_models.normal_force && env_for_events.altitude_m > 1.0) {
+                events.push_back(post2::propagation::altitude_zero_event(true));
             }
 
             const post2::integrators::StepResult step_result = integrator->step(
@@ -673,6 +710,11 @@ StateLog propagate_phase(
             if (!step_result.accepted || step_result.h_used <= 1.0e-12) {
                 throw std::runtime_error("integrator failed to make progress");
             }
+            if (!step_result.event.has_value() &&
+                step_result.h_used < min_effective_step_s &&
+                phase_end_time_s - (time_s + step_result.h_used) > min_effective_step_s) {
+                throw std::runtime_error("integrator step size below minimum progress");
+            }
             integrated = step_result.state_end;
             // Reflect the (possibly shortened) step used by the integrator.
             step_s = step_result.h_used;
@@ -685,6 +727,7 @@ StateLog propagate_phase(
             // If a tank-empty event fired, clamp that tank to exactly zero
             // so the next step's gating logic sees it as drained.
             if (step_result.event.has_value()) {
+                altitude_zero_event_hit = step_result.event->name == "altitude_zero";
                 const std::size_t event_idx = step_result.event->event_index;
                 if (event_idx < event_tank_indices.size()) {
                     const std::size_t tank_idx = event_tank_indices[event_idx];
@@ -714,6 +757,9 @@ StateLog propagate_phase(
                 last_acceleration_eci_mps2);
         }
         time_s = next_time_s;
+        if (altitude_zero_event_hit) {
+            break;
+        }
     }
 
     return state_log;
@@ -913,6 +959,9 @@ SimulationResult SimulationDriver::run(const CaseConfig& config) const
             const StateLog phase_log =
                 propagate_phase(config, phase, phase_index, phase_start_time_s, initial_runtime);
             merge_phase_log(&state_log, phase_log);
+            if (case_vehicle_impacted_earth(state_log, config)) {
+                return {false, "vehicle impacted Earth during propagation", state_log};
+            }
             phase_start_time_s += phase.duration_s;
         }
 

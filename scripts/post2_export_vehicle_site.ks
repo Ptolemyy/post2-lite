@@ -1,0 +1,778 @@
+// Exports the current kOS vessel, launch site, and two-stage vehicle
+// breakdown as structured JSON for POST2-Lite.
+
+@LAZYGLOBAL OFF.
+
+PARAMETER OUT_PATH IS "archive:/post2-lite/vehicle_launchsite.json".
+
+LOCAL OUTPUT_DIR IS "archive:/post2-lite".
+LOCAL SOURCE_CRAFT_PATH IS "C:/Program Files (x86)/Steam/steamapps/common/Kerbal Space Program/Ships/VAB/SpaceX/Falcon 9&FH v1.2 Block-5/PMBT-SpaceX Falcon 9 v1_2 Block-5.craft".
+
+FUNCTION VEC3_OBJECT {
+    PARAMETER VALUE_VEC.
+
+    LOCAL OBJ IS LEXICON().
+    SET OBJ["x"] TO VALUE_VEC:X.
+    SET OBJ["y"] TO VALUE_VEC:Y.
+    SET OBJ["z"] TO VALUE_VEC:Z.
+    SET OBJ["mag"] TO VALUE_VEC:MAG.
+    RETURN OBJ.
+}.
+
+FUNCTION ZERO_VEC3_OBJECT {
+    LOCAL OBJ IS LEXICON().
+    SET OBJ["x"] TO 0.
+    SET OBJ["y"] TO 0.
+    SET OBJ["z"] TO 0.
+    SET OBJ["mag"] TO 0.
+    RETURN OBJ.
+}.
+
+FUNCTION PHYSICAL_STAGE_NAME {
+    PARAMETER PHYS_STAGE_INDEX.
+
+    IF PHYS_STAGE_INDEX = 0 {
+        RETURN "booster".
+    } ELSE IF PHYS_STAGE_INDEX = 1 {
+        RETURN "upper_stack".
+    }.
+    RETURN "ground_support".
+}.
+
+FUNCTION PART_HAS_MODULE {
+    PARAMETER PART_ITEM, MODULE_NAME.
+
+    IF NOT PART_ITEM:HASSUFFIX("MODULES") {
+        RETURN FALSE.
+    }.
+    FOR MOD_NAME IN PART_ITEM:MODULES {
+        IF MOD_NAME = MODULE_NAME {
+            RETURN TRUE.
+        }.
+    }.
+    RETURN FALSE.
+}.
+
+FUNCTION IS_LAUNCH_SUPPORT_PART {
+    PARAMETER PART_ITEM.
+
+    IF PART_HAS_MODULE(PART_ITEM, "LaunchClamp") {
+        RETURN TRUE.
+    }.
+    RETURN FALSE.
+}.
+
+FUNCTION IS_PAYLOAD_PART {
+    PARAMETER PART_ITEM, PHYS_STAGE_INDEX.
+
+    IF NOT (PHYS_STAGE_INDEX = 1) {
+        RETURN FALSE.
+    }.
+    IF PART_ITEM:DECOUPLEDIN >= 0 {
+        RETURN FALSE.
+    }.
+    IF IS_LAUNCH_SUPPORT_PART(PART_ITEM) {
+        RETURN FALSE.
+    }.
+    IF PART_HAS_MODULE(PART_ITEM, "ModuleDecouple") {
+        RETURN FALSE.
+    }.
+    IF PART_HAS_MODULE(PART_ITEM, "ModuleAnchoredDecoupler") {
+        RETURN FALSE.
+    }.
+    IF PART_HAS_MODULE(PART_ITEM, "ModuleCargoBay") {
+        RETURN FALSE.
+    }.
+    RETURN TRUE.
+}.
+
+FUNCTION CLASSIFY_PHYSICAL_STAGE {
+    PARAMETER PART_STAGE, PART_DECOUPLED_IN, LAUNCH_ENGINE_STAGE, BOOSTER_SEP_STAGE, IS_SUPPORT_PART.
+
+    IF IS_SUPPORT_PART {
+        RETURN -1.
+    }.
+    LOCAL IS_BOOSTER IS (BOOSTER_SEP_STAGE > -999999).
+    SET IS_BOOSTER TO IS_BOOSTER AND ((PART_STAGE >= BOOSTER_SEP_STAGE) OR (PART_DECOUPLED_IN >= BOOSTER_SEP_STAGE)).
+    IF IS_BOOSTER {
+        RETURN 0.
+    }.
+    RETURN 1.
+}.
+
+FUNCTION PHYSICAL_STAGE_NOTE {
+    PARAMETER PART_STAGE, PART_DECOUPLED_IN, LAUNCH_ENGINE_STAGE, BOOSTER_SEP_STAGE, IS_SUPPORT_PART.
+
+    IF IS_SUPPORT_PART {
+        RETURN "excluded from POST2 stages as launch support hardware".
+    }.
+    LOCAL IS_BOOSTER IS (BOOSTER_SEP_STAGE > -999999).
+    SET IS_BOOSTER TO IS_BOOSTER AND ((PART_STAGE >= BOOSTER_SEP_STAGE) OR (PART_DECOUPLED_IN >= BOOSTER_SEP_STAGE)).
+    IF IS_BOOSTER {
+        RETURN "classified as booster from KSP stage number relative to inferred booster separation stage".
+    }.
+    RETURN "classified as upper stack from KSP stage number below inferred booster separation stage".
+}.
+
+FUNCTION RESOURCE_OBJECT {
+    PARAMETER RES_ITEM.
+
+    LOCAL OBJ IS LEXICON().
+    SET OBJ["name"] TO RES_ITEM:NAME.
+    SET OBJ["amount"] TO RES_ITEM:AMOUNT.
+    SET OBJ["capacity"] TO RES_ITEM:CAPACITY.
+    SET OBJ["density_Mg_per_unit"] TO RES_ITEM:DENSITY.
+    SET OBJ["amount_kg"] TO RES_ITEM:AMOUNT * RES_ITEM:DENSITY * 1000.
+    SET OBJ["capacity_kg"] TO RES_ITEM:CAPACITY * RES_ITEM:DENSITY * 1000.
+    IF RES_ITEM:HASSUFFIX("TOGGLEABLE") {
+        SET OBJ["toggleable"] TO RES_ITEM:TOGGLEABLE.
+    } ELSE {
+        SET OBJ["toggleable"] TO FALSE.
+    }.
+    IF RES_ITEM:HASSUFFIX("ENABLED") {
+        SET OBJ["enabled"] TO RES_ITEM:ENABLED.
+    } ELSE {
+        SET OBJ["enabled"] TO TRUE.
+    }.
+    RETURN OBJ.
+}.
+
+FUNCTION ENGINE_OBJECT {
+    PARAMETER ENG_ITEM.
+
+    LOCAL OBJ IS LEXICON().
+    LOCAL G0 IS 9.80665.
+    LOCAL VAC_KN IS 0.
+    LOCAL SL_KN IS 0.
+    LOCAL POSSIBLE_KN IS 0.
+    LOCAL CURRENT_THRUST_KN IS 0.
+    LOCAL MAX_THRUST_KN IS 0.
+    LOCAL AVAILABLE_THRUST_KN IS 0.
+    LOCAL ISP_NOW IS 0.
+    LOCAL VAC_ISP IS 0.
+    LOCAL SL_ISP IS 0.
+    LOCAL MASS_FLOW_KGPS IS 0.
+    LOCAL MAX_MASS_FLOW_KGPS IS 0.
+
+    IF ENG_ITEM:HASSUFFIX("POSSIBLETHRUSTAT") {
+        SET VAC_KN TO ENG_ITEM:POSSIBLETHRUSTAT(0).
+        SET SL_KN TO ENG_ITEM:POSSIBLETHRUSTAT(1).
+    } ELSE {
+        IF ENG_ITEM:HASSUFFIX("POSSIBLETHRUST") {
+            SET VAC_KN TO ENG_ITEM:POSSIBLETHRUST.
+            SET SL_KN TO ENG_ITEM:POSSIBLETHRUST.
+        }.
+    }.
+    IF ENG_ITEM:HASSUFFIX("POSSIBLETHRUST") {
+        SET POSSIBLE_KN TO ENG_ITEM:POSSIBLETHRUST.
+    } ELSE {
+        SET POSSIBLE_KN TO VAC_KN.
+    }.
+
+    IF ENG_ITEM:HASSUFFIX("THRUST") {
+        SET CURRENT_THRUST_KN TO ENG_ITEM:THRUST.
+    }.
+    IF ENG_ITEM:HASSUFFIX("MAXTHRUST") {
+        SET MAX_THRUST_KN TO ENG_ITEM:MAXTHRUST.
+    }.
+    IF ENG_ITEM:HASSUFFIX("AVAILABLETHRUST") {
+        SET AVAILABLE_THRUST_KN TO ENG_ITEM:AVAILABLETHRUST.
+    }.
+
+    IF VAC_KN = 0 {
+        IF MAX_THRUST_KN > 0 {
+            SET VAC_KN TO MAX_THRUST_KN.
+        } ELSE IF AVAILABLE_THRUST_KN > 0 {
+            SET VAC_KN TO AVAILABLE_THRUST_KN.
+        } ELSE {
+            SET VAC_KN TO POSSIBLE_KN.
+        }.
+    }.
+    IF SL_KN = 0 {
+        SET SL_KN TO VAC_KN.
+    }.
+
+    IF ENG_ITEM:HASSUFFIX("ISP") {
+        SET ISP_NOW TO ENG_ITEM:ISP.
+    }.
+    IF ENG_ITEM:HASSUFFIX("VACUUMISP") {
+        SET VAC_ISP TO ENG_ITEM:VACUUMISP.
+    } ELSE {
+        SET VAC_ISP TO ISP_NOW.
+    }.
+    IF ENG_ITEM:HASSUFFIX("SEALEVELISP") {
+        SET SL_ISP TO ENG_ITEM:SEALEVELISP.
+    } ELSE {
+        SET SL_ISP TO ISP_NOW.
+    }.
+    IF ISP_NOW = 0 {
+        SET ISP_NOW TO VAC_ISP.
+    }.
+    IF SL_ISP = 0 {
+        SET SL_ISP TO VAC_ISP.
+    }.
+
+    IF ENG_ITEM:HASSUFFIX("MASSFLOW") {
+        SET MASS_FLOW_KGPS TO ENG_ITEM:MASSFLOW * 1000.
+        SET OBJ["mass_flow_source"] TO "kos_massflow_suffix".
+    } ELSE {
+        IF (ISP_NOW > 0) AND (CURRENT_THRUST_KN > 0) {
+            SET MASS_FLOW_KGPS TO (CURRENT_THRUST_KN * 1000) / (ISP_NOW * G0).
+        }.
+        SET OBJ["mass_flow_source"] TO "estimated_from_current_thrust_and_isp".
+    }.
+    IF ENG_ITEM:HASSUFFIX("MAXMASSFLOW") {
+        SET MAX_MASS_FLOW_KGPS TO ENG_ITEM:MAXMASSFLOW * 1000.
+        SET OBJ["max_mass_flow_source"] TO "kos_maxmassflow_suffix".
+    } ELSE {
+        IF (VAC_ISP > 0) AND (VAC_KN > 0) {
+            SET MAX_MASS_FLOW_KGPS TO (VAC_KN * 1000) / (VAC_ISP * G0).
+        }.
+        SET OBJ["max_mass_flow_source"] TO "estimated_from_vac_thrust_and_isp".
+    }.
+
+    SET OBJ["name"] TO ENG_ITEM:NAME.
+    SET OBJ["title"] TO ENG_ITEM:TITLE.
+    SET OBJ["uid"] TO ENG_ITEM:UID.
+    SET OBJ["cid"] TO ENG_ITEM:CID.
+    IF ENG_ITEM:HASSUFFIX("CONFIG") {
+        SET OBJ["config"] TO ENG_ITEM:CONFIG.
+        SET OBJ["config_available"] TO TRUE.
+    } ELSE {
+        SET OBJ["config"] TO "".
+        SET OBJ["config_available"] TO FALSE.
+    }.
+    SET OBJ["ksp_stage"] TO ENG_ITEM:STAGE.
+    SET OBJ["decoupled_in"] TO ENG_ITEM:DECOUPLEDIN.
+    IF ENG_ITEM:HASSUFFIX("THRUSTLIMIT") {
+        SET OBJ["thrust_limit_percent"] TO ENG_ITEM:THRUSTLIMIT.
+    } ELSE {
+        SET OBJ["thrust_limit_percent"] TO 100.
+    }.
+    SET OBJ["current_thrust_kN"] TO CURRENT_THRUST_KN.
+    SET OBJ["max_thrust_kN"] TO MAX_THRUST_KN.
+    SET OBJ["available_thrust_kN"] TO AVAILABLE_THRUST_KN.
+    SET OBJ["possible_thrust_kN"] TO POSSIBLE_KN.
+    SET OBJ["possible_thrust_vac_kN"] TO VAC_KN.
+    SET OBJ["possible_thrust_sl_kN"] TO SL_KN.
+    SET OBJ["possible_thrust_vac_n"] TO VAC_KN * 1000.
+    SET OBJ["possible_thrust_sl_n"] TO SL_KN * 1000.
+    SET OBJ["isp_s"] TO ISP_NOW.
+    SET OBJ["vacuum_isp_s"] TO VAC_ISP.
+    SET OBJ["sealevel_isp_s"] TO SL_ISP.
+    SET OBJ["mass_flow_kgps"] TO MASS_FLOW_KGPS.
+    SET OBJ["max_mass_flow_kgps"] TO MAX_MASS_FLOW_KGPS.
+    IF ENG_ITEM:HASSUFFIX("MINTHROTTLE") {
+        SET OBJ["min_throttle"] TO ENG_ITEM:MINTHROTTLE.
+    } ELSE {
+        SET OBJ["min_throttle"] TO 0.
+    }.
+    IF ENG_ITEM:HASSUFFIX("IGNITION") {
+        SET OBJ["ignition"] TO ENG_ITEM:IGNITION.
+    } ELSE {
+        SET OBJ["ignition"] TO TRUE.
+    }.
+    IF ENG_ITEM:HASSUFFIX("FLAMEOUT") {
+        SET OBJ["flameout"] TO ENG_ITEM:FLAMEOUT.
+    } ELSE {
+        SET OBJ["flameout"] TO FALSE.
+    }.
+    IF ENG_ITEM:HASSUFFIX("ALLOWRESTART") {
+        SET OBJ["allow_restart"] TO ENG_ITEM:ALLOWRESTART.
+    } ELSE {
+        SET OBJ["allow_restart"] TO TRUE.
+    }.
+    IF ENG_ITEM:HASSUFFIX("ALLOWSHUTDOWN") {
+        SET OBJ["allow_shutdown"] TO ENG_ITEM:ALLOWSHUTDOWN.
+    } ELSE {
+        SET OBJ["allow_shutdown"] TO TRUE.
+    }.
+    IF ENG_ITEM:HASSUFFIX("THROTTLELOCK") {
+        SET OBJ["throttle_lock"] TO ENG_ITEM:THROTTLELOCK.
+    } ELSE {
+        SET OBJ["throttle_lock"] TO FALSE.
+    }.
+    IF ENG_ITEM:HASSUFFIX("HASGIMBAL") {
+        SET OBJ["has_gimbal"] TO ENG_ITEM:HASGIMBAL.
+    } ELSE {
+        SET OBJ["has_gimbal"] TO FALSE.
+    }.
+    RETURN OBJ.
+}.
+
+FUNCTION PART_OBJECT {
+    PARAMETER PART_INDEX, PART_ITEM, PHYS_STAGE_INDEX, PHYS_NOTE, ENGINE_BY_UID.
+
+    LOCAL OBJ IS LEXICON().
+    LOCAL RES_LIST IS LIST().
+
+    SET OBJ["index"] TO PART_INDEX.
+    SET OBJ["name"] TO PART_ITEM:NAME.
+    SET OBJ["title"] TO PART_ITEM:TITLE.
+    SET OBJ["uid"] TO PART_ITEM:UID.
+    SET OBJ["cid"] TO PART_ITEM:CID.
+    SET OBJ["tag"] TO PART_ITEM:TAG.
+    SET OBJ["ksp_stage"] TO PART_ITEM:STAGE.
+    SET OBJ["decoupled_in"] TO PART_ITEM:DECOUPLEDIN.
+    SET OBJ["physical_stage"] TO PHYS_STAGE_INDEX.
+    SET OBJ["physical_stage_name"] TO PHYSICAL_STAGE_NAME(PHYS_STAGE_INDEX).
+    SET OBJ["physical_stage_note"] TO PHYS_NOTE.
+    SET OBJ["mass_kg"] TO PART_ITEM:MASS * 1000.
+    SET OBJ["dry_mass_kg"] TO PART_ITEM:DRYMASS * 1000.
+    SET OBJ["wet_mass_kg"] TO PART_ITEM:WETMASS * 1000.
+    SET OBJ["has_physics"] TO PART_ITEM:HASPHYSICS.
+    IF PART_ITEM:HASSUFFIX("TARGETABLE") {
+        SET OBJ["targetable"] TO PART_ITEM:TARGETABLE.
+    } ELSE {
+        SET OBJ["targetable"] TO FALSE.
+    }.
+    IF PART_ITEM:HASSUFFIX("MODULES") {
+        SET OBJ["module_names"] TO PART_ITEM:MODULES.
+    } ELSE {
+        SET OBJ["module_names"] TO LIST().
+    }.
+    IF PART_ITEM:HASSUFFIX("POSITION") {
+        SET OBJ["position_m"] TO VEC3_OBJECT(PART_ITEM:POSITION).
+    }.
+
+    IF PART_ITEM:HASPARENT {
+        IF PART_ITEM:PARENT:HASSUFFIX("UID") {
+            SET OBJ["parent_uid"] TO PART_ITEM:PARENT:UID.
+        } ELSE {
+            SET OBJ["parent_uid"] TO "".
+        }.
+        SET OBJ["parent_title"] TO PART_ITEM:PARENT:TITLE.
+    } ELSE {
+        SET OBJ["parent_uid"] TO "".
+        SET OBJ["parent_title"] TO "".
+    }.
+
+    FOR RES_ITEM IN PART_ITEM:RESOURCES {
+        RES_LIST:ADD(RESOURCE_OBJECT(RES_ITEM)).
+    }.
+    SET OBJ["resources"] TO RES_LIST.
+    SET OBJ["resource_count"] TO RES_LIST:LENGTH.
+
+    IF ENGINE_BY_UID:HASKEY(PART_ITEM:UID) {
+        SET OBJ["engine"] TO ENGINE_BY_UID[PART_ITEM:UID].
+        SET OBJ["has_engine"] TO TRUE.
+    } ELSE {
+        SET OBJ["has_engine"] TO FALSE.
+    }.
+
+    RETURN OBJ.
+}.
+
+FUNCTION STAGE_SUMMARY_OBJECT {
+    PARAMETER STAGE_INDEX, STAGE_NAME.
+    PARAMETER PART_INDICES, ENGINE_PART_INDICES, TANK_PART_INDICES.
+    PARAMETER PART_COUNT, ENGINE_COUNT, TANK_PART_COUNT.
+    PARAMETER DRY_MASS_KG, WET_MASS_KG, CURRENT_MASS_KG.
+    PARAMETER RESOURCE_INITIAL_KG, RESOURCE_CAPACITY_KG.
+    PARAMETER THRUST_VAC_N, THRUST_SL_N, ISP_VAC_NUM, ISP_SL_NUM.
+    PARAMETER MAX_MASS_FLOW_KGPS, NOTE_TEXT.
+
+    LOCAL OBJ IS LEXICON().
+    SET OBJ["index"] TO STAGE_INDEX.
+    SET OBJ["name"] TO STAGE_NAME.
+    SET OBJ["active"] TO TRUE.
+    SET OBJ["attached"] TO TRUE.
+    SET OBJ["note"] TO NOTE_TEXT.
+    SET OBJ["part_indices"] TO PART_INDICES.
+    SET OBJ["engine_part_indices"] TO ENGINE_PART_INDICES.
+    SET OBJ["tank_part_indices"] TO TANK_PART_INDICES.
+    SET OBJ["part_count"] TO PART_COUNT.
+    SET OBJ["engine_part_count"] TO ENGINE_COUNT.
+    SET OBJ["tank_part_count"] TO TANK_PART_COUNT.
+    SET OBJ["dry_mass_kg"] TO DRY_MASS_KG.
+    SET OBJ["wet_mass_kg"] TO WET_MASS_KG.
+    SET OBJ["current_mass_kg"] TO CURRENT_MASS_KG.
+    SET OBJ["propellant_mass_estimate_kg"] TO CURRENT_MASS_KG - DRY_MASS_KG.
+    SET OBJ["resource_initial_mass_kg"] TO RESOURCE_INITIAL_KG.
+    SET OBJ["resource_capacity_mass_kg"] TO RESOURCE_CAPACITY_KG.
+    SET OBJ["engine_thrust_vac_n"] TO THRUST_VAC_N.
+    SET OBJ["engine_thrust_sl_n"] TO THRUST_SL_N.
+    SET OBJ["engine_max_mass_flow_kgps"] TO MAX_MASS_FLOW_KGPS.
+
+    IF THRUST_VAC_N > 0 {
+        SET OBJ["engine_isp_vac_s"] TO ISP_VAC_NUM / THRUST_VAC_N.
+    } ELSE {
+        SET OBJ["engine_isp_vac_s"] TO 0.
+    }.
+
+    IF THRUST_SL_N > 0 {
+        SET OBJ["engine_isp_sl_s"] TO ISP_SL_NUM / THRUST_SL_N.
+    } ELSE {
+        SET OBJ["engine_isp_sl_s"] TO 0.
+    }.
+
+    LOCAL POST2_HINT IS LEXICON().
+    SET POST2_HINT["dry_mass_kg"] TO DRY_MASS_KG.
+    SET POST2_HINT["tanks_from_part_resources"] TO TRUE.
+    SET POST2_HINT["engine_is_aggregated_cluster"] TO TRUE.
+    SET POST2_HINT["engine_count"] TO 1.
+    SET POST2_HINT["engine_source_part_count"] TO ENGINE_COUNT.
+    SET POST2_HINT["engine_thrust_vac_n"] TO THRUST_VAC_N.
+    SET POST2_HINT["engine_thrust_sl_n"] TO THRUST_SL_N.
+    SET POST2_HINT["engine_max_mass_flow_kgps"] TO MAX_MASS_FLOW_KGPS.
+    SET POST2_HINT["engine_isp_vac_s"] TO OBJ["engine_isp_vac_s"].
+    SET POST2_HINT["engine_isp_sl_s"] TO OBJ["engine_isp_sl_s"].
+    SET OBJ["post2_stage_hint"] TO POST2_HINT.
+
+    RETURN OBJ.
+}.
+
+FUNCTION EXPORT_MAIN {
+    WAIT UNTIL SHIP:UNPACKED.
+
+    IF NOT EXISTS(OUTPUT_DIR) {
+        CREATEDIR(OUTPUT_DIR).
+    }.
+
+    LOCAL PART_LIST IS LIST().
+    LOCAL ENGINE_LIST IS LIST().
+    LIST PARTS IN PART_LIST.
+    LIST ENGINES IN ENGINE_LIST.
+    LOCAL ENGINE_BY_UID IS LEXICON().
+
+    LOCAL LAUNCH_ENGINE_STAGE IS -999999.
+    LOCAL UPPER_ENGINE_STAGE IS -999999.
+
+    FOR ENG_ITEM IN ENGINE_LIST {
+        SET ENGINE_BY_UID[ENG_ITEM:UID] TO ENGINE_OBJECT(ENG_ITEM).
+        IF ENG_ITEM:STAGE > LAUNCH_ENGINE_STAGE {
+            SET LAUNCH_ENGINE_STAGE TO ENG_ITEM:STAGE.
+        }.
+    }.
+
+    FOR ENG_ITEM IN ENGINE_LIST {
+        LOCAL UPPER_STAGE_CANDIDATE IS (ENG_ITEM:STAGE < LAUNCH_ENGINE_STAGE).
+        SET UPPER_STAGE_CANDIDATE TO UPPER_STAGE_CANDIDATE AND (ENG_ITEM:STAGE > UPPER_ENGINE_STAGE).
+        IF UPPER_STAGE_CANDIDATE {
+            SET UPPER_ENGINE_STAGE TO ENG_ITEM:STAGE.
+        }.
+    }.
+    IF UPPER_ENGINE_STAGE = -999999 {
+        SET UPPER_ENGINE_STAGE TO LAUNCH_ENGINE_STAGE - 1.
+    }.
+
+    LOCAL BOOSTER_SEP_STAGE IS -999999.
+    FOR PART_ITEM IN PART_LIST {
+        LOCAL BOOSTER_SEP_CANDIDATE IS (PART_ITEM:DECOUPLEDIN < LAUNCH_ENGINE_STAGE).
+        SET BOOSTER_SEP_CANDIDATE TO BOOSTER_SEP_CANDIDATE AND (PART_ITEM:DECOUPLEDIN >= UPPER_ENGINE_STAGE).
+        SET BOOSTER_SEP_CANDIDATE TO BOOSTER_SEP_CANDIDATE AND (PART_ITEM:DECOUPLEDIN > BOOSTER_SEP_STAGE).
+        IF BOOSTER_SEP_CANDIDATE {
+            SET BOOSTER_SEP_STAGE TO PART_ITEM:DECOUPLEDIN.
+        }.
+    }.
+    IF BOOSTER_SEP_STAGE = -999999 {
+        SET BOOSTER_SEP_STAGE TO UPPER_ENGINE_STAGE.
+    }.
+
+    LOCAL ROOT IS LEXICON().
+    LOCAL METADATA IS LEXICON().
+    LOCAL LAUNCH_SITE IS LEXICON().
+    LOCAL VEHICLE IS LEXICON().
+    LOCAL STAGING_HINTS IS LEXICON().
+    LOCAL PARTS_JSON IS LIST().
+    LOCAL STAGES_JSON IS LIST().
+
+    SET METADATA["script"] TO "post2_export_vehicle_site.ks".
+    SET METADATA["format"] TO "post2_lite_kos_vehicle_export_v2".
+    SET METADATA["source_craft_path"] TO SOURCE_CRAFT_PATH.
+    SET METADATA["mission_time_s"] TO TIME:SECONDS.
+    SET METADATA["output_path"] TO OUT_PATH.
+
+    SET LAUNCH_SITE["body_name"] TO SHIP:BODY:NAME.
+    SET LAUNCH_SITE["latitude_deg"] TO SHIP:LATITUDE.
+    SET LAUNCH_SITE["longitude_deg"] TO SHIP:LONGITUDE.
+    SET LAUNCH_SITE["altitude_m"] TO SHIP:ALTITUDE.
+    SET LAUNCH_SITE["body_radius_m"] TO SHIP:BODY:RADIUS.
+    SET LAUNCH_SITE["body_mu_m3ps2"] TO SHIP:BODY:MU.
+    IF SHIP:BODY:HASSUFFIX("ROTATIONPERIOD") {
+        SET LAUNCH_SITE["body_rotation_period_s"] TO SHIP:BODY:ROTATIONPERIOD.
+    } ELSE {
+        SET LAUNCH_SITE["body_rotation_period_s"] TO 0.
+    }.
+    IF SHIP:BODY:HASSUFFIX("ANGULARVEL") {
+        SET LAUNCH_SITE["body_angular_velocity_radps"] TO VEC3_OBJECT(SHIP:BODY:ANGULARVEL).
+    } ELSE {
+        SET LAUNCH_SITE["body_angular_velocity_radps"] TO ZERO_VEC3_OBJECT().
+    }.
+
+    SET VEHICLE["ship_name"] TO SHIP:NAME.
+    SET VEHICLE["status"] TO SHIP:STATUS.
+
+    IF SHIP:HASSUFFIX("STAGENUM") {
+        SET VEHICLE["stage_num"] TO SHIP:STAGENUM.
+        SET VEHICLE["stage_num_available"] TO TRUE.
+    } ELSE {
+        SET VEHICLE["stage_num"] TO 0.
+        SET VEHICLE["stage_num_available"] TO FALSE.
+    }.
+
+    LOCAL VESSEL_MASS_KG IS 0.
+    LOCAL VESSEL_DRY_KG IS 0.
+    LOCAL VESSEL_WET_KG IS 0.
+    IF SHIP:HASSUFFIX("MASS") {
+        SET VESSEL_MASS_KG TO SHIP:MASS * 1000.
+    }.
+    IF SHIP:HASSUFFIX("DRYMASS") {
+        SET VESSEL_DRY_KG TO SHIP:DRYMASS * 1000.
+    }.
+    IF SHIP:HASSUFFIX("WETMASS") {
+        SET VESSEL_WET_KG TO SHIP:WETMASS * 1000.
+    } ELSE {
+        SET VESSEL_WET_KG TO VESSEL_MASS_KG.
+    }.
+    SET VEHICLE["mass_kg"] TO VESSEL_MASS_KG.
+    SET VEHICLE["dry_mass_kg"] TO VESSEL_DRY_KG.
+    SET VEHICLE["wet_mass_kg"] TO VESSEL_WET_KG.
+    SET VEHICLE["propellant_mass_estimate_kg"] TO VESSEL_MASS_KG - VESSEL_DRY_KG.
+
+    LOCAL VESSEL_AVAILABLE_THRUST_KN IS 0.
+    LOCAL VESSEL_MAX_THRUST_KN IS 0.
+    LOCAL VESSEL_AVAILABLE_THRUST_VAC_KN IS 0.
+    LOCAL VESSEL_AVAILABLE_THRUST_SL_KN IS 0.
+    IF SHIP:HASSUFFIX("AVAILABLETHRUST") {
+        SET VESSEL_AVAILABLE_THRUST_KN TO SHIP:AVAILABLETHRUST.
+    }.
+    IF SHIP:HASSUFFIX("MAXTHRUST") {
+        SET VESSEL_MAX_THRUST_KN TO SHIP:MAXTHRUST.
+    }.
+    IF SHIP:HASSUFFIX("AVAILABLETHRUSTAT") {
+        SET VESSEL_AVAILABLE_THRUST_VAC_KN TO SHIP:AVAILABLETHRUSTAT(0).
+        SET VESSEL_AVAILABLE_THRUST_SL_KN TO SHIP:AVAILABLETHRUSTAT(1).
+    } ELSE {
+        SET VESSEL_AVAILABLE_THRUST_VAC_KN TO VESSEL_AVAILABLE_THRUST_KN.
+        SET VESSEL_AVAILABLE_THRUST_SL_KN TO VESSEL_AVAILABLE_THRUST_KN.
+    }.
+    SET VEHICLE["available_thrust_kN"] TO VESSEL_AVAILABLE_THRUST_KN.
+    SET VEHICLE["available_thrust_n"] TO VESSEL_AVAILABLE_THRUST_KN * 1000.
+    SET VEHICLE["max_thrust_kN"] TO VESSEL_MAX_THRUST_KN.
+    SET VEHICLE["max_thrust_n"] TO VESSEL_MAX_THRUST_KN * 1000.
+    SET VEHICLE["available_thrust_vac_kN"] TO VESSEL_AVAILABLE_THRUST_VAC_KN.
+    SET VEHICLE["available_thrust_sl_kN"] TO VESSEL_AVAILABLE_THRUST_SL_KN.
+
+    IF SHIP:HASSUFFIX("DELTAV") {
+        LOCAL VESSEL_DV IS SHIP:DELTAV.
+        IF VESSEL_DV:HASSUFFIX("CURRENT") {
+            SET VEHICLE["delta_v_mps"] TO VESSEL_DV:CURRENT.
+        } ELSE {
+            SET VEHICLE["delta_v_mps"] TO 0.
+        }.
+        IF VESSEL_DV:HASSUFFIX("ASL") {
+            SET VEHICLE["delta_v_asl_mps"] TO VESSEL_DV:ASL.
+        } ELSE {
+            SET VEHICLE["delta_v_asl_mps"] TO 0.
+        }.
+        IF VESSEL_DV:HASSUFFIX("VACUUM") {
+            SET VEHICLE["delta_v_vacuum_mps"] TO VESSEL_DV:VACUUM.
+        } ELSE {
+            SET VEHICLE["delta_v_vacuum_mps"] TO 0.
+        }.
+        IF VESSEL_DV:HASSUFFIX("DURATION") {
+            SET VEHICLE["burn_time_s"] TO VESSEL_DV:DURATION.
+        } ELSE {
+            SET VEHICLE["burn_time_s"] TO 0.
+        }.
+    } ELSE {
+        SET VEHICLE["delta_v_mps"] TO 0.
+        SET VEHICLE["delta_v_asl_mps"] TO 0.
+        SET VEHICLE["delta_v_vacuum_mps"] TO 0.
+        SET VEHICLE["burn_time_s"] TO 0.
+    }.
+    SET VEHICLE["part_count"] TO PART_LIST:LENGTH.
+    SET VEHICLE["engine_part_count"] TO ENGINE_LIST:LENGTH.
+
+    SET STAGING_HINTS["launch_engine_ksp_stage"] TO LAUNCH_ENGINE_STAGE.
+    SET STAGING_HINTS["upper_engine_ksp_stage"] TO UPPER_ENGINE_STAGE.
+    SET STAGING_HINTS["booster_separation_ksp_stage"] TO BOOSTER_SEP_STAGE.
+    SET STAGING_HINTS["stage0_name"] TO "booster".
+    SET STAGING_HINTS["stage1_name"] TO "upper_stack".
+    SET STAGING_HINTS["stage0_rule"] TO "non-support part.ksp_stage >= booster_separation_ksp_stage or decoupled_in >= booster_separation_ksp_stage".
+    SET STAGING_HINTS["stage1_rule"] TO "part.ksp_stage < booster_separation_ksp_stage".
+    SET STAGING_HINTS["support_rule"] TO "parts with LaunchClamp module".
+    SET STAGING_HINTS["payload_rule"] TO "upper-stack parts with decoupled_in < 0, excluding decouplers, fairings, and launch support".
+    SET STAGING_HINTS["raw_part_fields_available"] TO "ksp_stage, decoupled_in, parent_uid, uid, cid".
+
+    LOCAL STAGE0_PART_INDICES IS LIST().
+    LOCAL STAGE1_PART_INDICES IS LIST().
+    LOCAL PAYLOAD_PART_INDICES IS LIST().
+    LOCAL SUPPORT_PART_INDICES IS LIST().
+    LOCAL STAGE0_ENGINE_PART_INDICES IS LIST().
+    LOCAL STAGE1_ENGINE_PART_INDICES IS LIST().
+    LOCAL STAGE0_TANK_PART_INDICES IS LIST().
+    LOCAL STAGE1_TANK_PART_INDICES IS LIST().
+
+    LOCAL STAGE0_DRY_KG IS 0.
+    LOCAL STAGE1_DRY_KG IS 0.
+    LOCAL SUPPORT_DRY_KG IS 0.
+    LOCAL PAYLOAD_DRY_KG IS 0.
+    LOCAL STAGE0_WET_KG IS 0.
+    LOCAL STAGE1_WET_KG IS 0.
+    LOCAL SUPPORT_WET_KG IS 0.
+    LOCAL PAYLOAD_WET_KG IS 0.
+    LOCAL STAGE0_CURRENT_KG IS 0.
+    LOCAL STAGE1_CURRENT_KG IS 0.
+    LOCAL SUPPORT_CURRENT_KG IS 0.
+    LOCAL PAYLOAD_CURRENT_KG IS 0.
+    LOCAL STAGE0_RESOURCE_INITIAL_KG IS 0.
+    LOCAL STAGE1_RESOURCE_INITIAL_KG IS 0.
+    LOCAL PAYLOAD_RESOURCE_INITIAL_KG IS 0.
+    LOCAL STAGE0_RESOURCE_CAPACITY_KG IS 0.
+    LOCAL STAGE1_RESOURCE_CAPACITY_KG IS 0.
+    LOCAL PAYLOAD_RESOURCE_CAPACITY_KG IS 0.
+    LOCAL STAGE0_ENGINE_COUNT IS 0.
+    LOCAL STAGE1_ENGINE_COUNT IS 0.
+    LOCAL STAGE0_THRUST_VAC_N IS 0.
+    LOCAL STAGE1_THRUST_VAC_N IS 0.
+    LOCAL STAGE0_THRUST_SL_N IS 0.
+    LOCAL STAGE1_THRUST_SL_N IS 0.
+    LOCAL STAGE0_ISP_VAC_NUM IS 0.
+    LOCAL STAGE1_ISP_VAC_NUM IS 0.
+    LOCAL STAGE0_ISP_SL_NUM IS 0.
+    LOCAL STAGE1_ISP_SL_NUM IS 0.
+    LOCAL STAGE0_MAX_FLOW_KGPS IS 0.
+    LOCAL STAGE1_MAX_FLOW_KGPS IS 0.
+
+    LOCAL PART_INDEX IS 0.
+    FOR PART_ITEM IN PART_LIST {
+        LOCAL PART_IS_SUPPORT IS IS_LAUNCH_SUPPORT_PART(PART_ITEM).
+        LOCAL PHYS_STAGE_INDEX IS CLASSIFY_PHYSICAL_STAGE(
+            PART_ITEM:STAGE, PART_ITEM:DECOUPLEDIN, LAUNCH_ENGINE_STAGE, BOOSTER_SEP_STAGE, PART_IS_SUPPORT).
+        LOCAL PHYS_NOTE IS PHYSICAL_STAGE_NOTE(
+            PART_ITEM:STAGE, PART_ITEM:DECOUPLEDIN, LAUNCH_ENGINE_STAGE, BOOSTER_SEP_STAGE, PART_IS_SUPPORT).
+        LOCAL PART_OBJ IS PART_OBJECT(PART_INDEX, PART_ITEM, PHYS_STAGE_INDEX, PHYS_NOTE, ENGINE_BY_UID).
+
+        PARTS_JSON:ADD(PART_OBJ).
+
+        LOCAL PART_DRY_KG IS PART_ITEM:DRYMASS * 1000.
+        LOCAL PART_WET_KG IS PART_ITEM:WETMASS * 1000.
+        LOCAL PART_CURRENT_KG IS PART_ITEM:MASS * 1000.
+        LOCAL PART_RESOURCE_INITIAL_KG IS 0.
+        LOCAL PART_RESOURCE_CAPACITY_KG IS 0.
+        LOCAL HAS_TANK_RESOURCE IS FALSE.
+
+        FOR RES_ITEM IN PART_ITEM:RESOURCES {
+            LOCAL RES_HAS_MASS IS (RES_ITEM:DENSITY > 0).
+            SET RES_HAS_MASS TO RES_HAS_MASS AND (RES_ITEM:CAPACITY > 0).
+            IF RES_HAS_MASS {
+                SET PART_RESOURCE_INITIAL_KG TO PART_RESOURCE_INITIAL_KG + RES_ITEM:AMOUNT * RES_ITEM:DENSITY * 1000.
+                SET PART_RESOURCE_CAPACITY_KG TO PART_RESOURCE_CAPACITY_KG + RES_ITEM:CAPACITY * RES_ITEM:DENSITY * 1000.
+                SET HAS_TANK_RESOURCE TO TRUE.
+            }.
+        }.
+
+        LOCAL HAS_ENGINE IS ENGINE_BY_UID:HASKEY(PART_ITEM:UID).
+        LOCAL IS_PAYLOAD IS IS_PAYLOAD_PART(PART_ITEM, PHYS_STAGE_INDEX).
+        IF IS_PAYLOAD {
+            PAYLOAD_PART_INDICES:ADD(PART_INDEX).
+            SET PAYLOAD_DRY_KG TO PAYLOAD_DRY_KG + PART_DRY_KG.
+            SET PAYLOAD_WET_KG TO PAYLOAD_WET_KG + PART_WET_KG.
+            SET PAYLOAD_CURRENT_KG TO PAYLOAD_CURRENT_KG + PART_CURRENT_KG.
+            SET PAYLOAD_RESOURCE_INITIAL_KG TO PAYLOAD_RESOURCE_INITIAL_KG + PART_RESOURCE_INITIAL_KG.
+            SET PAYLOAD_RESOURCE_CAPACITY_KG TO PAYLOAD_RESOURCE_CAPACITY_KG + PART_RESOURCE_CAPACITY_KG.
+        } ELSE IF PHYS_STAGE_INDEX = 0 {
+            STAGE0_PART_INDICES:ADD(PART_INDEX).
+            SET STAGE0_DRY_KG TO STAGE0_DRY_KG + PART_DRY_KG.
+            SET STAGE0_WET_KG TO STAGE0_WET_KG + PART_WET_KG.
+            SET STAGE0_CURRENT_KG TO STAGE0_CURRENT_KG + PART_CURRENT_KG.
+            SET STAGE0_RESOURCE_INITIAL_KG TO STAGE0_RESOURCE_INITIAL_KG + PART_RESOURCE_INITIAL_KG.
+            SET STAGE0_RESOURCE_CAPACITY_KG TO STAGE0_RESOURCE_CAPACITY_KG + PART_RESOURCE_CAPACITY_KG.
+            IF HAS_TANK_RESOURCE {
+                STAGE0_TANK_PART_INDICES:ADD(PART_INDEX).
+            }.
+            IF HAS_ENGINE {
+                LOCAL ENG_OBJ IS ENGINE_BY_UID[PART_ITEM:UID].
+                STAGE0_ENGINE_PART_INDICES:ADD(PART_INDEX).
+                SET STAGE0_ENGINE_COUNT TO STAGE0_ENGINE_COUNT + 1.
+                SET STAGE0_THRUST_VAC_N TO STAGE0_THRUST_VAC_N + ENG_OBJ["possible_thrust_vac_n"].
+                SET STAGE0_THRUST_SL_N TO STAGE0_THRUST_SL_N + ENG_OBJ["possible_thrust_sl_n"].
+                SET STAGE0_ISP_VAC_NUM TO STAGE0_ISP_VAC_NUM + ENG_OBJ["possible_thrust_vac_n"] * ENG_OBJ["vacuum_isp_s"].
+                SET STAGE0_ISP_SL_NUM TO STAGE0_ISP_SL_NUM + ENG_OBJ["possible_thrust_sl_n"] * ENG_OBJ["sealevel_isp_s"].
+                SET STAGE0_MAX_FLOW_KGPS TO STAGE0_MAX_FLOW_KGPS + ENG_OBJ["max_mass_flow_kgps"].
+            }.
+        } ELSE IF PHYS_STAGE_INDEX = 1 {
+            STAGE1_PART_INDICES:ADD(PART_INDEX).
+            SET STAGE1_DRY_KG TO STAGE1_DRY_KG + PART_DRY_KG.
+            SET STAGE1_WET_KG TO STAGE1_WET_KG + PART_WET_KG.
+            SET STAGE1_CURRENT_KG TO STAGE1_CURRENT_KG + PART_CURRENT_KG.
+            SET STAGE1_RESOURCE_INITIAL_KG TO STAGE1_RESOURCE_INITIAL_KG + PART_RESOURCE_INITIAL_KG.
+            SET STAGE1_RESOURCE_CAPACITY_KG TO STAGE1_RESOURCE_CAPACITY_KG + PART_RESOURCE_CAPACITY_KG.
+            IF HAS_TANK_RESOURCE {
+                STAGE1_TANK_PART_INDICES:ADD(PART_INDEX).
+            }.
+            IF HAS_ENGINE {
+                LOCAL ENG_OBJ IS ENGINE_BY_UID[PART_ITEM:UID].
+                STAGE1_ENGINE_PART_INDICES:ADD(PART_INDEX).
+                SET STAGE1_ENGINE_COUNT TO STAGE1_ENGINE_COUNT + 1.
+                SET STAGE1_THRUST_VAC_N TO STAGE1_THRUST_VAC_N + ENG_OBJ["possible_thrust_vac_n"].
+                SET STAGE1_THRUST_SL_N TO STAGE1_THRUST_SL_N + ENG_OBJ["possible_thrust_sl_n"].
+                SET STAGE1_ISP_VAC_NUM TO STAGE1_ISP_VAC_NUM + ENG_OBJ["possible_thrust_vac_n"] * ENG_OBJ["vacuum_isp_s"].
+                SET STAGE1_ISP_SL_NUM TO STAGE1_ISP_SL_NUM + ENG_OBJ["possible_thrust_sl_n"] * ENG_OBJ["sealevel_isp_s"].
+                SET STAGE1_MAX_FLOW_KGPS TO STAGE1_MAX_FLOW_KGPS + ENG_OBJ["max_mass_flow_kgps"].
+            }.
+        } ELSE {
+            SUPPORT_PART_INDICES:ADD(PART_INDEX).
+            SET SUPPORT_DRY_KG TO SUPPORT_DRY_KG + PART_DRY_KG.
+            SET SUPPORT_WET_KG TO SUPPORT_WET_KG + PART_WET_KG.
+            SET SUPPORT_CURRENT_KG TO SUPPORT_CURRENT_KG + PART_CURRENT_KG.
+        }.
+
+        SET PART_INDEX TO PART_INDEX + 1.
+    }.
+
+    STAGES_JSON:ADD(STAGE_SUMMARY_OBJECT(
+        0, "booster", STAGE0_PART_INDICES, STAGE0_ENGINE_PART_INDICES, STAGE0_TANK_PART_INDICES,
+        STAGE0_PART_INDICES:LENGTH, STAGE0_ENGINE_COUNT, STAGE0_TANK_PART_INDICES:LENGTH,
+        STAGE0_DRY_KG, STAGE0_WET_KG, STAGE0_CURRENT_KG,
+        STAGE0_RESOURCE_INITIAL_KG, STAGE0_RESOURCE_CAPACITY_KG,
+        STAGE0_THRUST_VAC_N, STAGE0_THRUST_SL_N, STAGE0_ISP_VAC_NUM, STAGE0_ISP_SL_NUM,
+        STAGE0_MAX_FLOW_KGPS,
+        "First physical stage inferred from KSP staging numbers.")).
+
+    STAGES_JSON:ADD(STAGE_SUMMARY_OBJECT(
+        1, "upper_stack", STAGE1_PART_INDICES, STAGE1_ENGINE_PART_INDICES, STAGE1_TANK_PART_INDICES,
+        STAGE1_PART_INDICES:LENGTH, STAGE1_ENGINE_COUNT, STAGE1_TANK_PART_INDICES:LENGTH,
+        STAGE1_DRY_KG, STAGE1_WET_KG, STAGE1_CURRENT_KG,
+        STAGE1_RESOURCE_INITIAL_KG, STAGE1_RESOURCE_CAPACITY_KG,
+        STAGE1_THRUST_VAC_N, STAGE1_THRUST_SL_N, STAGE1_ISP_VAC_NUM, STAGE1_ISP_SL_NUM,
+        STAGE1_MAX_FLOW_KGPS,
+        "Upper stack inferred from KSP staging numbers.")).
+
+    LOCAL SUPPORT_OBJ IS LEXICON().
+    SET SUPPORT_OBJ["name"] TO "ground_support".
+    SET SUPPORT_OBJ["part_indices"] TO SUPPORT_PART_INDICES.
+    SET SUPPORT_OBJ["part_count"] TO SUPPORT_PART_INDICES:LENGTH.
+    SET SUPPORT_OBJ["dry_mass_kg"] TO SUPPORT_DRY_KG.
+    SET SUPPORT_OBJ["wet_mass_kg"] TO SUPPORT_WET_KG.
+    SET SUPPORT_OBJ["current_mass_kg"] TO SUPPORT_CURRENT_KG.
+    SET SUPPORT_OBJ["note"] TO "Launch clamps and other prelaunch staging hardware excluded from POST2 two-stage vehicle mass.".
+
+    LOCAL PAYLOAD_OBJ IS LEXICON().
+    SET PAYLOAD_OBJ["name"] TO "payload".
+    SET PAYLOAD_OBJ["part_indices"] TO PAYLOAD_PART_INDICES.
+    SET PAYLOAD_OBJ["part_count"] TO PAYLOAD_PART_INDICES:LENGTH.
+    SET PAYLOAD_OBJ["dry_mass_kg"] TO PAYLOAD_DRY_KG.
+    SET PAYLOAD_OBJ["wet_mass_kg"] TO PAYLOAD_WET_KG.
+    SET PAYLOAD_OBJ["current_mass_kg"] TO PAYLOAD_CURRENT_KG.
+    SET PAYLOAD_OBJ["resource_initial_mass_kg"] TO PAYLOAD_RESOURCE_INITIAL_KG.
+    SET PAYLOAD_OBJ["resource_capacity_mass_kg"] TO PAYLOAD_RESOURCE_CAPACITY_KG.
+    SET PAYLOAD_OBJ["note"] TO "Payload gross mass exported for POST2 payload stage; importer stores current_mass_kg as payload dry mass.".
+
+    SET ROOT["metadata"] TO METADATA.
+    SET ROOT["launch_site"] TO LAUNCH_SITE.
+    SET ROOT["vehicle"] TO VEHICLE.
+    SET ROOT["staging_hints"] TO STAGING_HINTS.
+    SET ROOT["stages"] TO STAGES_JSON.
+    SET ROOT["payload"] TO PAYLOAD_OBJ.
+    SET ROOT["support"] TO SUPPORT_OBJ.
+    SET ROOT["parts"] TO PARTS_JSON.
+
+    WRITEJSON(ROOT, OUT_PATH).
+    PRINT "POST2 vehicle/site JSON written to " + OUT_PATH.
+    PRINT "Stages exported: " + STAGES_JSON:LENGTH + ", parts exported: " + PARTS_JSON:LENGTH.
+}.
+
+EXPORT_MAIN().

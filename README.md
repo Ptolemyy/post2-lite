@@ -30,6 +30,12 @@ Load and override vehicle values:
 .\build\Release\post2_shell.exe simulate --vehicle-config vehicle.cfg --engine-enabled true --engine-max-thrust 4500 --engine-isp 310
 ```
 
+Import a kOS vehicle/site export:
+
+```powershell
+.\build\Release\post2_shell.exe simulate --import-ksp-vehicle-site vehicle_launchsite.json --save-case imported.case.json --no-csv --no-svg
+```
+
 Run the core in remote server mode:
 
 ```powershell
@@ -50,7 +56,7 @@ On Windows, run:
 .\build\Release\post2_gui.exe
 ```
 
-Use the `Mode` menu to switch between local core and remote core. Use `Mode > Remote endpoint...` to edit the remote host and port before connecting to `post2_core_server`. Use the `Vehicle` menu to edit, load, or save the current vehicle config.
+Use the `Mode` menu to switch between local core and remote core. Use `Mode > Remote endpoint...` to edit the remote host and port before connecting to `post2_core_server`. Use the `Vehicle` menu to edit the current vehicle or import a kOS vehicle/site JSON export.
 
 ## Current model
 
