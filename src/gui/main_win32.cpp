@@ -388,6 +388,21 @@ std::string remote_endpoint_text()
     return g_remote_host + ":" + std::to_string(g_remote_port);
 }
 
+bool should_render_earth_fixed_view()
+{
+    for (const auto& phase : g_case.phases) {
+        if (phase.hold_down_clamp_initial_active) {
+            return true;
+        }
+        for (const auto& action : phase.actions) {
+            if (action.type == "set_hold_down_clamp_active") {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 void ensure_case_initialized()
 {
     if (!g_case_initialized || g_case.phases.empty()) {
@@ -3653,7 +3668,13 @@ void paint_scene(HWND hwnd, HDC hdc)
         OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
     old_font = static_cast<HFONT>(SelectObject(hdc, body_font));
     draw_text_line(hdc, content_x, 52, g_status);
-    draw_text_line(hdc, content_x, 74, "3D inertial view. Remote endpoint: " + remote_endpoint_text() + ".");
+    draw_text_line(
+        hdc,
+        content_x,
+        74,
+        std::string("3D ") +
+            (should_render_earth_fixed_view() ? "Earth-fixed" : "inertial") +
+            " view. Remote endpoint: " + remote_endpoint_text() + ".");
 
     if (!g_result.ok || g_result.state_log.empty()) {
         SelectObject(hdc, old_font);
@@ -3803,7 +3824,12 @@ LRESULT CALLBACK scene_window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARA
     case WM_PAINT: {
         PAINTSTRUCT ps;
         BeginPaint(hwnd, &ps);
-        g_scene_renderer.render(g_camera, g_result.state_log);
+        g_scene_renderer.render(
+            g_camera,
+            g_result.state_log,
+            g_case.earth_rotation_at_epoch_rad,
+            g_case.earth_rotation_rad_per_s,
+            should_render_earth_fixed_view());
         EndPaint(hwnd, &ps);
         return 0;
     }

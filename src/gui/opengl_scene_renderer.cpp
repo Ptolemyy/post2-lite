@@ -96,6 +96,33 @@ Vec3 lifted_for_display(const Vec3& position_m)
     return position_m * ((length + kTrajectorySurfaceLiftM) / length);
 }
 
+Vec3 earth_fixed_position_for_display(
+    const post2::core::LaunchVehicleStateLogEntry& entry,
+    double earth_rotation_at_epoch_rad,
+    double earth_rotation_rad_per_s)
+{
+    const double theta_rad = post2::core::frames::earth_rotation_angle_rad(
+        earth_rotation_at_epoch_rad,
+        earth_rotation_rad_per_s,
+        entry.time_s);
+    return post2::core::frames::eci_to_ecef_position(entry.state.position_m, theta_rad);
+}
+
+Vec3 position_for_display(
+    const post2::core::LaunchVehicleStateLogEntry& entry,
+    double earth_rotation_at_epoch_rad,
+    double earth_rotation_rad_per_s,
+    bool earth_fixed_view)
+{
+    if (!earth_fixed_view) {
+        return entry.state.position_m;
+    }
+    return earth_fixed_position_for_display(
+        entry,
+        earth_rotation_at_epoch_rad,
+        earth_rotation_rad_per_s);
+}
+
 struct EarthTexture {
     int width = 0;
     int height = 0;
@@ -206,7 +233,7 @@ EarthTexture load_earth_texture_from_resource()
 void emit_earth_sphere_mesh()
 {
     // WGS84 oblate ellipsoid: x,y use a (equatorial radius), z uses b (polar).
-    // The texture's lat/lon UV mapping is unchanged — parametric lat is fed to
+    // The texture's lat/lon UV mapping is unchanged - parametric lat is fed to
     // the same cos/sin and the geometry is then flattened along z.
     const double a_m = post2::core::frames::Wgs84::a_m;
     const double b_m = post2::core::frames::Wgs84::b_m;
@@ -549,7 +576,12 @@ void OpenGLSceneRenderer::resize(int width, int height)
     }
 }
 
-void OpenGLSceneRenderer::render(const Camera3D& camera, const post2::core::StateLog& state_log)
+void OpenGLSceneRenderer::render(
+    const Camera3D& camera,
+    const post2::core::StateLog& state_log,
+    double earth_rotation_at_epoch_rad,
+    double earth_rotation_rad_per_s,
+    bool earth_fixed_view)
 {
     if (!make_current()) {
         return;
@@ -561,7 +593,7 @@ void OpenGLSceneRenderer::render(const Camera3D& camera, const post2::core::Stat
         resize(rect_width(client), rect_height(client));
     }
 
-    draw_scene(camera, state_log);
+    draw_scene(camera, state_log, earth_rotation_at_epoch_rad, earth_rotation_rad_per_s, earth_fixed_view);
     SwapBuffers(hdc_);
 }
 
@@ -613,7 +645,12 @@ void OpenGLSceneRenderer::build_earth_mesh()
     glEndList();
 }
 
-void OpenGLSceneRenderer::draw_scene(const Camera3D& camera, const post2::core::StateLog& state_log)
+void OpenGLSceneRenderer::draw_scene(
+    const Camera3D& camera,
+    const post2::core::StateLog& state_log,
+    double earth_rotation_at_epoch_rad,
+    double earth_rotation_rad_per_s,
+    bool earth_fixed_view)
 {
     glViewport(0, 0, width_, height_);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
@@ -631,8 +668,8 @@ void OpenGLSceneRenderer::draw_scene(const Camera3D& camera, const post2::core::
         glDepthMask(GL_TRUE);
         draw_earth();
         draw_axis();
-        draw_trajectory(state_log);
-        draw_markers(state_log);
+        draw_trajectory(state_log, earth_rotation_at_epoch_rad, earth_rotation_rad_per_s, earth_fixed_view);
+        draw_markers(state_log, earth_rotation_at_epoch_rad, earth_rotation_rad_per_s, earth_fixed_view);
     }
 
     draw_border();
@@ -680,7 +717,11 @@ void OpenGLSceneRenderer::draw_axis() const
     glLineWidth(1.0f);
 }
 
-void OpenGLSceneRenderer::draw_trajectory(const post2::core::StateLog& state_log) const
+void OpenGLSceneRenderer::draw_trajectory(
+    const post2::core::StateLog& state_log,
+    double earth_rotation_at_epoch_rad,
+    double earth_rotation_rad_per_s,
+    bool earth_fixed_view) const
 {
     const auto& entries = state_log.entries();
     if (entries.size() < 2) {
@@ -694,11 +735,13 @@ void OpenGLSceneRenderer::draw_trajectory(const post2::core::StateLog& state_log
     glBegin(GL_LINE_STRIP);
     const std::size_t stride = trajectory_draw_stride(entries.size());
     for (std::size_t index = 0; index < entries.size(); index += stride) {
-        const Vec3 position = lifted_for_display(entries[index].state.position_m);
+        const Vec3 position = lifted_for_display(position_for_display(
+            entries[index], earth_rotation_at_epoch_rad, earth_rotation_rad_per_s, earth_fixed_view));
         glVertex3d(position.x, position.y, position.z);
     }
     if ((entries.size() - 1) % stride != 0) {
-        const Vec3 position = lifted_for_display(entries.back().state.position_m);
+        const Vec3 position = lifted_for_display(position_for_display(
+            entries.back(), earth_rotation_at_epoch_rad, earth_rotation_rad_per_s, earth_fixed_view));
         glVertex3d(position.x, position.y, position.z);
     }
     glEnd();
@@ -706,7 +749,11 @@ void OpenGLSceneRenderer::draw_trajectory(const post2::core::StateLog& state_log
     glDepthMask(GL_TRUE);
 }
 
-void OpenGLSceneRenderer::draw_markers(const post2::core::StateLog& state_log) const
+void OpenGLSceneRenderer::draw_markers(
+    const post2::core::StateLog& state_log,
+    double earth_rotation_at_epoch_rad,
+    double earth_rotation_rad_per_s,
+    bool earth_fixed_view) const
 {
     if (state_log.empty()) {
         return;
@@ -716,10 +763,12 @@ void OpenGLSceneRenderer::draw_markers(const post2::core::StateLog& state_log) c
     glDepthMask(GL_FALSE);
     glPointSize(7.0f);
     glBegin(GL_POINTS);
-    Vec3 position = lifted_for_display(state_log.front().state.position_m);
+    Vec3 position = lifted_for_display(position_for_display(
+        state_log.front(), earth_rotation_at_epoch_rad, earth_rotation_rad_per_s, earth_fixed_view));
     glColor3ub(22, 163, 74);
     glVertex3d(position.x, position.y, position.z);
-    position = lifted_for_display(state_log.back().state.position_m);
+    position = lifted_for_display(position_for_display(
+        state_log.back(), earth_rotation_at_epoch_rad, earth_rotation_rad_per_s, earth_fixed_view));
     glColor3ub(17, 24, 39);
     glVertex3d(position.x, position.y, position.z);
     glEnd();
