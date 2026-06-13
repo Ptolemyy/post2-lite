@@ -1,5 +1,6 @@
 #include "post2/propagation/force_models.hpp"
 
+#include <cmath>
 #include <stdexcept>
 
 namespace post2::propagation {
@@ -33,10 +34,16 @@ double surface_radius_m(const post2::core::SimulationConfig& config)
     return config.earth_radius_m + config.launch_site.altitude_m;
 }
 
-} // namespace
+double effective_j2(const post2::core::SimulationConfig& config)
+{
+    if (config.gravity_model.j2 != post2::core::kEarthJ2) {
+        return config.gravity_model.j2;
+    }
+    return config.earth_j2;
+}
 
-post2::core::Vec3 gravity_acceleration_mps2(
-    const post2::core::SimulationConfig& config,
+post2::core::Vec3 point_mass_gravity_acceleration_mps2(
+    double mu_m3s2,
     const post2::core::Vec3& position_m)
 {
     const double radius_m = post2::vehicle::norm(position_m);
@@ -44,8 +51,50 @@ post2::core::Vec3 gravity_acceleration_mps2(
         throw std::runtime_error("vehicle reached the gravity singularity");
     }
 
-    const double factor = -config.earth_mu_m3s2 / (radius_m * radius_m * radius_m);
+    const double factor = -mu_m3s2 / (radius_m * radius_m * radius_m);
     return position_m * factor;
+}
+
+post2::core::Vec3 j2_gravity_acceleration_mps2(
+    const post2::core::SimulationConfig& config,
+    const post2::core::Vec3& position_m)
+{
+    const post2::core::Vec3 point =
+        point_mass_gravity_acceleration_mps2(config.earth_mu_m3s2, position_m);
+
+    const double r2 = post2::vehicle::dot(position_m, position_m);
+    const double r = std::sqrt(r2);
+    const double r5 = r2 * r2 * r;
+    const double z2 = position_m.z * position_m.z;
+    const double factor =
+        1.5 * effective_j2(config) * config.earth_mu_m3s2 *
+        config.earth_radius_m * config.earth_radius_m / r5;
+    const double z_ratio = 5.0 * z2 / r2;
+    const post2::core::Vec3 perturbation = {
+        factor * position_m.x * (z_ratio - 1.0),
+        factor * position_m.y * (z_ratio - 1.0),
+        factor * position_m.z * (z_ratio - 3.0),
+    };
+    return point + perturbation;
+}
+
+} // namespace
+
+post2::core::Vec3 gravity_acceleration_mps2(
+    const post2::core::SimulationConfig& config,
+    const post2::core::Vec3& position_m)
+{
+    if (config.gravity_model.type == "point_mass") {
+        return point_mass_gravity_acceleration_mps2(config.earth_mu_m3s2, position_m);
+    }
+    if (config.gravity_model.type == "j2") {
+        return j2_gravity_acceleration_mps2(config, position_m);
+    }
+    if (config.gravity_model.type == "spherical_harmonic") {
+        return {};
+    }
+
+    throw std::runtime_error("unsupported gravity model type: " + config.gravity_model.type);
 }
 
 post2::core::Vec3 surface_normal_acceleration_mps2(

@@ -3,6 +3,7 @@
 #include "post2/core/control_models.hpp"
 #include "post2/core/coordinates.hpp"
 #include "post2/integrators/ode_integrator.hpp"
+#include "post2/propagation/force_model_set.hpp"
 #include "post2/propagation/force_models.hpp"
 #include "post2/propagation/vehicle_consumption.hpp"
 #include "post2/vehicle/vehicle_config_io.hpp"
@@ -20,6 +21,15 @@ namespace post2::core {
 
 namespace {
 
+Vec3 cross_product(const Vec3& lhs, const Vec3& rhs)
+{
+    return {
+        lhs.y * rhs.z - lhs.z * rhs.y,
+        lhs.z * rhs.x - lhs.x * rhs.z,
+        lhs.x * rhs.y - lhs.y * rhs.x,
+    };
+}
+
 State make_hold_down_clamp_state(const SimulationConfig& config, double time_s)
 {
     return launch_site_inertial_state(config, time_s);
@@ -34,22 +44,80 @@ void set_hold_down_clamp_state(
     runtime->hold_down_clamp.planet_fixed_position_m = launch_site_planet_fixed_position_m(config);
 }
 
-post2::integrators::ExtendedDerivative inertial_extended_dynamics(
+post2::propagation::EnvironmentState make_environment_state(
     const SimulationConfig& config,
+    double time_s,
+    const State& motion)
+{
+    post2::propagation::EnvironmentState environment;
+    environment.time_s = time_s;
+    environment.position_eci_m = motion.position_m;
+    environment.velocity_eci_mps = motion.velocity_mps;
+    environment.position_ecef_m = inertial_to_planet_fixed(
+        motion.position_m,
+        time_s,
+        config.earth_rotation_rad_per_s);
+    const Vec3 rotated_velocity_ecef_mps = inertial_to_planet_fixed(
+        motion.velocity_mps,
+        time_s,
+        config.earth_rotation_rad_per_s);
+    environment.velocity_ecef_mps =
+        rotated_velocity_ecef_mps -
+        cross_product({0.0, 0.0, config.earth_rotation_rad_per_s}, environment.position_ecef_m);
+    environment.radius_m = post2::vehicle::norm(motion.position_m);
+    environment.altitude_m = environment.radius_m - config.earth_radius_m;
+    if (environment.radius_m > 0.0) {
+        const double sin_latitude =
+            std::clamp(environment.position_ecef_m.z / environment.radius_m, -1.0, 1.0);
+        environment.latitude_rad = std::asin(sin_latitude);
+        environment.longitude_rad =
+            std::atan2(environment.position_ecef_m.y, environment.position_ecef_m.x);
+    }
+    return environment;
+}
+
+post2::integrators::ExtendedDerivative phase_extended_dynamics(
+    const post2::propagation::ForceModelSet& force_models,
+    const post2::propagation::ForceModelContext& force_context,
     const post2::integrators::ExtendedState& state,
-    const Vec3& thrust_acceleration_mps2,
     std::vector<double> tank_mass_dots_kgps)
 {
-    Vec3 acceleration_mps2 =
-        post2::propagation::gravity_acceleration_mps2(config, state.motion.position_m) +
-        thrust_acceleration_mps2;
-    acceleration_mps2 = acceleration_mps2 +
-        post2::propagation::surface_normal_acceleration_mps2(config, state.motion);
+    const post2::propagation::ForceModelOutput force_output =
+        force_models.evaluate_all(force_context, state);
 
     return {
-        {state.motion.velocity_mps, acceleration_mps2},
+        {state.motion.velocity_mps, force_output.acceleration_eci_mps2},
         std::move(tank_mass_dots_kgps),
     };
+}
+
+bool supported_gravity_model_type(const std::string& type)
+{
+    return type == "point_mass" || type == "j2" || type == "spherical_harmonic";
+}
+
+bool validate_gravity_model_config(
+    const GravityModelConfig& gravity_model,
+    const std::string& prefix,
+    std::string* error)
+{
+    if (!supported_gravity_model_type(gravity_model.type)) {
+        *error = prefix + ".type must be \"point_mass\", \"j2\", or \"spherical_harmonic\"";
+        return false;
+    }
+    if (gravity_model.j2 < 0.0) {
+        *error = prefix + ".j2 cannot be negative";
+        return false;
+    }
+    if (gravity_model.degree < 0 || gravity_model.order < 0) {
+        *error = prefix + ".degree and .order cannot be negative";
+        return false;
+    }
+    if (gravity_model.order > gravity_model.degree) {
+        *error = prefix + ".order cannot exceed .degree";
+        return false;
+    }
+    return true;
 }
 
 bool validate_config(const SimulationConfig& config, std::string* error)
@@ -62,8 +130,15 @@ bool validate_config(const SimulationConfig& config, std::string* error)
         *error = "earth_mu_m3s2 must be positive";
         return false;
     }
+    if (config.earth_j2 < 0.0) {
+        *error = "earth_j2 cannot be negative";
+        return false;
+    }
     if (config.earth_rotation_rad_per_s < 0.0) {
         *error = "earth_rotation_rad_per_s cannot be negative";
+        return false;
+    }
+    if (!validate_gravity_model_config(config.gravity_model, "gravity_model", error)) {
         return false;
     }
     if (config.initial_altitude_m <= 0.0) {
@@ -124,6 +199,11 @@ SimulationConfig make_phase_simulation_config(
     config.duration_s = phase_end_time_s;
     config.step_s = case_config.step_s;
     config.launch_site = case_config.launch_site;
+    config.earth_j2 = case_config.earth_j2;
+    config.gravity_model = phase.force_models.gravity_model;
+    if (config.gravity_model.j2 == kEarthJ2 && config.earth_j2 != kEarthJ2) {
+        config.gravity_model.j2 = config.earth_j2;
+    }
     config.normal_force.enabled = phase.force_models.normal_force;
     config.vehicle = case_config.vehicle;
     return config;
@@ -145,6 +225,10 @@ bool validate_case_config(const CaseConfig& config, std::string* error)
     }
     if (config.earth_mu_m3s2 <= 0.0) {
         *error = "earth_mu_m3s2 must be positive";
+        return false;
+    }
+    if (config.earth_j2 < 0.0) {
+        *error = "earth_j2 cannot be negative";
         return false;
     }
     if (config.earth_rotation_rad_per_s < 0.0) {
@@ -179,6 +263,12 @@ bool validate_case_config(const CaseConfig& config, std::string* error)
         }
         if (phase.integrator != "ode") {
             *error = "phase " + std::to_string(i) + " integrator must be \"ode\"";
+            return false;
+        }
+        if (!validate_gravity_model_config(
+                phase.force_models.gravity_model,
+                "phase " + std::to_string(i) + " force_models.gravity_model",
+                error)) {
             return false;
         }
         if (i > 0 && !phase.inherit_initial_state && !phase.initial_state_eci.has_value()) {
@@ -326,31 +416,6 @@ post2::propagation::EngineCommand make_engine_command(
     };
 }
 
-post2::integrators::ExtendedDerivative phase_extended_dynamics(
-    const SimulationConfig& simulation_config,
-    const PhaseConfig& phase,
-    const post2::integrators::ExtendedState& state,
-    const Vec3& thrust_acceleration_mps2,
-    std::vector<double> tank_mass_dots_kgps)
-{
-    Vec3 acceleration_mps2;
-    if (phase.force_models.gravity) {
-        acceleration_mps2 = acceleration_mps2 +
-            post2::propagation::gravity_acceleration_mps2(simulation_config, state.motion.position_m);
-    }
-    if (phase.force_models.thrust) {
-        acceleration_mps2 = acceleration_mps2 + thrust_acceleration_mps2;
-    }
-    if (phase.force_models.normal_force) {
-        acceleration_mps2 = acceleration_mps2 +
-            post2::propagation::surface_normal_acceleration_mps2(simulation_config, state.motion);
-    }
-    return {
-        {state.motion.velocity_mps, acceleration_mps2},
-        std::move(tank_mass_dots_kgps),
-    };
-}
-
 void merge_phase_log(StateLog* merged, const StateLog& phase_log)
 {
     constexpr double duplicate_epsilon_s = 1.0e-9;
@@ -377,6 +442,8 @@ StateLog propagate_phase(
     const auto throttle_model = make_throttle_model(phase.throttle_model);
     const auto steering_model = make_steering_model(phase.steering_model);
     const PhaseContext context{&case_config, &phase, phase_index, phase_start_time_s};
+    const post2::propagation::ForceModelSet force_models =
+        post2::propagation::make_force_model_set(case_config, phase);
     const std::vector<TimedAction> actions = sorted_actions(phase);
 
     RuntimeControl control;
@@ -460,11 +527,22 @@ StateLog propagate_phase(
                         dynamics_state.tank_masses_kg,
                         dynamics_state.motion,
                         dynamics_command);
-                    auto deriv = phase_extended_dynamics(
-                        simulation_config,
-                        phase,
-                        dynamics_state,
+                    const post2::propagation::EnvironmentState environment =
+                        make_environment_state(
+                            simulation_config,
+                            dynamics_time_s,
+                            dynamics_state.motion);
+                    const post2::propagation::ForceModelContext force_context{
+                        &case_config,
+                        &phase,
+                        &runtime,
+                        &environment,
                         eval.thrust_acceleration_mps2,
+                    };
+                    auto deriv = phase_extended_dynamics(
+                        force_models,
+                        force_context,
+                        dynamics_state,
                         eval.tank_mass_dots_kgps);
                     last_eval = std::move(eval);
                     return deriv;
@@ -551,11 +629,15 @@ StateLog GravityPropagator::propagate(const SimulationConfig& config, const Stat
 
     auto last_eval = std::make_shared<post2::propagation::DerivativeResult>();
     auto last_cmd = std::make_shared<post2::propagation::EngineCommand>();
+    const CaseConfig case_config = case_from_simulation_config(config);
+    const PhaseConfig& phase = case_config.phases.front();
+    const post2::propagation::ForceModelSet force_models =
+        post2::propagation::make_force_model_set(case_config, phase);
 
     return integrator.integrate(
         state_log,
         termination,
-        [&config, &vehicle_propagator, &current_runtime, last_eval, last_cmd](
+        [&config, &case_config, &phase, &force_models, &vehicle_propagator, &current_runtime, last_eval, last_cmd](
             double time_s, const post2::integrators::ExtendedState& state) {
             const post2::propagation::EngineCommand cmd{
                 current_runtime.engine.enabled,
@@ -565,8 +647,20 @@ StateLog GravityPropagator::propagate(const SimulationConfig& config, const Stat
             *last_cmd = cmd;
             auto eval = vehicle_propagator.compute_derivatives(
                 time_s, current_runtime, state.tank_masses_kg, state.motion, cmd);
-            auto deriv = inertial_extended_dynamics(
-                config, state, eval.thrust_acceleration_mps2, eval.tank_mass_dots_kgps);
+            const post2::propagation::EnvironmentState environment =
+                make_environment_state(config, time_s, state.motion);
+            const post2::propagation::ForceModelContext force_context{
+                &case_config,
+                &phase,
+                &current_runtime,
+                &environment,
+                eval.thrust_acceleration_mps2,
+            };
+            auto deriv = phase_extended_dynamics(
+                force_models,
+                force_context,
+                state,
+                eval.tank_mass_dots_kgps);
             *last_eval = std::move(eval);
             return deriv;
         },

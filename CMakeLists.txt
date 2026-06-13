@@ -19,6 +19,8 @@ add_library(post2_core STATIC
     src/core/state_log.cpp
     src/core/trajectory_service.cpp
     src/integrators/ode_integrator.cpp
+    src/propagation/force_model.cpp
+    src/propagation/force_model_set.cpp
     src/propagation/force_models.cpp
     src/propagation/vehicle_consumption.cpp
     src/vehicle/runtime_state.cpp
@@ -57,11 +59,11 @@ if(WIN32)
 
     add_executable(post2_gui WIN32
         src/gui/main_win32.cpp
-        src/gui/software_renderer_3d.cpp
+        src/gui/opengl_scene_renderer.cpp
         ${CMAKE_CURRENT_BINARY_DIR}/generated/gui_resources.rc
     )
     target_compile_definitions(post2_gui PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
-    target_link_libraries(post2_gui PRIVATE post2_core gdi32 user32 comdlg32)
+    target_link_libraries(post2_gui PRIVATE post2_core gdi32 user32 comdlg32 opengl32)
 endif()
 
 include(CTest)

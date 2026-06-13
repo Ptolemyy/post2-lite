@@ -4,6 +4,8 @@
 #include "post2/core/optimization.hpp"
 #include "post2/core/projection.hpp"
 #include "post2/core/trajectory_service.hpp"
+#include "post2/propagation/force_model.hpp"
+#include "post2/propagation/force_models.hpp"
 #include "post2/vehicle/runtime_state.hpp"
 #include "post2/vehicle/vehicle_config_io.hpp"
 
@@ -37,7 +39,7 @@ int main()
         max_altitude = std::max(max_altitude, point.altitude_m);
     }
 
-    if (min_altitude < 190000.0 || max_altitude > 210000.0) {
+    if (min_altitude < 180000.0 || max_altitude > 210000.0) {
         std::cerr << "unexpected LEO altitude drift: min=" << min_altitude
                   << " max=" << max_altitude << '\n';
         return 1;
@@ -62,6 +64,75 @@ int main()
     if (!parsed.ok || parsed.state_log.size() != result.state_log.size()) {
         std::cerr << "CSV roundtrip failed\n";
         return 1;
+    }
+
+    {
+        post2::core::CaseConfig gravity_case;
+        gravity_case.earth_radius_m = post2::core::kEarthRadiusM;
+        gravity_case.earth_mu_m3s2 = post2::core::kEarthMuM3S2;
+        gravity_case.earth_j2 = post2::core::kEarthJ2;
+
+        post2::core::PhaseConfig gravity_phase;
+        gravity_phase.force_models.gravity_model.type = "point_mass";
+        gravity_phase.force_models.gravity_model.j2 = post2::core::kEarthJ2;
+
+        post2::integrators::ExtendedState gravity_state;
+        gravity_state.motion.position_m = {post2::core::kEarthRadiusM + 400000.0, 0.0, 0.0};
+        const post2::propagation::ForceModelContext gravity_context{
+            &gravity_case,
+            &gravity_phase,
+            nullptr,
+            nullptr,
+            {},
+        };
+
+        const double radius_m = post2::vehicle::norm(gravity_state.motion.position_m);
+        const double point_factor =
+            -post2::core::kEarthMuM3S2 / (radius_m * radius_m * radius_m);
+        const post2::core::Vec3 expected_point =
+            gravity_state.motion.position_m * point_factor;
+
+        post2::propagation::PointMassGravityModel point_model;
+        const auto point_output = point_model.evaluate(gravity_context, gravity_state);
+        if (std::abs(point_output.acceleration_eci_mps2.x - expected_point.x) > 1.0e-12 ||
+            std::abs(point_output.acceleration_eci_mps2.y - expected_point.y) > 1.0e-12 ||
+            std::abs(point_output.acceleration_eci_mps2.z - expected_point.z) > 1.0e-12) {
+            std::cerr << "point-mass force model did not match two-body gravity\n";
+            return 1;
+        }
+
+        gravity_phase.force_models.gravity_model.type = "j2";
+        const post2::propagation::ForceModelContext j2_context{
+            &gravity_case,
+            &gravity_phase,
+            nullptr,
+            nullptr,
+            {},
+        };
+        post2::propagation::J2GravityModel j2_model;
+        const auto j2_output = j2_model.evaluate(j2_context, gravity_state);
+        const post2::core::Vec3 j2_delta =
+            j2_output.acceleration_eci_mps2 - point_output.acceleration_eci_mps2;
+        if (!std::isfinite(j2_output.acceleration_eci_mps2.x) ||
+            !std::isfinite(j2_output.acceleration_eci_mps2.y) ||
+            !std::isfinite(j2_output.acceleration_eci_mps2.z) ||
+            post2::vehicle::norm(j2_delta) <= 1.0e-6) {
+            std::cerr << "J2 gravity perturbation was not finite/nonzero\n";
+            return 1;
+        }
+
+        post2::core::SimulationConfig point_config;
+        point_config.gravity_model.type = "point_mass";
+        const auto legacy_point =
+            post2::propagation::gravity_acceleration_mps2(
+                point_config,
+                gravity_state.motion.position_m);
+        if (std::abs(legacy_point.x - expected_point.x) > 1.0e-12 ||
+            std::abs(legacy_point.y - expected_point.y) > 1.0e-12 ||
+            std::abs(legacy_point.z - expected_point.z) > 1.0e-12) {
+            std::cerr << "legacy point-mass gravity helper changed formula\n";
+            return 1;
+        }
     }
 
     post2::vehicle::VehicleConfig vehicle_config = post2::vehicle::default_vehicle_config();
@@ -161,6 +232,7 @@ int main()
     case_config.vehicle = loaded_vehicle_config;
     case_config.launch_site.latitude_deg = 28.5;
     case_config.launch_site.longitude_deg = -80.6;
+    case_config.earth_j2 = 1.0827e-3;
     case_config.phases.clear();
 
     post2::core::PhaseConfig hdc_phase;
@@ -174,6 +246,10 @@ int main()
     hdc_phase.steering_model.type = "generic_poly";
     hdc_phase.steering_model.azimuth_deg.c0 = 90.0;
     hdc_phase.steering_model.elevation_deg.c0 = 5.0;
+    hdc_phase.force_models.gravity_model.type = "j2";
+    hdc_phase.force_models.gravity_model.j2 = case_config.earth_j2;
+    hdc_phase.force_models.gravity_model.degree = 2;
+    hdc_phase.force_models.gravity_model.order = 0;
     hdc_phase.actions.push_back({30.0, "set_hold_down_clamp_active", false});
     case_config.phases.push_back(hdc_phase);
 
@@ -183,6 +259,7 @@ int main()
     coast_phase.optimize_enabled = false;
     coast_phase.inherit_initial_state = true;
     coast_phase.force_models.thrust = false;
+    coast_phase.force_models.gravity_model.type = "point_mass";
     coast_phase.throttle_model.type = "t2w";
     coast_phase.throttle_model.target_t2w = 1.1;
     post2::core::PhaseAction booster_inactive;
@@ -218,8 +295,14 @@ int main()
         loaded_case.vehicle.stages.size() != 2 ||
         loaded_case.vehicle.stages[1].name != "booster" ||
         loaded_case.phases.size() != 2 ||
+        loaded_case.earth_j2 != case_config.earth_j2 ||
         !loaded_case.phases[0].optimize_enabled ||
         loaded_case.phases[1].optimize_enabled ||
+        loaded_case.phases[0].force_models.gravity_model.type != "j2" ||
+        loaded_case.phases[0].force_models.gravity_model.j2 != case_config.earth_j2 ||
+        loaded_case.phases[0].force_models.gravity_model.degree != 2 ||
+        loaded_case.phases[0].force_models.gravity_model.order != 0 ||
+        loaded_case.phases[1].force_models.gravity_model.type != "point_mass" ||
         loaded_case.phases[0].actions.size() != 1 ||
         loaded_case.phases[0].steering_model.azimuth_deg.c0 != 90.0 ||
         loaded_case.phases[1].throttle_model.type != "t2w" ||

@@ -12,6 +12,7 @@ namespace post2::core {
 
 constexpr double kEarthRadiusM = 6378137.0;
 constexpr double kEarthMuM3S2 = 3.986004418e14;
+constexpr double kEarthJ2 = 1.08262668e-3;
 constexpr double kEarthRotationRadPerS = 7.2921159e-5;
 constexpr double kDefaultAltitudeM = 200000.0;
 constexpr double kDefaultInclinationDeg = 28.5;
@@ -41,10 +42,32 @@ struct NormalForceConfig {
     bool enabled = true;
 };
 
+struct GravityModelConfig {
+    std::string type = "j2";
+    double j2 = kEarthJ2;
+    int degree = 0;
+    int order = 0;
+};
+
+struct AtmosphereModelConfig {
+    std::string type = "none";
+};
+
+struct AeroModelConfig {
+    std::string type = "none";
+};
+
 struct ForceModelSwitches {
     bool gravity = true;
     bool thrust = true;
     bool normal_force = true;
+    bool aerodynamic = false;
+    bool third_body = false;
+    bool solar_radiation_pressure = false;
+
+    GravityModelConfig gravity_model;
+    AtmosphereModelConfig atmosphere_model;
+    AeroModelConfig aero_model;
 };
 
 struct PhaseAction {
@@ -160,6 +183,7 @@ struct CaseConfig {
     LaunchSiteConfig launch_site;
     double earth_radius_m = kEarthRadiusM;
     double earth_mu_m3s2 = kEarthMuM3S2;
+    double earth_j2 = kEarthJ2;
     double earth_rotation_rad_per_s = kEarthRotationRadPerS;
     double step_s = kDefaultStepS;
     std::vector<PhaseConfig> phases;
@@ -169,7 +193,9 @@ struct CaseConfig {
 struct SimulationConfig {
     double earth_radius_m = kEarthRadiusM;
     double earth_mu_m3s2 = kEarthMuM3S2;
+    double earth_j2 = kEarthJ2;
     double earth_rotation_rad_per_s = kEarthRotationRadPerS;
+    GravityModelConfig gravity_model;
     double initial_altitude_m = kDefaultAltitudeM;
     double initial_speed_mps = 0.0;
     double inclination_deg = kDefaultInclinationDeg;

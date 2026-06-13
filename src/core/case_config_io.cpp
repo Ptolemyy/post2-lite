@@ -93,6 +93,45 @@ JsonValue engine_to_json(const post2::vehicle::EngineConfig& engine)
     });
 }
 
+JsonValue gravity_model_to_json(const GravityModelConfig& model)
+{
+    return JsonValue::object({
+        {"type", string(model.type)},
+        {"j2", number(model.j2)},
+        {"degree", number(static_cast<double>(model.degree))},
+        {"order", number(static_cast<double>(model.order))},
+    });
+}
+
+JsonValue atmosphere_model_to_json(const AtmosphereModelConfig& model)
+{
+    return JsonValue::object({
+        {"type", string(model.type)},
+    });
+}
+
+JsonValue aero_model_to_json(const AeroModelConfig& model)
+{
+    return JsonValue::object({
+        {"type", string(model.type)},
+    });
+}
+
+JsonValue force_models_to_json(const ForceModelSwitches& force_models)
+{
+    return JsonValue::object({
+        {"gravity", boolean(force_models.gravity)},
+        {"thrust", boolean(force_models.thrust)},
+        {"normal_force", boolean(force_models.normal_force)},
+        {"aerodynamic", boolean(force_models.aerodynamic)},
+        {"third_body", boolean(force_models.third_body)},
+        {"solar_radiation_pressure", boolean(force_models.solar_radiation_pressure)},
+        {"gravity_model", gravity_model_to_json(force_models.gravity_model)},
+        {"atmosphere_model", atmosphere_model_to_json(force_models.atmosphere_model)},
+        {"aero_model", aero_model_to_json(force_models.aero_model)},
+    });
+}
+
 JsonValue vehicle_to_json(const post2::vehicle::VehicleConfig& vehicle)
 {
     post2::vehicle::VehicleConfig normalized_vehicle = vehicle;
@@ -230,11 +269,7 @@ JsonValue phase_to_json(const PhaseConfig& phase)
         {"inherit_initial_state", boolean(phase.inherit_initial_state)},
         {"hold_down_clamp_initial_active", boolean(phase.hold_down_clamp_initial_active)},
         {"integrator", string(phase.integrator)},
-        {"force_models", JsonValue::object({
-            {"gravity", boolean(phase.force_models.gravity)},
-            {"thrust", boolean(phase.force_models.thrust)},
-            {"normal_force", boolean(phase.force_models.normal_force)},
-        })},
+        {"force_models", force_models_to_json(phase.force_models)},
         {"throttle_model", throttle_to_json(phase.throttle_model)},
         {"steering_model", steering_to_json(phase.steering_model)},
         {"actions", JsonValue::array(std::move(actions))},
@@ -297,6 +332,7 @@ JsonValue case_to_json_value(const CaseConfig& config)
         {"name", string(config.name)},
         {"earth_radius_m", number(config.earth_radius_m)},
         {"earth_mu_m3s2", number(config.earth_mu_m3s2)},
+        {"earth_j2", number(config.earth_j2)},
         {"earth_rotation_rad_per_s", number(config.earth_rotation_rad_per_s)},
         {"step_s", number(config.step_s)},
         {"launch_site", JsonValue::object({
@@ -421,6 +457,73 @@ bool read_poly(const JsonValue& object, const char* key, Poly2Config* target, st
 {
     const JsonValue* value = find_member(object, key);
     return !value || parse_poly(*value, target, error);
+}
+
+bool parse_gravity_model(const JsonValue& value, GravityModelConfig* target, std::string* error)
+{
+    if (!value.is_object()) {
+        return fail(error, "gravity_model must be an object");
+    }
+
+    GravityModelConfig parsed = *target;
+    double degree = static_cast<double>(parsed.degree);
+    double order = static_cast<double>(parsed.order);
+    if (!read_string(value, "type", &parsed.type, error) ||
+        !read_number(value, "j2", &parsed.j2, error) ||
+        !read_number(value, "degree", &degree, error) ||
+        !read_number(value, "order", &order, error)) {
+        return false;
+    }
+    parsed.degree = static_cast<int>(degree);
+    parsed.order = static_cast<int>(order);
+    *target = parsed;
+    return true;
+}
+
+bool read_gravity_model(const JsonValue& object, const char* key, GravityModelConfig* target, std::string* error)
+{
+    const JsonValue* value = find_member(object, key);
+    return !value || parse_gravity_model(*value, target, error);
+}
+
+bool parse_atmosphere_model(const JsonValue& value, AtmosphereModelConfig* target, std::string* error)
+{
+    if (!value.is_object()) {
+        return fail(error, "atmosphere_model must be an object");
+    }
+
+    AtmosphereModelConfig parsed = *target;
+    if (!read_string(value, "type", &parsed.type, error)) {
+        return false;
+    }
+    *target = parsed;
+    return true;
+}
+
+bool read_atmosphere_model(const JsonValue& object, const char* key, AtmosphereModelConfig* target, std::string* error)
+{
+    const JsonValue* value = find_member(object, key);
+    return !value || parse_atmosphere_model(*value, target, error);
+}
+
+bool parse_aero_model(const JsonValue& value, AeroModelConfig* target, std::string* error)
+{
+    if (!value.is_object()) {
+        return fail(error, "aero_model must be an object");
+    }
+
+    AeroModelConfig parsed = *target;
+    if (!read_string(value, "type", &parsed.type, error)) {
+        return false;
+    }
+    *target = parsed;
+    return true;
+}
+
+bool read_aero_model(const JsonValue& object, const char* key, AeroModelConfig* target, std::string* error)
+{
+    const JsonValue* value = find_member(object, key);
+    return !value || parse_aero_model(*value, target, error);
 }
 
 bool parse_quaternion(const JsonValue& value, Quaternion* target, std::string* error)
@@ -812,7 +915,21 @@ bool parse_phase(const JsonValue& value, PhaseConfig* target, std::string* error
         }
         if (!read_bool(*force, "gravity", &parsed.force_models.gravity, error) ||
             !read_bool(*force, "thrust", &parsed.force_models.thrust, error) ||
-            !read_bool(*force, "normal_force", &parsed.force_models.normal_force, error)) {
+            !read_bool(*force, "normal_force", &parsed.force_models.normal_force, error) ||
+            !read_bool(*force, "aerodynamic", &parsed.force_models.aerodynamic, error) ||
+            !read_bool(*force, "third_body", &parsed.force_models.third_body, error) ||
+            !read_bool(
+                *force,
+                "solar_radiation_pressure",
+                &parsed.force_models.solar_radiation_pressure,
+                error) ||
+            !read_gravity_model(*force, "gravity_model", &parsed.force_models.gravity_model, error) ||
+            !read_atmosphere_model(
+                *force,
+                "atmosphere_model",
+                &parsed.force_models.atmosphere_model,
+                error) ||
+            !read_aero_model(*force, "aero_model", &parsed.force_models.aero_model, error)) {
             return false;
         }
     }
@@ -872,6 +989,9 @@ CaseConfig case_from_simulation_config(const SimulationConfig& config)
     case_config.launch_site = config.launch_site;
     case_config.earth_radius_m = config.earth_radius_m;
     case_config.earth_mu_m3s2 = config.earth_mu_m3s2;
+    case_config.earth_j2 = config.gravity_model.j2 != kEarthJ2
+        ? config.gravity_model.j2
+        : config.earth_j2;
     case_config.earth_rotation_rad_per_s = config.earth_rotation_rad_per_s;
     case_config.step_s = config.step_s;
 
@@ -882,6 +1002,8 @@ CaseConfig case_from_simulation_config(const SimulationConfig& config)
     phase.hold_down_clamp_initial_active =
         config.hold_down_clamp.enabled && config.hold_down_clamp.release_time_s > 0.0;
     phase.force_models.normal_force = config.normal_force.enabled;
+    phase.force_models.gravity_model = config.gravity_model;
+    phase.force_models.gravity_model.j2 = case_config.earth_j2;
     phase.throttle_model.type = "poly";
     phase.throttle_model.c0 = 1.0;
     phase.steering_model.type = "fixed_eci";
@@ -904,6 +1026,7 @@ SimulationConfig simulation_config_from_case(const CaseConfig& config)
     SimulationConfig simulation;
     simulation.earth_radius_m = config.earth_radius_m;
     simulation.earth_mu_m3s2 = config.earth_mu_m3s2;
+    simulation.earth_j2 = config.earth_j2;
     simulation.earth_rotation_rad_per_s = config.earth_rotation_rad_per_s;
     simulation.step_s = config.step_s;
     simulation.launch_site = config.launch_site;
@@ -914,6 +1037,11 @@ SimulationConfig simulation_config_from_case(const CaseConfig& config)
         simulation.duration_s = phase.duration_s;
         simulation.hold_down_clamp.enabled = phase.hold_down_clamp_initial_active;
         simulation.normal_force.enabled = phase.force_models.normal_force;
+        simulation.gravity_model = phase.force_models.gravity_model;
+        if (simulation.gravity_model.j2 == kEarthJ2 &&
+            simulation.earth_j2 != kEarthJ2) {
+            simulation.gravity_model.j2 = simulation.earth_j2;
+        }
         for (const auto& action : phase.actions) {
             if (action.type == "set_hold_down_clamp_active" && !action.value) {
                 simulation.hold_down_clamp.enabled = true;
@@ -945,6 +1073,7 @@ bool case_config_from_json(const std::string& text, CaseConfig* config, std::str
     if (!read_string(root, "name", &parsed.name, error) ||
         !read_number(root, "earth_radius_m", &parsed.earth_radius_m, error) ||
         !read_number(root, "earth_mu_m3s2", &parsed.earth_mu_m3s2, error) ||
+        !read_number(root, "earth_j2", &parsed.earth_j2, error) ||
         !read_number(root, "earth_rotation_rad_per_s", &parsed.earth_rotation_rad_per_s, error) ||
         !read_number(root, "step_s", &parsed.step_s, error)) {
         return false;
@@ -974,6 +1103,7 @@ bool case_config_from_json(const std::string& text, CaseConfig* config, std::str
         }
         for (const auto& phase_value : phases->array_value) {
             PhaseConfig phase;
+            phase.force_models.gravity_model.j2 = parsed.earth_j2;
             if (!parse_phase(phase_value, &phase, error)) {
                 return false;
             }
@@ -981,7 +1111,12 @@ bool case_config_from_json(const std::string& text, CaseConfig* config, std::str
         }
     }
     if (parsed.phases.empty()) {
-        parsed.phases.push_back(PhaseConfig{});
+        PhaseConfig phase;
+        phase.force_models.gravity_model.j2 = parsed.earth_j2;
+        parsed.phases.push_back(std::move(phase));
+    }
+    if (!find_member(root, "earth_j2") && !parsed.phases.empty()) {
+        parsed.earth_j2 = parsed.phases.front().force_models.gravity_model.j2;
     }
 
     if (const JsonValue* optimization = find_member(root, "optimization")) {

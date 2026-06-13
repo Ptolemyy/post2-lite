@@ -4,7 +4,7 @@
 #include "post2/core/trajectory_service.hpp"
 #include "post2/vehicle/runtime_state.hpp"
 #include "post2/vehicle/vehicle_config_io.hpp"
-#include "software_renderer_3d.hpp"
+#include "opengl_scene_renderer.hpp"
 
 #include <algorithm>
 #include <array>
@@ -117,6 +117,7 @@ constexpr int kOptObjectiveEnabled = 2115;
 constexpr int kOptObjectiveMetricCombo = 2116;
 constexpr int kOptObjectiveDirectionCombo = 2117;
 constexpr int kOptObjectiveWeightEdit = 2118;
+constexpr const wchar_t* kSceneWindowClassName = L"Post2LiteOpenGLScene";
 
 HINSTANCE g_instance = nullptr;
 CoreMode g_mode = CoreMode::Local;
@@ -127,7 +128,8 @@ std::string g_status;
 std::string g_remote_host = "127.0.0.1";
 int g_remote_port = 5050;
 post2::gui::Camera3D g_camera;
-post2::gui::SoftwareRenderer3D g_renderer;
+post2::gui::OpenGLSceneRenderer g_scene_renderer;
+HWND g_scene_hwnd = nullptr;
 bool g_camera_initialized = false;
 bool g_case_initialized = false;
 bool g_dragging = false;
@@ -191,6 +193,8 @@ HWND create_combo(HWND parent, int id, int x, int y, int width, HFONT font);
 void add_combo_item(HWND combo, const wchar_t* text);
 void select_combo_text(HWND combo, const std::string& text);
 std::string get_combo_text(HWND combo);
+void sync_scene_window(HWND hwnd);
+void invalidate_scene_window();
 
 bool window_is_live(HWND hwnd)
 {
@@ -507,6 +511,7 @@ void run_simulation(HWND hwnd)
     }
     update_status();
     set_outputs_text(format_run_outputs(g_result));
+    sync_scene_window(hwnd);
     InvalidateRect(hwnd, nullptr, TRUE);
 }
 
@@ -519,6 +524,7 @@ void execute_optimization(HWND hwnd)
     if (!result.ok) {
         g_result = result.final_simulation;
         g_status = "optimize failed: " + result.error;
+        sync_scene_window(hwnd);
         InvalidateRect(hwnd, nullptr, TRUE);
         MessageBoxW(hwnd, widen(result.error).c_str(), L"Optimize failed", MB_ICONERROR);
         return;
@@ -538,6 +544,7 @@ void execute_optimization(HWND hwnd)
         }
     }
     update_status();
+    sync_scene_window(hwnd);
     InvalidateRect(hwnd, nullptr, TRUE);
 }
 
@@ -560,7 +567,39 @@ RECT scene_rect(HWND hwnd)
 
 void update_camera_viewport(HWND hwnd)
 {
-    g_camera.set_viewport(scene_rect(hwnd));
+    const RECT rect = scene_rect(hwnd);
+    RECT viewport = {};
+    viewport.right = std::max(0L, rect.right - rect.left);
+    viewport.bottom = std::max(0L, rect.bottom - rect.top);
+    g_camera.set_viewport(viewport);
+}
+
+bool scene_has_state()
+{
+    return g_result.ok && !g_result.state_log.empty();
+}
+
+void invalidate_scene_window()
+{
+    if (window_is_live(g_scene_hwnd)) {
+        InvalidateRect(g_scene_hwnd, nullptr, FALSE);
+    }
+}
+
+void sync_scene_window(HWND hwnd)
+{
+    if (!window_is_live(g_scene_hwnd)) {
+        update_camera_viewport(hwnd);
+        return;
+    }
+
+    const RECT rect = scene_rect(hwnd);
+    const int width = std::max(0L, rect.right - rect.left);
+    const int height = std::max(0L, rect.bottom - rect.top);
+    MoveWindow(g_scene_hwnd, rect.left, rect.top, width, height, TRUE);
+    update_camera_viewport(hwnd);
+    ShowWindow(g_scene_hwnd, scene_has_state() ? SW_SHOWNA : SW_HIDE);
+    invalidate_scene_window();
 }
 
 void draw_text_line(HDC hdc, int x, int y, const std::string& text)
@@ -3540,9 +3579,6 @@ void paint_scene(HWND hwnd, HDC hdc)
         return;
     }
 
-    update_camera_viewport(hwnd);
-    g_renderer.draw(hdc, g_camera, g_result.state_log);
-
     SelectObject(hdc, old_font);
     DeleteObject(body_font);
 }
@@ -3622,19 +3658,26 @@ void export_current(HWND hwnd, bool svg)
     MessageBoxW(hwnd, widen("Wrote " + path).c_str(), L"POST2 Lite", MB_ICONINFORMATION);
 }
 
-LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam)
+LRESULT CALLBACK scene_window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam)
 {
     switch (message) {
     case WM_CREATE:
-        SetMenu(hwnd, create_main_menu());
-        update_mode_menu(hwnd);
-        ensure_case_initialized();
-        create_phase_sidebar_controls(hwnd);
-        run_simulation(hwnd);
+        return g_scene_renderer.initialize(hwnd) ? 0 : -1;
+
+    case WM_SIZE: {
+        const int width = LOWORD(lparam);
+        const int height = HIWORD(lparam);
+        RECT viewport = {};
+        viewport.right = width;
+        viewport.bottom = height;
+        g_camera.set_viewport(viewport);
+        g_scene_renderer.resize(width, height);
+        InvalidateRect(hwnd, nullptr, FALSE);
         return 0;
+    }
 
     case WM_LBUTTONDOWN:
-        update_camera_viewport(hwnd);
+        SetFocus(hwnd);
         g_dragging = true;
         g_last_mouse = {GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
         SetCapture(hwnd);
@@ -3645,7 +3688,7 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
             const POINT current = {GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
             g_camera.rotate_pixels(current.x - g_last_mouse.x, current.y - g_last_mouse.y);
             g_last_mouse = current;
-            InvalidateRect(hwnd, nullptr, FALSE);
+            invalidate_scene_window();
             return 0;
         }
         break;
@@ -3664,12 +3707,123 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
 
     case WM_LBUTTONDBLCLK:
         g_camera.reset(g_camera.scene_radius_m());
-        InvalidateRect(hwnd, nullptr, FALSE);
+        invalidate_scene_window();
         return 0;
 
     case WM_MOUSEWHEEL:
         g_camera.zoom_wheel(GET_WHEEL_DELTA_WPARAM(wparam));
-        InvalidateRect(hwnd, nullptr, FALSE);
+        invalidate_scene_window();
+        return 0;
+
+    case WM_ERASEBKGND:
+        return 1;
+
+    case WM_PAINT: {
+        PAINTSTRUCT ps;
+        BeginPaint(hwnd, &ps);
+        g_scene_renderer.render(g_camera, g_result.state_log);
+        EndPaint(hwnd, &ps);
+        return 0;
+    }
+
+    case WM_DESTROY:
+        g_scene_renderer.destroy();
+        if (g_scene_hwnd == hwnd) {
+            g_scene_hwnd = nullptr;
+        }
+        return 0;
+
+    default:
+        break;
+    }
+
+    return DefWindowProcW(hwnd, message, wparam, lparam);
+}
+
+bool register_scene_window_class(HINSTANCE instance)
+{
+    WNDCLASSW wc = {};
+    wc.style = CS_OWNDC | CS_DBLCLKS;
+    wc.lpfnWndProc = scene_window_proc;
+    wc.hInstance = instance;
+    wc.lpszClassName = kSceneWindowClassName;
+    wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+    wc.hbrBackground = nullptr;
+
+    if (RegisterClassW(&wc)) {
+        return true;
+    }
+    return GetLastError() == ERROR_CLASS_ALREADY_EXISTS;
+}
+
+void create_scene_window(HWND parent)
+{
+    const RECT rect = scene_rect(parent);
+    g_scene_hwnd = CreateWindowExW(
+        0,
+        kSceneWindowClassName,
+        L"",
+        WS_CHILD | WS_CLIPSIBLINGS | WS_CLIPCHILDREN,
+        rect.left,
+        rect.top,
+        std::max(0L, rect.right - rect.left),
+        std::max(0L, rect.bottom - rect.top),
+        parent,
+        nullptr,
+        g_instance,
+        nullptr);
+    sync_scene_window(parent);
+}
+
+LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam)
+{
+    switch (message) {
+    case WM_CREATE:
+        SetMenu(hwnd, create_main_menu());
+        update_mode_menu(hwnd);
+        ensure_case_initialized();
+        create_phase_sidebar_controls(hwnd);
+        create_scene_window(hwnd);
+        run_simulation(hwnd);
+        return 0;
+
+    case WM_LBUTTONDOWN:
+        update_camera_viewport(hwnd);
+        g_dragging = true;
+        g_last_mouse = {GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
+        SetCapture(hwnd);
+        return 0;
+
+    case WM_MOUSEMOVE:
+        if (g_dragging && (wparam & MK_LBUTTON)) {
+            const POINT current = {GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
+            g_camera.rotate_pixels(current.x - g_last_mouse.x, current.y - g_last_mouse.y);
+            g_last_mouse = current;
+            invalidate_scene_window();
+            return 0;
+        }
+        break;
+
+    case WM_LBUTTONUP:
+        if (g_dragging) {
+            g_dragging = false;
+            ReleaseCapture();
+            return 0;
+        }
+        break;
+
+    case WM_CAPTURECHANGED:
+        g_dragging = false;
+        return 0;
+
+    case WM_LBUTTONDBLCLK:
+        g_camera.reset(g_camera.scene_radius_m());
+        invalidate_scene_window();
+        return 0;
+
+    case WM_MOUSEWHEEL:
+        g_camera.zoom_wheel(GET_WHEEL_DELTA_WPARAM(wparam));
+        invalidate_scene_window();
         return 0;
 
     case WM_ERASEBKGND:
@@ -3809,10 +3963,12 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
     }
 
     case WM_SIZE:
+        sync_scene_window(hwnd);
         InvalidateRect(hwnd, nullptr, TRUE);
         return 0;
 
     case WM_DESTROY:
+        g_scene_renderer.destroy();
         PostQuitMessage(0);
         return 0;
 
@@ -3830,6 +3986,10 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show_command)
     g_instance = instance;
     const wchar_t* class_name = L"Post2LiteWindow";
 
+    if (!register_scene_window_class(instance)) {
+        return 1;
+    }
+
     WNDCLASSW wc = {};
     wc.style = CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS;
     wc.lpfnWndProc = window_proc;
@@ -3844,7 +4004,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show_command)
         0,
         class_name,
         L"POST2 Lite",
-        WS_OVERLAPPEDWINDOW,
+        WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
         CW_USEDEFAULT,
         CW_USEDEFAULT,
         1100,

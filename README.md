@@ -58,7 +58,7 @@ Use the `Mode` menu to switch between local core and remote core. Use `Mode > Re
 - Vehicle lives in `include/post2/vehicle` and currently has config plus runtime state layers.
 - Vehicle config has dry mass, engine config, and tank config.
 - Vehicle runtime state has vehicle motion/mass state, engine state, and tank state.
-- Default dynamics are two-body gravity.
+- Default dynamics use J2 gravity, with point-mass gravity available as an explicit model option.
 - If engine is enabled, the prototype applies a simple engine acceleration and consumes tank propellant.
 - The ODE integrator is fixed-step RK4 in `include/post2/integrators`.
 - Propagation passes a `StateLog` through the driver, event, propagator, and integrator path.
