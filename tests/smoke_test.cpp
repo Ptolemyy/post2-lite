@@ -547,14 +547,14 @@ int main()
     }
     const double after_residual = std::abs(optimize_result.final_simulation.state_log.back().altitude_m - 950.0);
     if (after_residual >= before_residual ||
-        drop_case.optimization.variables[0].enabled ||
-        drop_case.optimization.variables[1].enabled ||
-        drop_case.phases[0].optimize_enabled ||
+        !drop_case.optimization.variables[0].enabled ||
+        !drop_case.optimization.variables[1].enabled ||
+        !drop_case.phases[0].optimize_enabled ||
         optimize_result.variable_changes.empty() ||
         optimize_result.final_metrics.back().metric != "payload_mass_kg" ||
         optimize_result.final_metrics.back().value < 100.0 ||
         optimize_result.variable_changes[0].new_value <= optimize_result.variable_changes[0].old_value) {
-        std::cerr << "optimizer did not improve target or update case flags\n";
+        std::cerr << "optimizer did not improve target or preserve case flags\n";
         return 1;
     }
 

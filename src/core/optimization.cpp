@@ -2664,16 +2664,6 @@ OptimizationResult optimize_case(
 
     *config = working;
     config->optimization = optimization;
-    for (auto& variable : config->optimization.variables) {
-        if (used_paths.count(variable.path) > 0) {
-            variable.enabled = false;
-        }
-    }
-    for (const int phase_index : used_phases) {
-        if (phase_index >= 0 && static_cast<std::size_t>(phase_index) < config->phases.size()) {
-            config->phases[static_cast<std::size_t>(phase_index)].optimize_enabled = false;
-        }
-    }
 
     for (std::size_t i = 0; i < vars.size(); ++i) {
         const double x_i = to_x_scalar(report_z[i], vars[i].lb, vars[i].ub);

@@ -508,13 +508,19 @@ StateLog propagate_phase(
     state_log.set_phase_metadata(static_cast<int>(phase_index), phase.name);
     state_log.append(runtime);
 
+    const bool use_adaptive_step_suggestions = phase.integrator == "dopri5";
     double time_s = phase_start_time_s;
+    double suggested_step_s = case_config.step_s;
     while (time_s < phase_end_time_s) {
         const double phase_time_s = time_s - phase_start_time_s;
         apply_due_actions(actions, phase_time_s, simulation_config, &control, &runtime);
 
         const double next_action_absolute_s = phase_start_time_s + next_action_time_s(actions, control);
-        double step_s = std::min(case_config.step_s, phase_end_time_s - time_s);
+        const double requested_step_s =
+            (std::isfinite(suggested_step_s) && suggested_step_s > 1.0e-12)
+                ? suggested_step_s
+                : case_config.step_s;
+        double step_s = std::min(requested_step_s, phase_end_time_s - time_s);
         if (next_action_absolute_s > time_s && next_action_absolute_s < time_s + step_s) {
             step_s = next_action_absolute_s - time_s;
         }
@@ -633,9 +639,18 @@ StateLog propagate_phase(
                     return deriv;
                 },
                 events);
+            if (!step_result.accepted || step_result.h_used <= 1.0e-12) {
+                throw std::runtime_error("integrator failed to make progress");
+            }
             integrated = step_result.state_end;
             // Reflect the (possibly shortened) step used by the integrator.
             step_s = step_result.h_used;
+            suggested_step_s =
+                (use_adaptive_step_suggestions &&
+                 std::isfinite(step_result.h_next_suggested) &&
+                 step_result.h_next_suggested > 1.0e-12)
+                    ? step_result.h_next_suggested
+                    : case_config.step_s;
             // If a tank-empty event fired, clamp that tank to exactly zero
             // so the next step's gating logic sees it as drained.
             if (step_result.event.has_value()) {

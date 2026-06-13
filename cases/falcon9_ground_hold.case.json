@@ -3,6 +3,14 @@
     "earth_mu_m3s2":  398600441800000,
     "earth_radius_m":  6378137,
     "earth_rotation_rad_per_s":  7.2921159E-05,
+    "epoch_utc":  {
+                      "day":  1,
+                      "hour":  12,
+                      "minute":  0,
+                      "month":  1,
+                      "second":  0,
+                      "year":  2000
+                  },
     "launch_site":  {
                         "altitude_m":  0,
                         "latitude_deg":  28.562000000000001,
@@ -329,7 +337,13 @@
                                                          ],
                                               "target_t2w":  1,
                                               "type":  "poly"
-                                          }
+                                          },
+                       "tolerances":  {
+                                          "atol_position_m":  0.001,
+                                          "atol_tank_mass_kg":  0.001,
+                                          "atol_velocity_mps":  1E-06,
+                                          "rtol":  1E-08
+                                      }
                    },
                    {
                        "actions":  [
@@ -341,7 +355,7 @@
                                            "value":  true
                                        }
                                    ],
-                       "duration_s":  50.368045863242841,
+                       "duration_s":  49.051452774674232,
                        "force_models":  {
                                             "aero_model":  {
                                                                "type":  "none"
@@ -374,9 +388,9 @@
                                                               "c2":  0
                                                           },
                                               "elevation":  {
-                                                                "c0":  87.195476452785712,
-                                                                "c1":  -0.50992903620782393,
-                                                                "c2":  -2.6567608729436126E-05
+                                                                "c0":  86.615874369672483,
+                                                                "c1":  -0.56085860220846351,
+                                                                "c2":  -5.4848597273057104E-05
                                                             },
                                               "fixed_direction_eci":  [
                                                                           1,
@@ -407,7 +421,7 @@
                                                       }
                                           },
                        "throttle_model":  {
-                                              "c0":  0.99918180760037911,
+                                              "c0":  0.99360957693779062,
                                               "c1":  0,
                                               "c2":  0,
                                               "points":  [
@@ -415,13 +429,19 @@
                                                          ],
                                               "target_t2w":  1,
                                               "type":  "poly"
-                                          }
+                                          },
+                       "tolerances":  {
+                                          "atol_position_m":  0.001,
+                                          "atol_tank_mass_kg":  0.001,
+                                          "atol_velocity_mps":  1E-06,
+                                          "rtol":  1E-08
+                                      }
                    },
                    {
                        "actions":  [
 
                                    ],
-                       "duration_s":  47.592290025140947,
+                       "duration_s":  48.118432543356207,
                        "force_models":  {
                                             "aero_model":  {
                                                                "type":  "none"
@@ -454,9 +474,9 @@
                                                               "c2":  0
                                                           },
                                               "elevation":  {
-                                                                "c0":  63.777785515288507,
-                                                                "c1":  -0.49397232980250766,
-                                                                "c2":  -8.2242319644604787E-06
+                                                                "c0":  61.6150842579056,
+                                                                "c1":  -0.50139517381731269,
+                                                                "c2":  6.0919979443701047E-07
                                                             },
                                               "fixed_direction_eci":  [
                                                                           1,
@@ -487,7 +507,7 @@
                                                       }
                                           },
                        "throttle_model":  {
-                                              "c0":  0.99877543971483307,
+                                              "c0":  0.99390458022981887,
                                               "c1":  0,
                                               "c2":  0,
                                               "points":  [
@@ -495,13 +515,19 @@
                                                          ],
                                               "target_t2w":  1,
                                               "type":  "poly"
-                                          }
+                                          },
+                       "tolerances":  {
+                                          "atol_position_m":  0.001,
+                                          "atol_tank_mass_kg":  0.001,
+                                          "atol_velocity_mps":  1E-06,
+                                          "rtol":  1E-08
+                                      }
                    },
                    {
                        "actions":  [
 
                                    ],
-                       "duration_s":  48.161338563429432,
+                       "duration_s":  47.779039240556088,
                        "force_models":  {
                                             "aero_model":  {
                                                                "type":  "none"
@@ -534,9 +560,9 @@
                                                               "c2":  0
                                                           },
                                               "elevation":  {
-                                                                "c0":  43.826060287708302,
-                                                                "c1":  -0.45696135410958783,
-                                                                "c2":  2.5244706316664232E-05
+                                                                "c0":  45.303601639978659,
+                                                                "c1":  -0.4154953756799904,
+                                                                "c2":  7.526622861297582E-05
                                                             },
                                               "fixed_direction_eci":  [
                                                                           1,
@@ -567,7 +593,7 @@
                                                       }
                                           },
                        "throttle_model":  {
-                                              "c0":  0.98901855237347469,
+                                              "c0":  0.99422667248733843,
                                               "c1":  0,
                                               "c2":  0,
                                               "points":  [
@@ -575,7 +601,13 @@
                                                          ],
                                               "target_t2w":  1,
                                               "type":  "poly"
-                                          }
+                                          },
+                       "tolerances":  {
+                                          "atol_position_m":  0.001,
+                                          "atol_tank_mass_kg":  0.001,
+                                          "atol_velocity_mps":  1E-06,
+                                          "rtol":  1E-08
+                                      }
                    },
                    {
                        "actions":  [
@@ -608,7 +640,7 @@
                                            "value":  true
                                        }
                                    ],
-                       "duration_s":  103.09341801813858,
+                       "duration_s":  104.20706660041409,
                        "force_models":  {
                                             "aero_model":  {
                                                                "type":  "none"
@@ -641,9 +673,9 @@
                                                               "c2":  0
                                                           },
                                               "elevation":  {
-                                                                "c0":  19.154968904080889,
-                                                                "c1":  -0.061989801781707113,
-                                                                "c2":  4.0328571935875461E-06
+                                                                "c0":  21.770309211082498,
+                                                                "c1":  -0.058101098434418574,
+                                                                "c2":  1.2798933784598644E-05
                                                             },
                                               "fixed_direction_eci":  [
                                                                           1,
@@ -674,7 +706,7 @@
                                                       }
                                           },
                        "throttle_model":  {
-                                              "c0":  0.99910994880209469,
+                                              "c0":  1,
                                               "c1":  0,
                                               "c2":  0,
                                               "points":  [
@@ -682,13 +714,19 @@
                                                          ],
                                               "target_t2w":  1,
                                               "type":  "poly"
-                                          }
+                                          },
+                       "tolerances":  {
+                                          "atol_position_m":  0.001,
+                                          "atol_tank_mass_kg":  0.001,
+                                          "atol_velocity_mps":  1E-06,
+                                          "rtol":  1E-08
+                                      }
                    },
                    {
                        "actions":  [
 
                                    ],
-                       "duration_s":  102.60967583652209,
+                       "duration_s":  103.10905276819643,
                        "force_models":  {
                                             "aero_model":  {
                                                                "type":  "none"
@@ -721,9 +759,9 @@
                                                               "c2":  0
                                                           },
                                               "elevation":  {
-                                                                "c0":  12.650251501449958,
-                                                                "c1":  -0.061292530068581735,
-                                                                "c2":  6.3175932499771794E-06
+                                                                "c0":  13.647368343053701,
+                                                                "c1":  -0.05938711383242691,
+                                                                "c2":  1.0168261910105543E-05
                                                             },
                                               "fixed_direction_eci":  [
                                                                           1,
@@ -754,7 +792,7 @@
                                                       }
                                           },
                        "throttle_model":  {
-                                              "c0":  0.99947780348872195,
+                                              "c0":  1,
                                               "c1":  0,
                                               "c2":  0,
                                               "points":  [
@@ -762,13 +800,19 @@
                                                          ],
                                               "target_t2w":  1,
                                               "type":  "poly"
-                                          }
+                                          },
+                       "tolerances":  {
+                                          "atol_position_m":  0.001,
+                                          "atol_tank_mass_kg":  0.001,
+                                          "atol_velocity_mps":  1E-06,
+                                          "rtol":  1E-08
+                                      }
                    },
                    {
                        "actions":  [
 
                                    ],
-                       "duration_s":  120.64355183327064,
+                       "duration_s":  122.2610055501863,
                        "force_models":  {
                                             "aero_model":  {
                                                                "type":  "none"
@@ -801,9 +845,9 @@
                                                               "c2":  0
                                                           },
                                               "elevation":  {
-                                                                "c0":  8.1510916954172927,
-                                                                "c1":  -0.0525364102892679,
-                                                                "c2":  4.441302572617432E-05
+                                                                "c0":  7.0316411423789518,
+                                                                "c1":  -0.057004028492878285,
+                                                                "c2":  2.7848210530730783E-05
                                                             },
                                               "fixed_direction_eci":  [
                                                                           1,
@@ -834,7 +878,7 @@
                                                       }
                                           },
                        "throttle_model":  {
-                                              "c0":  0.99845157085678982,
+                                              "c0":  1,
                                               "c1":  0,
                                               "c2":  0,
                                               "points":  [
@@ -842,7 +886,13 @@
                                                          ],
                                               "target_t2w":  1,
                                               "type":  "poly"
-                                          }
+                                          },
+                       "tolerances":  {
+                                          "atol_position_m":  0.001,
+                                          "atol_tank_mass_kg":  0.001,
+                                          "atol_velocity_mps":  1E-06,
+                                          "rtol":  1E-08
+                                      }
                    },
                    {
                        "actions":  [
@@ -922,7 +972,13 @@
                                                          ],
                                               "target_t2w":  1,
                                               "type":  "poly"
-                                          }
+                                          },
+                       "tolerances":  {
+                                          "atol_position_m":  0.001,
+                                          "atol_tank_mass_kg":  0.001,
+                                          "atol_velocity_mps":  1E-06,
+                                          "rtol":  1E-08
+                                      }
                    }
                ],
     "step_s":  1,
@@ -942,14 +998,28 @@
                                                           0
                                                       ],
                                    "enabled":  true,
+                                   "engine_count":  1,
                                    "feed_tanks":  [
                                                       {
                                                           "stage":  "booster",
                                                           "tank":  "first-stage propellant"
                                                       }
                                                   ],
-                                   "isp_s":  283,
-                                   "max_thrust_n":  7605000
+                                   "gimbal_max_rad":  0,
+                                   "gimbal_rate_rad_s":  0,
+                                   "ignition_delay_s":  0,
+                                   "isp_sl_s":  0,
+                                   "isp_vac_s":  283,
+                                   "max_throttle":  1,
+                                   "min_throttle":  0,
+                                   "nozzle_exit_area_m2":  0,
+                                   "shutdown_delay_s":  0,
+                                   "throttle_curve":  [
+
+                                                      ],
+                                   "thrust_buildup_s":  0,
+                                   "thrust_sl_n":  0,
+                                   "thrust_vac_n":  7605000
                                },
                     "name":  "Falcon 9 Block 5 approximate with payload",
                     "stages":  [
@@ -964,14 +1034,28 @@
                                                                              0
                                                                          ],
                                                       "enabled":  true,
+                                                      "engine_count":  1,
                                                       "feed_tanks":  [
                                                                          {
                                                                              "stage":  "booster",
                                                                              "tank":  "first-stage propellant"
                                                                          }
                                                                      ],
-                                                      "isp_s":  283,
-                                                      "max_thrust_n":  7605000
+                                                      "gimbal_max_rad":  0,
+                                                      "gimbal_rate_rad_s":  0,
+                                                      "ignition_delay_s":  0,
+                                                      "isp_sl_s":  0,
+                                                      "isp_vac_s":  283,
+                                                      "max_throttle":  1,
+                                                      "min_throttle":  0,
+                                                      "nozzle_exit_area_m2":  0,
+                                                      "shutdown_delay_s":  0,
+                                                      "throttle_curve":  [
+
+                                                                         ],
+                                                      "thrust_buildup_s":  0,
+                                                      "thrust_sl_n":  0,
+                                                      "thrust_vac_n":  7605000
                                                   },
                                        "name":  "booster",
                                        "tanks":  [
@@ -994,14 +1078,28 @@
                                                                              0
                                                                          ],
                                                       "enabled":  true,
+                                                      "engine_count":  1,
                                                       "feed_tanks":  [
                                                                          {
                                                                              "stage":  "second stage",
                                                                              "tank":  "second-stage propellant"
                                                                          }
                                                                      ],
-                                                      "isp_s":  348,
-                                                      "max_thrust_n":  981000
+                                                      "gimbal_max_rad":  0,
+                                                      "gimbal_rate_rad_s":  0,
+                                                      "ignition_delay_s":  0,
+                                                      "isp_sl_s":  0,
+                                                      "isp_vac_s":  348,
+                                                      "max_throttle":  1,
+                                                      "min_throttle":  0,
+                                                      "nozzle_exit_area_m2":  0,
+                                                      "shutdown_delay_s":  0,
+                                                      "throttle_curve":  [
+
+                                                                         ],
+                                                      "thrust_buildup_s":  0,
+                                                      "thrust_sl_n":  0,
+                                                      "thrust_vac_n":  981000
                                                   },
                                        "name":  "second stage",
                                        "tanks":  [
@@ -1016,7 +1114,7 @@
                                    {
                                        "active":  false,
                                        "attached":  true,
-                                       "dry_mass_kg":  22456.36818277718,
+                                       "dry_mass_kg":  21798.050132054384,
                                        "engine":  {
                                                       "direction_body":  [
                                                                              1,
@@ -1024,11 +1122,25 @@
                                                                              0
                                                                          ],
                                                       "enabled":  false,
+                                                      "engine_count":  1,
                                                       "feed_tanks":  [
 
                                                                      ],
-                                                      "isp_s":  0,
-                                                      "max_thrust_n":  0
+                                                      "gimbal_max_rad":  0,
+                                                      "gimbal_rate_rad_s":  0,
+                                                      "ignition_delay_s":  0,
+                                                      "isp_sl_s":  0,
+                                                      "isp_vac_s":  0,
+                                                      "max_throttle":  1,
+                                                      "min_throttle":  0,
+                                                      "nozzle_exit_area_m2":  0,
+                                                      "shutdown_delay_s":  0,
+                                                      "throttle_curve":  [
+
+                                                                         ],
+                                                      "thrust_buildup_s":  0,
+                                                      "thrust_sl_n":  0,
+                                                      "thrust_vac_n":  0
                                                   },
                                        "name":  "payload",
                                        "tanks":  [
