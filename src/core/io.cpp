@@ -56,7 +56,11 @@ std::string trajectory_to_csv(const StateLog& state_log)
 {
     std::ostringstream output;
     output << std::setprecision(17);
-    output << "time_s,x_m,y_m,z_m,vx_mps,vy_mps,vz_mps,altitude_m,speed_mps,total_mass_kg,propellant_mass_kg,engine_thrust_n,engine_mass_flow_kgps,hold_down_clamp_active,phase_index,phase_name\n";
+    output << "time_s,x_m,y_m,z_m,vx_mps,vy_mps,vz_mps,altitude_m,speed_mps,"
+              "total_mass_kg,propellant_mass_kg,engine_thrust_n,engine_mass_flow_kgps,"
+              "throttle,engine_direction_eci_x,engine_direction_eci_y,engine_direction_eci_z,"
+              "ambient_pressure_pa,atmosphere_density_kgpm3,dynamic_pressure_pa,mach_number,"
+              "hold_down_clamp_active,phase_index,phase_name\n";
     for (const auto& point : state_log.entries()) {
         output
             << point.time_s << ','
@@ -72,6 +76,14 @@ std::string trajectory_to_csv(const StateLog& state_log)
             << point.propellant_mass_kg << ','
             << point.engine_thrust_n << ','
             << point.engine_mass_flow_kgps << ','
+            << point.throttle << ','
+            << point.engine_direction_eci.x << ','
+            << point.engine_direction_eci.y << ','
+            << point.engine_direction_eci.z << ','
+            << point.ambient_pressure_pa << ','
+            << point.atmosphere_density_kgpm3 << ','
+            << point.dynamic_pressure_pa << ','
+            << point.mach_number << ','
             << (point.hold_down_clamp_active ? 1 : 0) << ','
             << point.phase_index << ','
             << point.phase_name << '\n';
@@ -97,13 +109,23 @@ SimulationResult trajectory_from_csv(const std::string& csv)
         }
 
         const auto parts = split_csv_line(line);
+        // Supported column counts:
+        //   9          : legacy state-only (time + position + velocity + alt + speed)
+        //   13         : adds total/prop mass + thrust + mass flow
+        //   14         : 13 + hold_down_clamp
+        //   15, 16     : 14 + phase_index (+ phase_name)
+        //   23, 24     : current full schema (+ throttle, direction_eci, env, q, mach,
+        //                hold_down_clamp, phase_index, [phase_name])
         if (parts.size() != 9 && parts.size() != 13 && parts.size() != 14 &&
-            parts.size() != 15 && parts.size() != 16) {
+            parts.size() != 15 && parts.size() != 16 &&
+            parts.size() != 23 && parts.size() != 24) {
             return {false, "invalid CSV column count at line " + std::to_string(line_number), {}};
         }
 
-        double values[15] = {};
-        const std::size_t numeric_parts = parts.size() == 16 ? 15 : parts.size();
+        double values[23] = {};
+        std::size_t numeric_parts = parts.size();
+        if (parts.size() == 16) numeric_parts = 15;
+        if (parts.size() == 24) numeric_parts = 23;
         for (std::size_t i = 0; i < numeric_parts; ++i) {
             if (!parse_double(parts[i], &values[i])) {
                 return {false, "invalid CSV number at line " + std::to_string(line_number), {}};
@@ -114,53 +136,53 @@ SimulationResult trajectory_from_csv(const std::string& csv)
         state.position_m = {values[1], values[2], values[3]};
         state.velocity_mps = {values[4], values[5], values[6]};
         auto runtime = post2::vehicle::make_initial_runtime_state(state_log.vehicle_config(), state, values[0]);
-        LaunchVehicleStateLogEntry entry = {
-            values[0],
-            runtime,
-            state,
-            norm(state.position_m),
-            values[7],
-            values[8],
-            runtime.vehicle.total_mass_kg,
-            runtime.vehicle.propellant_mass_kg,
-            runtime.engine.actual_thrust_n,
-            runtime.engine.mass_flow_kgps,
-            runtime.hold_down_clamp.active,
+        LaunchVehicleStateLogEntry entry;
+        entry.time_s = values[0];
+        entry.runtime = runtime;
+        entry.state = state;
+        entry.radius_m = norm(state.position_m);
+        entry.altitude_m = values[7];
+        entry.speed_mps = values[8];
+        entry.total_mass_kg = runtime.vehicle.total_mass_kg;
+        entry.propellant_mass_kg = runtime.vehicle.propellant_mass_kg;
+        entry.engine_thrust_n = runtime.engine.actual_thrust_n;
+        entry.engine_mass_flow_kgps = runtime.engine.mass_flow_kgps;
+        entry.hold_down_clamp_active = runtime.hold_down_clamp.active;
+        auto apply_mass_thrust = [&]() {
+            entry.total_mass_kg = values[9];
+            entry.propellant_mass_kg = values[10];
+            entry.engine_thrust_n = values[11];
+            entry.engine_mass_flow_kgps = values[12];
+            entry.runtime.vehicle.total_mass_kg = values[9];
+            entry.runtime.vehicle.propellant_mass_kg = values[10];
+            entry.runtime.engine.actual_thrust_n = values[11];
+            entry.runtime.engine.mass_flow_kgps = values[12];
         };
         if (parts.size() == 13) {
-            entry.total_mass_kg = values[9];
-            entry.propellant_mass_kg = values[10];
-            entry.engine_thrust_n = values[11];
-            entry.engine_mass_flow_kgps = values[12];
-            entry.runtime.vehicle.total_mass_kg = values[9];
-            entry.runtime.vehicle.propellant_mass_kg = values[10];
-            entry.runtime.engine.actual_thrust_n = values[11];
-            entry.runtime.engine.mass_flow_kgps = values[12];
-        }
-        if (parts.size() == 14) {
-            entry.total_mass_kg = values[9];
-            entry.propellant_mass_kg = values[10];
-            entry.engine_thrust_n = values[11];
-            entry.engine_mass_flow_kgps = values[12];
+            apply_mass_thrust();
+        } else if (parts.size() == 14) {
+            apply_mass_thrust();
             entry.hold_down_clamp_active = values[13] != 0.0;
-            entry.runtime.vehicle.total_mass_kg = values[9];
-            entry.runtime.vehicle.propellant_mass_kg = values[10];
-            entry.runtime.engine.actual_thrust_n = values[11];
-            entry.runtime.engine.mass_flow_kgps = values[12];
             entry.runtime.hold_down_clamp.active = entry.hold_down_clamp_active;
-        }
-        if (parts.size() == 15 || parts.size() == 16) {
-            entry.total_mass_kg = values[9];
-            entry.propellant_mass_kg = values[10];
-            entry.engine_thrust_n = values[11];
-            entry.engine_mass_flow_kgps = values[12];
+        } else if (parts.size() == 15 || parts.size() == 16) {
+            apply_mass_thrust();
             entry.hold_down_clamp_active = values[13] != 0.0;
             entry.phase_index = static_cast<int>(values[14]);
             entry.phase_name = parts.size() == 16 ? parts[15] : "";
-            entry.runtime.vehicle.total_mass_kg = values[9];
-            entry.runtime.vehicle.propellant_mass_kg = values[10];
-            entry.runtime.engine.actual_thrust_n = values[11];
-            entry.runtime.engine.mass_flow_kgps = values[12];
+            entry.runtime.hold_down_clamp.active = entry.hold_down_clamp_active;
+        } else if (parts.size() == 23 || parts.size() == 24) {
+            apply_mass_thrust();
+            entry.throttle = values[13];
+            entry.engine_direction_eci = {values[14], values[15], values[16]};
+            entry.ambient_pressure_pa = values[17];
+            entry.atmosphere_density_kgpm3 = values[18];
+            entry.dynamic_pressure_pa = values[19];
+            entry.mach_number = values[20];
+            entry.hold_down_clamp_active = values[21] != 0.0;
+            entry.phase_index = static_cast<int>(values[22]);
+            entry.phase_name = parts.size() == 24 ? parts[23] : "";
+            entry.runtime.engine.throttle = entry.throttle;
+            entry.runtime.engine.direction_body = entry.engine_direction_eci;
             entry.runtime.hold_down_clamp.active = entry.hold_down_clamp_active;
         }
         state_log.append(entry);

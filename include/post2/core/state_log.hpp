@@ -20,6 +20,16 @@ struct LaunchVehicleStateLogEntry {
     double propellant_mass_kg = 0.0;
     double engine_thrust_n = 0.0;
     double engine_mass_flow_kgps = 0.0;
+    // Engine command snapshot at this step. throttle and direction come from
+    // the steering / throttle models that fed into the integrator step; env
+    // fields are populated by simulation_driver from the EnvironmentState
+    // sampled at start-of-step.
+    double throttle = 0.0;
+    post2::vehicle::Vec3 engine_direction_eci = {1.0, 0.0, 0.0};
+    double ambient_pressure_pa = 0.0;
+    double atmosphere_density_kgpm3 = 0.0;
+    double dynamic_pressure_pa = 0.0;
+    double mach_number = 0.0;
     bool hold_down_clamp_active = false;
     int phase_index = 0;
     std::string phase_name;
@@ -46,6 +56,11 @@ public:
     void append(const post2::vehicle::VehicleRuntimeState& runtime);
     void append(const LaunchVehicleStateLogEntry& entry);
     void truncate_after(double time_s);
+
+    // Exposed so simulation_driver can synthesize an entry from a runtime and
+    // then patch in environment-derived fields (q, Mach, pressure) before
+    // appending the entry directly.
+    LaunchVehicleStateLogEntry build_entry(const post2::vehicle::VehicleRuntimeState& runtime) const;
 
 private:
     LaunchVehicleStateLogEntry make_entry(double time_s, const post2::vehicle::CartesianState6D& state) const;

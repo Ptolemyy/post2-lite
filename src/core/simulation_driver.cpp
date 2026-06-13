@@ -88,6 +88,26 @@ post2::propagation::EnvironmentState make_environment_state(
     return environment;
 }
 
+void append_entry_with_environment(
+    StateLog* state_log,
+    const post2::vehicle::VehicleRuntimeState& runtime,
+    const post2::propagation::EnvironmentState& env,
+    double earth_rotation_rad_per_s)
+{
+    LaunchVehicleStateLogEntry entry = state_log->build_entry(runtime);
+    entry.ambient_pressure_pa = env.pressure_pa;
+    entry.atmosphere_density_kgpm3 = env.density_kgpm3;
+    // Atmosphere rotates with Earth: v_rel = v_eci - omega x r - wind_eci.
+    const Vec3 atmosphere_v_eci =
+        cross_product({0.0, 0.0, earth_rotation_rad_per_s}, runtime.vehicle.motion.position_m);
+    const Vec3 v_rel = runtime.vehicle.motion.velocity_mps - atmosphere_v_eci - env.wind_eci_mps;
+    const double v_rel_mag = post2::vehicle::norm(v_rel);
+    entry.dynamic_pressure_pa = 0.5 * env.density_kgpm3 * v_rel_mag * v_rel_mag;
+    entry.mach_number = env.speed_of_sound_mps > 0.0
+        ? v_rel_mag / env.speed_of_sound_mps : 0.0;
+    state_log->append(entry);
+}
+
 post2::integrators::ExtendedDerivative phase_extended_dynamics(
     const post2::propagation::ForceModelSet& force_models,
     const post2::propagation::ForceModelContext& force_context,
@@ -506,7 +526,12 @@ StateLog propagate_phase(
 
     StateLog state_log(case_config.earth_radius_m, case_config.vehicle);
     state_log.set_phase_metadata(static_cast<int>(phase_index), phase.name);
-    state_log.append(runtime);
+    {
+        const auto env_initial = make_environment_state(
+            simulation_config, phase, runtime.time_s, runtime.vehicle.motion);
+        append_entry_with_environment(
+            &state_log, runtime, env_initial, simulation_config.earth_rotation_rad_per_s);
+    }
 
     const bool use_adaptive_step_suggestions = phase.integrator == "dopri5";
     double time_s = phase_start_time_s;
@@ -672,7 +697,12 @@ StateLog propagate_phase(
         runtime = vehicle_propagator.commit(runtime, integrated, next_time_s, last_eval, command);
         set_hold_down_clamp_state(&runtime, simulation_config, control.hold_down_clamp_active);
         apply_due_actions(actions, next_time_s - phase_start_time_s, simulation_config, &control, &runtime);
-        state_log.append(runtime);
+        {
+            const auto env_after_step = make_environment_state(
+                simulation_config, phase, next_time_s, runtime.vehicle.motion);
+            append_entry_with_environment(
+                &state_log, runtime, env_after_step, simulation_config.earth_rotation_rad_per_s);
+        }
         time_s = next_time_s;
     }
 
@@ -724,7 +754,12 @@ StateLog propagate_hold_down_clamp(
         };
         runtime = vehicle_propagator.commit(runtime, integrated, next_time_s, eval, cmd);
         set_hold_down_clamp_state(&runtime, config, next_time_s < config.hold_down_clamp.release_time_s);
-        state_log.append(runtime);
+        {
+            const auto env_after = make_environment_state(
+                config, hdc_phase, next_time_s, runtime.vehicle.motion);
+            append_entry_with_environment(
+                &state_log, runtime, env_after, config.earth_rotation_rad_per_s);
+        }
         time_s = next_time_s;
     }
 

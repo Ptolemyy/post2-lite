@@ -151,21 +151,28 @@ LaunchVehicleStateLogEntry StateLog::make_entry(const post2::vehicle::VehicleRun
     // correct altitude regardless of Earth rotation phase.
     const double geodetic_altitude_m =
         frames::ecef_to_geodetic(runtime.vehicle.motion.position_m).altitude_m;
-    return {
-        runtime.time_s,
-        runtime,
-        runtime.vehicle.motion,
-        radius_m,
-        geodetic_altitude_m,
-        post2::vehicle::norm(runtime.vehicle.motion.velocity_mps),
-        runtime.vehicle.total_mass_kg,
-        runtime.vehicle.propellant_mass_kg,
-        runtime.engine.actual_thrust_n,
-        runtime.engine.mass_flow_kgps,
-        runtime.hold_down_clamp.active,
-        phase_index_,
-        phase_name_,
-    };
+    LaunchVehicleStateLogEntry entry;
+    entry.time_s = runtime.time_s;
+    entry.runtime = runtime;
+    entry.state = runtime.vehicle.motion;
+    entry.radius_m = radius_m;
+    entry.altitude_m = geodetic_altitude_m;
+    entry.speed_mps = post2::vehicle::norm(runtime.vehicle.motion.velocity_mps);
+    entry.total_mass_kg = runtime.vehicle.total_mass_kg;
+    entry.propellant_mass_kg = runtime.vehicle.propellant_mass_kg;
+    entry.engine_thrust_n = runtime.engine.actual_thrust_n;
+    entry.engine_mass_flow_kgps = runtime.engine.mass_flow_kgps;
+    entry.throttle = runtime.engine.throttle;
+    entry.engine_direction_eci = runtime.engine.direction_body;
+    entry.hold_down_clamp_active = runtime.hold_down_clamp.active;
+    entry.phase_index = phase_index_;
+    entry.phase_name = phase_name_;
+    return entry;
+}
+
+LaunchVehicleStateLogEntry StateLog::build_entry(const post2::vehicle::VehicleRuntimeState& runtime) const
+{
+    return make_entry(runtime);
 }
 
 } // namespace post2::core

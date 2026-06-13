@@ -64,6 +64,7 @@ if(WIN32)
 
     add_executable(post2_gui WIN32
         src/gui/main_win32.cpp
+        src/gui/chart_panel.cpp
         src/gui/opengl_scene_renderer.cpp
         ${CMAKE_CURRENT_BINARY_DIR}/generated/gui_resources.rc
     )

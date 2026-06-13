@@ -1,9 +1,11 @@
 #include "post2/core/case_config_io.hpp"
+#include "post2/core/frames.hpp"
 #include "post2/core/io.hpp"
 #include "post2/core/optimization.hpp"
 #include "post2/core/trajectory_service.hpp"
 #include "post2/vehicle/runtime_state.hpp"
 #include "post2/vehicle/vehicle_config_io.hpp"
+#include "chart_panel.hpp"
 #include "opengl_scene_renderer.hpp"
 
 #include <algorithm>
@@ -126,6 +128,34 @@ constexpr int kOptObjectiveDirectionCombo = 2117;
 constexpr int kOptObjectiveWeightEdit = 2118;
 constexpr const wchar_t* kSceneWindowClassName = L"Post2LiteOpenGLScene";
 
+// Middle column holding pre-takeoff and final vehicle stats.
+constexpr int kVehicleColumnX = kSidebarWidth + 24;       // 350
+constexpr int kVehicleColumnWidth = 280;
+constexpr int kVehicleColumnRight = kVehicleColumnX + kVehicleColumnWidth;  // 630
+constexpr int kContentColumnX = kVehicleColumnRight + 24; // 654
+
+// View selector buttons.
+constexpr int kViewButton3D = 2500;
+constexpr int kViewButtonProfile = 2501;
+constexpr int kViewButtonQ = 2502;
+constexpr int kViewButtonThrottle = 2503;
+constexpr int kViewButtonSpeed = 2504;
+constexpr int kViewButtonMass = 2505;
+constexpr int kViewButtonCount = 6;
+constexpr int kViewButtonHeight = 30;
+constexpr int kViewButtonGap = 4;
+constexpr int kViewButtonTop = 84;
+
+enum class ViewKind {
+    Scene3D = 0,
+    Profile2D = 1,
+    DynamicPressure = 2,
+    Throttle = 3,
+    Speed = 4,
+    Mass = 5,
+    Count = 6,
+};
+
 HINSTANCE g_instance = nullptr;
 CoreMode g_mode = CoreMode::Local;
 SimulationConfig g_config;
@@ -137,6 +167,16 @@ int g_remote_port = 5050;
 post2::gui::Camera3D g_camera;
 post2::gui::OpenGLSceneRenderer g_scene_renderer;
 HWND g_scene_hwnd = nullptr;
+ViewKind g_active_view = ViewKind::Scene3D;
+std::array<HWND, kViewButtonCount> g_view_buttons = {};
+post2::gui::ChartPanel g_chart_profile;
+post2::gui::ChartPanel g_chart_q;
+post2::gui::ChartPanel g_chart_throttle;
+post2::gui::ChartPanel g_chart_speed;
+post2::gui::ChartPanel g_chart_mass;
+
+void populate_charts();
+void switch_view(HWND hwnd, ViewKind view);
 bool g_camera_initialized = false;
 bool g_case_initialized = false;
 bool g_dragging = false;
@@ -542,6 +582,7 @@ void run_simulation(HWND hwnd)
     }
     update_status();
     set_outputs_text(format_run_outputs(g_result));
+    populate_charts();
     sync_scene_window(hwnd);
     InvalidateRect(hwnd, nullptr, TRUE);
 }
@@ -575,6 +616,7 @@ void execute_optimization(HWND hwnd)
         }
     }
     update_status();
+    populate_charts();
     sync_scene_window(hwnd);
     InvalidateRect(hwnd, nullptr, TRUE);
 }
@@ -583,9 +625,10 @@ RECT scene_rect(HWND hwnd)
 {
     RECT client;
     GetClientRect(hwnd, &client);
-    client.left += kSidebarWidth + 24;
+    client.left = kContentColumnX;
     client.right -= 24;
-    client.top += 104;
+    // button top + button height + 8 px gap
+    client.top += kViewButtonTop + kViewButtonHeight + 8;
     client.bottom -= 24;
     if (client.right < client.left) {
         client.right = client.left;
@@ -594,6 +637,18 @@ RECT scene_rect(HWND hwnd)
         client.bottom = client.top;
     }
     return client;
+}
+
+post2::gui::ChartPanel* chart_for_view(ViewKind view)
+{
+    switch (view) {
+    case ViewKind::Profile2D:        return &g_chart_profile;
+    case ViewKind::DynamicPressure:  return &g_chart_q;
+    case ViewKind::Throttle:         return &g_chart_throttle;
+    case ViewKind::Speed:            return &g_chart_speed;
+    case ViewKind::Mass:             return &g_chart_mass;
+    default:                          return nullptr;
+    }
 }
 
 void update_camera_viewport(HWND hwnd)
@@ -617,6 +672,24 @@ void invalidate_scene_window()
     }
 }
 
+void apply_active_view_visibility()
+{
+    const bool has_data = scene_has_state();
+    const bool show_scene = has_data && g_active_view == ViewKind::Scene3D;
+    if (window_is_live(g_scene_hwnd)) {
+        ShowWindow(g_scene_hwnd, show_scene ? SW_SHOWNA : SW_HIDE);
+    }
+    auto sync_chart = [&](post2::gui::ChartPanel& panel, ViewKind v) {
+        const bool show_chart = has_data && g_active_view == v;
+        if (show_chart) panel.show(); else panel.hide();
+    };
+    sync_chart(g_chart_profile, ViewKind::Profile2D);
+    sync_chart(g_chart_q, ViewKind::DynamicPressure);
+    sync_chart(g_chart_throttle, ViewKind::Throttle);
+    sync_chart(g_chart_speed, ViewKind::Speed);
+    sync_chart(g_chart_mass, ViewKind::Mass);
+}
+
 void sync_scene_window(HWND hwnd)
 {
     if (!window_is_live(g_scene_hwnd)) {
@@ -629,8 +702,154 @@ void sync_scene_window(HWND hwnd)
     const int height = std::max(0L, rect.bottom - rect.top);
     MoveWindow(g_scene_hwnd, rect.left, rect.top, width, height, TRUE);
     update_camera_viewport(hwnd);
-    ShowWindow(g_scene_hwnd, scene_has_state() ? SW_SHOWNA : SW_HIDE);
+    auto move_chart = [&](post2::gui::ChartPanel& panel) {
+        if (panel.hwnd()) {
+            MoveWindow(panel.hwnd(), rect.left, rect.top, width, height, TRUE);
+            panel.resize(width, height);
+        }
+    };
+    move_chart(g_chart_profile);
+    move_chart(g_chart_q);
+    move_chart(g_chart_throttle);
+    move_chart(g_chart_speed);
+    move_chart(g_chart_mass);
+    apply_active_view_visibility();
     invalidate_scene_window();
+}
+
+void switch_view(HWND hwnd, ViewKind view)
+{
+    g_active_view = view;
+    for (int i = 0; i < kViewButtonCount; ++i) {
+        if (g_view_buttons[i]) {
+            const bool pressed = static_cast<int>(view) == i;
+            Button_SetCheck(g_view_buttons[i], pressed ? BST_CHECKED : BST_UNCHECKED);
+        }
+    }
+    apply_active_view_visibility();
+    InvalidateRect(hwnd, nullptr, FALSE);
+}
+
+double great_circle_arc_m(double lat1_rad, double lon1_rad, double lat2_rad, double lon2_rad)
+{
+    const double dlon = lon2_rad - lon1_rad;
+    const double cos_arg = std::sin(lat1_rad) * std::sin(lat2_rad)
+        + std::cos(lat1_rad) * std::cos(lat2_rad) * std::cos(dlon);
+    const double clamped = std::max(-1.0, std::min(1.0, cos_arg));
+    return post2::core::frames::Wgs84::a_m * std::acos(clamped);
+}
+
+void populate_charts()
+{
+    using post2::gui::ChartConfig;
+    using post2::gui::ChartSeries;
+    if (!g_result.ok || g_result.state_log.empty()) {
+        ChartConfig empty;
+        g_chart_profile.set_data(empty);
+        g_chart_q.set_data(empty);
+        g_chart_throttle.set_data(empty);
+        g_chart_speed.set_data(empty);
+        g_chart_mass.set_data(empty);
+        return;
+    }
+    const auto& entries = g_result.state_log.entries();
+    constexpr double kDegToRadLocal = 3.141592653589793238462643383279502884 / 180.0;
+    const double launch_lat = g_case.launch_site.latitude_deg * kDegToRadLocal;
+    const double launch_lon = g_case.launch_site.longitude_deg * kDegToRadLocal;
+
+    // 2D profile range: from takeoff (first non-clamped entry) to last entry
+    // with engine_thrust_n > 0 (all-engines-off cutoff).
+    std::size_t profile_start = 0;
+    for (std::size_t i = 0; i < entries.size(); ++i) {
+        if (!entries[i].hold_down_clamp_active) {
+            profile_start = i;
+            break;
+        }
+    }
+    std::size_t profile_end = profile_start;
+    bool found_thrust = false;
+    for (std::size_t i = profile_start; i < entries.size(); ++i) {
+        if (entries[i].engine_thrust_n > 0.0) {
+            profile_end = i;
+            found_thrust = true;
+        }
+    }
+    if (!found_thrust) {
+        profile_end = entries.size() - 1;
+    }
+
+    ChartSeries profile_s, q_s, throttle_s, speed_s, mass_s;
+    profile_s.x.reserve(profile_end - profile_start + 1);
+    profile_s.y.reserve(profile_end - profile_start + 1);
+    q_s.x.reserve(entries.size());
+    q_s.y.reserve(entries.size());
+    throttle_s.x.reserve(entries.size());
+    throttle_s.y.reserve(entries.size());
+    speed_s.x.reserve(entries.size());
+    speed_s.y.reserve(entries.size());
+    mass_s.x.reserve(entries.size());
+    mass_s.y.reserve(entries.size());
+
+    for (std::size_t i = 0; i < entries.size(); ++i) {
+        const auto& entry = entries[i];
+        if (i >= profile_start && i <= profile_end) {
+            const post2::core::frames::Geodetic geo =
+                post2::core::frames::ecef_to_geodetic(entry.state.position_m);
+            const double downrange_m = great_circle_arc_m(
+                launch_lat, launch_lon, geo.latitude_rad, geo.longitude_rad);
+            profile_s.x.push_back(downrange_m / 1000.0);
+            profile_s.y.push_back(entry.altitude_m / 1000.0);
+        }
+        q_s.x.push_back(entry.time_s);
+        q_s.y.push_back(entry.dynamic_pressure_pa / 1000.0);
+        throttle_s.x.push_back(entry.time_s);
+        throttle_s.y.push_back(entry.throttle);
+        speed_s.x.push_back(entry.time_s);
+        speed_s.y.push_back(entry.speed_mps);
+        mass_s.x.push_back(entry.time_s);
+        mass_s.y.push_back(entry.total_mass_kg);
+    }
+
+    ChartConfig profile_cfg;
+    profile_cfg.title = L"Launch profile (liftoff to engine cutoff)";
+    profile_cfg.x_label = L"Downrange [km]";
+    profile_cfg.y_label = L"Altitude";
+    profile_cfg.y_unit = L"km";
+    profile_cfg.data = std::move(profile_s);
+    g_chart_profile.set_data(std::move(profile_cfg));
+
+    ChartConfig q_cfg;
+    q_cfg.title = L"Dynamic pressure";
+    q_cfg.x_label = L"Time [s]";
+    q_cfg.y_label = L"Q";
+    q_cfg.y_unit = L"kPa";
+    q_cfg.data = std::move(q_s);
+    q_cfg.mark_peak = true;
+    g_chart_q.set_data(std::move(q_cfg));
+
+    ChartConfig throttle_cfg;
+    throttle_cfg.title = L"Throttle command";
+    throttle_cfg.x_label = L"Time [s]";
+    throttle_cfg.y_label = L"Throttle";
+    throttle_cfg.y_unit = L"0-1";
+    throttle_cfg.data = std::move(throttle_s);
+    g_chart_throttle.set_data(std::move(throttle_cfg));
+
+    ChartConfig speed_cfg;
+    speed_cfg.title = L"Speed (inertial)";
+    speed_cfg.x_label = L"Time [s]";
+    speed_cfg.y_label = L"Speed";
+    speed_cfg.y_unit = L"m/s";
+    speed_cfg.data = std::move(speed_s);
+    g_chart_speed.set_data(std::move(speed_cfg));
+
+    ChartConfig mass_cfg;
+    mass_cfg.title = L"Vehicle total mass";
+    mass_cfg.x_label = L"Time [s]";
+    mass_cfg.y_label = L"Mass";
+    mass_cfg.y_unit = L"kg";
+    mass_cfg.data = std::move(mass_s);
+    g_chart_mass.set_data(std::move(mass_cfg));
 }
 
 void draw_text_line(HDC hdc, int x, int y, const std::string& text)
@@ -3631,6 +3850,103 @@ bool show_phase_editor_dialog(HWND parent)
     return state.accepted;
 }
 
+std::string format_double_short(double value, int precision = 1)
+{
+    char buffer[64];
+    std::snprintf(buffer, sizeof(buffer), "%.*f", precision, value);
+    return buffer;
+}
+
+double sum_vehicle_dry_mass_kg(const post2::vehicle::VehicleConfig& vehicle)
+{
+    if (vehicle.stages.empty()) {
+        return vehicle.dry_mass_kg;
+    }
+    double total = 0.0;
+    for (const auto& stage : vehicle.stages) {
+        if (stage.attached) {
+            total += std::max(0.0, stage.dry_mass_kg);
+        }
+    }
+    return total;
+}
+
+double sum_vehicle_propellant_kg(const post2::vehicle::VehicleConfig& vehicle)
+{
+    if (vehicle.stages.empty()) {
+        double total = 0.0;
+        for (const auto& tank : vehicle.tanks) {
+            total += std::max(0.0, tank.initial_kg);
+        }
+        return total;
+    }
+    double total = 0.0;
+    for (const auto& stage : vehicle.stages) {
+        if (!stage.attached) continue;
+        for (const auto& tank : stage.tanks) {
+            total += std::max(0.0, tank.initial_kg);
+        }
+    }
+    return total;
+}
+
+double sum_vehicle_thrust_vac_n(const post2::vehicle::VehicleConfig& vehicle)
+{
+    if (vehicle.stages.empty()) {
+        return vehicle.engine.thrust_vac_n * std::max(1, vehicle.engine.engine_count);
+    }
+    double total = 0.0;
+    for (const auto& stage : vehicle.stages) {
+        if (!stage.attached || !stage.active || !stage.engine.enabled) continue;
+        total += stage.engine.thrust_vac_n * std::max(1, stage.engine.engine_count);
+    }
+    return total;
+}
+
+std::vector<std::string> format_pre_takeoff_lines()
+{
+    std::vector<std::string> lines;
+    const auto& v = g_case.vehicle;
+    const double dry = sum_vehicle_dry_mass_kg(v);
+    const double prop = sum_vehicle_propellant_kg(v);
+    const double thrust = sum_vehicle_thrust_vac_n(v);
+    lines.push_back(std::string("Name: ") + v.name);
+    lines.push_back("Stages: " + std::to_string(v.stages.size()));
+    lines.push_back("Dry mass: " + format_double_short(dry, 1) + " kg");
+    lines.push_back("Propellant: " + format_double_short(prop, 1) + " kg");
+    lines.push_back("Total mass: " + format_double_short(dry + prop, 1) + " kg");
+    if (thrust > 0.0) {
+        lines.push_back("Vac thrust: " + format_double_short(thrust / 1000.0, 1) + " kN");
+        const double t_w = thrust / std::max(1.0, (dry + prop) * 9.80665);
+        lines.push_back("T/W (vac): " + format_double_short(t_w, 2));
+    } else {
+        lines.push_back("Vac thrust: -");
+    }
+    lines.push_back("Launch site:");
+    lines.push_back("  lat " + format_double_short(g_case.launch_site.latitude_deg, 4) + " deg");
+    lines.push_back("  lon " + format_double_short(g_case.launch_site.longitude_deg, 4) + " deg");
+    lines.push_back("  alt " + format_double_short(g_case.launch_site.altitude_m, 1) + " m");
+    return lines;
+}
+
+std::vector<std::string> format_final_lines()
+{
+    std::vector<std::string> lines;
+    if (!g_result.ok || g_result.state_log.empty()) {
+        lines.push_back("(no result yet)");
+        return lines;
+    }
+    const auto& tail = g_result.state_log.back();
+    lines.push_back("Time: " + format_double_short(tail.time_s, 1) + " s");
+    lines.push_back("Altitude: " + format_double_short(tail.altitude_m / 1000.0, 2) + " km");
+    lines.push_back("Speed: " + format_double_short(tail.speed_mps, 1) + " m/s");
+    lines.push_back("Mass: " + format_double_short(tail.total_mass_kg, 1) + " kg");
+    lines.push_back("Propellant: " + format_double_short(tail.propellant_mass_kg, 1) + " kg");
+    lines.push_back("Engine thrust: " + format_double_short(tail.engine_thrust_n / 1000.0, 1) + " kN");
+    lines.push_back(std::string("Hold-down: ") + (tail.hold_down_clamp_active ? "yes" : "no"));
+    return lines;
+}
+
 void paint_scene(HWND hwnd, HDC hdc)
 {
     RECT client;
@@ -3640,50 +3956,78 @@ void paint_scene(HWND hwnd, HDC hdc)
     FillRect(hdc, &client, background);
     DeleteObject(background);
 
+    // Left sidebar background + separator.
     RECT sidebar = client;
     sidebar.right = kSidebarWidth;
     HBRUSH sidebar_background = CreateSolidBrush(RGB(241, 245, 249));
     FillRect(hdc, &sidebar, sidebar_background);
     DeleteObject(sidebar_background);
+
+    // Middle "vehicle data" column background + separators on both sides.
+    RECT column = client;
+    column.left = kVehicleColumnX;
+    column.right = kVehicleColumnRight;
+    HBRUSH column_background = CreateSolidBrush(RGB(248, 250, 254));
+    FillRect(hdc, &column, column_background);
+    DeleteObject(column_background);
+
     HPEN separator = CreatePen(PS_SOLID, 1, RGB(203, 213, 225));
     HPEN old_pen = static_cast<HPEN>(SelectObject(hdc, separator));
     MoveToEx(hdc, kSidebarWidth, 0, nullptr);
     LineTo(hdc, kSidebarWidth, client.bottom);
+    MoveToEx(hdc, kVehicleColumnX, 0, nullptr);
+    LineTo(hdc, kVehicleColumnX, client.bottom);
+    MoveToEx(hdc, kVehicleColumnRight, 0, nullptr);
+    LineTo(hdc, kVehicleColumnRight, client.bottom);
     SelectObject(hdc, old_pen);
     DeleteObject(separator);
-
-    const int content_x = kSidebarWidth + 24;
 
     SetBkMode(hdc, TRANSPARENT);
     SetTextColor(hdc, RGB(15, 23, 42));
 
     HFONT title_font = CreateFontW(22, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
         OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
-    HFONT old_font = static_cast<HFONT>(SelectObject(hdc, title_font));
-    draw_text_line(hdc, content_x, 20, "POST2 Lite trajectory");
-    SelectObject(hdc, old_font);
-    DeleteObject(title_font);
-
-    HFONT body_font = CreateFontW(15, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+    HFONT body_font = CreateFontW(14, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
         OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
-    old_font = static_cast<HFONT>(SelectObject(hdc, body_font));
-    draw_text_line(hdc, content_x, 52, g_status);
-    draw_text_line(
-        hdc,
-        content_x,
-        74,
-        std::string("3D ") +
-            (should_render_earth_fixed_view() ? "Earth-fixed" : "inertial") +
-            " view. Remote endpoint: " + remote_endpoint_text() + ".");
+    HFONT section_font = CreateFontW(14, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+        OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
 
-    if (!g_result.ok || g_result.state_log.empty()) {
-        SelectObject(hdc, old_font);
-        DeleteObject(body_font);
-        return;
+    // Title and status above the chart row, in the content column.
+    HFONT old_font = static_cast<HFONT>(SelectObject(hdc, title_font));
+    draw_text_line(hdc, kContentColumnX, 16, "POST2 Lite trajectory");
+    SelectObject(hdc, body_font);
+    draw_text_line(hdc, kContentColumnX, 56, g_status);
+    SelectObject(hdc, old_font);
+
+    // Middle column contents: section headers + line lists.
+    const int col_x = kVehicleColumnX + 16;
+    int y = 16;
+    SelectObject(hdc, section_font);
+    SetTextColor(hdc, RGB(30, 41, 59));
+    draw_text_line(hdc, col_x, y, "Pre-takeoff vehicle");
+    y += 22;
+    SelectObject(hdc, body_font);
+    SetTextColor(hdc, RGB(51, 65, 85));
+    for (const auto& line : format_pre_takeoff_lines()) {
+        draw_text_line(hdc, col_x, y, line);
+        y += 18;
     }
 
-    SelectObject(hdc, old_font);
+    y += 12;
+    SelectObject(hdc, section_font);
+    SetTextColor(hdc, RGB(30, 41, 59));
+    draw_text_line(hdc, col_x, y, "Final state");
+    y += 22;
+    SelectObject(hdc, body_font);
+    SetTextColor(hdc, RGB(51, 65, 85));
+    for (const auto& line : format_final_lines()) {
+        draw_text_line(hdc, col_x, y, line);
+        y += 18;
+    }
+
+    DeleteObject(title_font);
     DeleteObject(body_font);
+    DeleteObject(section_font);
 }
 
 void update_mode_menu(HWND hwnd)
@@ -3883,6 +4227,57 @@ void create_scene_window(HWND parent)
     sync_scene_window(parent);
 }
 
+void create_view_buttons(HWND parent)
+{
+    struct ButtonSpec {
+        int id;
+        const wchar_t* label;
+        DWORD extra_style;
+    };
+    const ButtonSpec specs[kViewButtonCount] = {
+        {kViewButton3D,       L"3D",        WS_GROUP},
+        {kViewButtonProfile,  L"2D Profile", 0},
+        {kViewButtonQ,        L"Q",         0},
+        {kViewButtonThrottle, L"Throttle",  0},
+        {kViewButtonSpeed,    L"Speed",     0},
+        {kViewButtonMass,     L"Mass",      0},
+    };
+    constexpr int kButtonWidth = 92;
+    int x = kContentColumnX;
+    const int y = kViewButtonTop;
+    HFONT font = CreateFontW(13, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+        OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
+    for (int i = 0; i < kViewButtonCount; ++i) {
+        HWND btn = CreateWindowExW(
+            0,
+            L"BUTTON",
+            specs[i].label,
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTORADIOBUTTON | BS_PUSHLIKE | specs[i].extra_style,
+            x,
+            y,
+            kButtonWidth,
+            kViewButtonHeight,
+            parent,
+            reinterpret_cast<HMENU>(static_cast<INT_PTR>(specs[i].id)),
+            g_instance,
+            nullptr);
+        g_view_buttons[i] = btn;
+        SendMessageW(btn, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+        x += kButtonWidth + kViewButtonGap;
+    }
+    Button_SetCheck(g_view_buttons[0], BST_CHECKED);
+}
+
+void create_chart_panels(HWND parent)
+{
+    const RECT rect = scene_rect(parent);
+    g_chart_profile.initialize(parent, rect);
+    g_chart_q.initialize(parent, rect);
+    g_chart_throttle.initialize(parent, rect);
+    g_chart_speed.initialize(parent, rect);
+    g_chart_mass.initialize(parent, rect);
+}
+
 LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam)
 {
     switch (message) {
@@ -3892,6 +4287,8 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
         ensure_case_initialized();
         create_phase_sidebar_controls(hwnd);
         create_scene_window(hwnd);
+        create_view_buttons(hwnd);
+        create_chart_panels(hwnd);
         run_simulation(hwnd);
         return 0;
 
@@ -3939,6 +4336,12 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
 
     case WM_COMMAND:
         switch (LOWORD(wparam)) {
+        case kViewButton3D:        switch_view(hwnd, ViewKind::Scene3D); return 0;
+        case kViewButtonProfile:   switch_view(hwnd, ViewKind::Profile2D); return 0;
+        case kViewButtonQ:         switch_view(hwnd, ViewKind::DynamicPressure); return 0;
+        case kViewButtonThrottle:  switch_view(hwnd, ViewKind::Throttle); return 0;
+        case kViewButtonSpeed:     switch_view(hwnd, ViewKind::Speed); return 0;
+        case kViewButtonMass:      switch_view(hwnd, ViewKind::Mass); return 0;
         case kMenuRefresh:
             run_simulation(hwnd);
             return 0;

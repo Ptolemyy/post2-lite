@@ -44,7 +44,11 @@
       "Bash(./build/Debug/post2_integrator_test.exe)",
       "Bash(ctest -C Debug)",
       "Bash(ctest -C Release --output-on-failure)",
-      "Bash(./build/Release/post2_shell.exe run *)"
+      "Bash(./build/Release/post2_shell.exe run *)",
+      "Bash(awk -F',' 'NR>1 && $19+0 > 0 {print NR\": q=\"$20\" mach=\"$21\" rho=\"$19\" pressure=\"$18; if\\(NR>10\\) exit}' trajectory.csv)",
+      "Bash(awk -F',' 'NR<=15 || NR>=100 {print NR\": t=\"$1\" alt=\"$8}' trajectory.csv)",
+      "Bash(cmake --build build --config Debug --target post2_gui)",
+      "Bash(cmake --build build --config Release --target post2_gui)"
     ]
   }
 }
