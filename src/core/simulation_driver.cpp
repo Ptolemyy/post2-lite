@@ -2,6 +2,7 @@
 
 #include "post2/core/control_models.hpp"
 #include "post2/core/coordinates.hpp"
+#include "post2/environment/atmosphere.hpp"
 #include "post2/integrators/ode_integrator.hpp"
 #include "post2/propagation/force_model_set.hpp"
 #include "post2/propagation/force_models.hpp"
@@ -46,6 +47,7 @@ void set_hold_down_clamp_state(
 
 post2::propagation::EnvironmentState make_environment_state(
     const SimulationConfig& config,
+    const PhaseConfig& phase,
     double time_s,
     const State& motion)
 {
@@ -73,6 +75,16 @@ post2::propagation::EnvironmentState make_environment_state(
         environment.longitude_rad =
             std::atan2(environment.position_ecef_m.y, environment.position_ecef_m.x);
     }
+    if (phase.force_models.atmosphere_model.type == "exponential") {
+        const post2::environment::ExponentialAtmosphereModel atmosphere(config.earth_radius_m);
+        const post2::environment::AtmosphereSample sample =
+            atmosphere.sample(time_s, motion.position_m, motion.velocity_mps);
+        environment.density_kgpm3 = sample.density_kgpm3;
+        environment.pressure_pa = sample.pressure_pa;
+        environment.temperature_k = sample.temperature_k;
+        environment.speed_of_sound_mps = sample.speed_of_sound_mps;
+        environment.wind_ecef_mps = sample.wind_ecef_mps;
+    }
     return environment;
 }
 
@@ -96,6 +108,11 @@ bool supported_gravity_model_type(const std::string& type)
     return type == "point_mass" || type == "j2" || type == "spherical_harmonic";
 }
 
+bool supported_atmosphere_model_type(const std::string& type)
+{
+    return type == "none" || type == "exponential";
+}
+
 bool validate_gravity_model_config(
     const GravityModelConfig& gravity_model,
     const std::string& prefix,
@@ -115,6 +132,18 @@ bool validate_gravity_model_config(
     }
     if (gravity_model.order > gravity_model.degree) {
         *error = prefix + ".order cannot exceed .degree";
+        return false;
+    }
+    return true;
+}
+
+bool validate_atmosphere_model_config(
+    const AtmosphereModelConfig& atmosphere_model,
+    const std::string& prefix,
+    std::string* error)
+{
+    if (!supported_atmosphere_model_type(atmosphere_model.type)) {
+        *error = prefix + ".type must be \"none\" or \"exponential\"";
         return false;
     }
     return true;
@@ -268,6 +297,12 @@ bool validate_case_config(const CaseConfig& config, std::string* error)
         if (!validate_gravity_model_config(
                 phase.force_models.gravity_model,
                 "phase " + std::to_string(i) + " force_models.gravity_model",
+                error)) {
+            return false;
+        }
+        if (!validate_atmosphere_model_config(
+                phase.force_models.atmosphere_model,
+                "phase " + std::to_string(i) + " force_models.atmosphere_model",
                 error)) {
             return false;
         }
@@ -530,6 +565,7 @@ StateLog propagate_phase(
                     const post2::propagation::EnvironmentState environment =
                         make_environment_state(
                             simulation_config,
+                            phase,
                             dynamics_time_s,
                             dynamics_state.motion);
                     const post2::propagation::ForceModelContext force_context{
@@ -648,7 +684,7 @@ StateLog GravityPropagator::propagate(const SimulationConfig& config, const Stat
             auto eval = vehicle_propagator.compute_derivatives(
                 time_s, current_runtime, state.tank_masses_kg, state.motion, cmd);
             const post2::propagation::EnvironmentState environment =
-                make_environment_state(config, time_s, state.motion);
+                make_environment_state(config, phase, time_s, state.motion);
             const post2::propagation::ForceModelContext force_context{
                 &case_config,
                 &phase,

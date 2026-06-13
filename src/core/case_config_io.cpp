@@ -117,6 +117,17 @@ JsonValue aero_model_to_json(const AeroModelConfig& model)
     });
 }
 
+JsonValue aero_to_json(const post2::vehicle::AeroConfig& aero)
+{
+    return JsonValue::object({
+        {"enabled", boolean(aero.enabled)},
+        {"reference_area_m2", number(aero.reference_area_m2)},
+        {"cd", number(aero.cd)},
+        {"cl", number(aero.cl)},
+        {"aero_table_path", string(aero.aero_table_path)},
+    });
+}
+
 JsonValue force_models_to_json(const ForceModelSwitches& force_models)
 {
     return JsonValue::object({
@@ -191,6 +202,7 @@ JsonValue vehicle_to_json(const post2::vehicle::VehicleConfig& vehicle)
     return JsonValue::object({
         {"name", string(normalized_vehicle.name)},
         {"dry_mass_kg", number(normalized_vehicle.dry_mass_kg)},
+        {"aero", aero_to_json(normalized_vehicle.aero)},
         {"engine", engine_to_json(normalized_vehicle.engine)},
         {"tanks", JsonValue::array(std::move(tanks))},
         {"stages", JsonValue::array(std::move(stages))},
@@ -526,6 +538,24 @@ bool read_aero_model(const JsonValue& object, const char* key, AeroModelConfig* 
     return !value || parse_aero_model(*value, target, error);
 }
 
+bool parse_vehicle_aero(const JsonValue& value, post2::vehicle::AeroConfig* target, std::string* error)
+{
+    if (!value.is_object()) {
+        return fail(error, "vehicle.aero must be an object");
+    }
+
+    post2::vehicle::AeroConfig parsed = *target;
+    if (!read_bool(value, "enabled", &parsed.enabled, error) ||
+        !read_number(value, "reference_area_m2", &parsed.reference_area_m2, error) ||
+        !read_number(value, "cd", &parsed.cd, error) ||
+        !read_number(value, "cl", &parsed.cl, error) ||
+        !read_string(value, "aero_table_path", &parsed.aero_table_path, error)) {
+        return false;
+    }
+    *target = std::move(parsed);
+    return true;
+}
+
 bool parse_quaternion(const JsonValue& value, Quaternion* target, std::string* error)
 {
     if (!value.is_array() || value.array_value.size() != 4) {
@@ -555,6 +585,11 @@ bool parse_vehicle(const JsonValue& value, post2::vehicle::VehicleConfig* target
     if (!read_string(value, "name", &parsed.name, error) ||
         !read_number(value, "dry_mass_kg", &parsed.dry_mass_kg, error)) {
         return false;
+    }
+    if (const JsonValue* aero = find_member(value, "aero")) {
+        if (!parse_vehicle_aero(*aero, &parsed.aero, error)) {
+            return false;
+        }
     }
 
     auto parse_tank_ref = [&](const JsonValue& v, post2::vehicle::TankRef* ref) -> bool {
@@ -1002,6 +1037,7 @@ CaseConfig case_from_simulation_config(const SimulationConfig& config)
     phase.hold_down_clamp_initial_active =
         config.hold_down_clamp.enabled && config.hold_down_clamp.release_time_s > 0.0;
     phase.force_models.normal_force = config.normal_force.enabled;
+    phase.force_models.aerodynamic = config.vehicle.aero.enabled;
     phase.force_models.gravity_model = config.gravity_model;
     phase.force_models.gravity_model.j2 = case_config.earth_j2;
     phase.throttle_model.type = "poly";

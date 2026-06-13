@@ -67,6 +67,14 @@ struct T2TConnection {
     std::optional<double> end_time_s;
 };
 
+struct AeroConfig {
+    bool enabled = false;
+    double reference_area_m2 = 10.0;
+    double cd = 0.5;
+    double cl = 0.0;
+    std::string aero_table_path;
+};
+
 struct VehicleConfig {
     std::string name = "default";
     double dry_mass_kg = 1000.0;
@@ -76,6 +84,7 @@ struct VehicleConfig {
     std::vector<TankConfig> tanks = {TankConfig{}};
     std::vector<StageConfig> stages;
     std::vector<T2TConnection> tank_to_tank_connections;
+    AeroConfig aero;
 };
 
 struct VehicleState {

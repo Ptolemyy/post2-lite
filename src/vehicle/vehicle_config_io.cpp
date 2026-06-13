@@ -292,6 +292,29 @@ bool validate_tanks(const std::vector<TankConfig>& tanks, const std::string& pre
     return true;
 }
 
+bool validate_aero_config(const AeroConfig& aero, std::string* error)
+{
+    if (aero.reference_area_m2 <= 0.0) {
+        if (error) {
+            *error = "aero.reference_area_m2 must be positive";
+        }
+        return false;
+    }
+    if (aero.cd < 0.0) {
+        if (error) {
+            *error = "aero.cd cannot be negative";
+        }
+        return false;
+    }
+    if (aero.cl < 0.0) {
+        if (error) {
+            *error = "aero.cl cannot be negative";
+        }
+        return false;
+    }
+    return true;
+}
+
 } // namespace
 
 VehicleConfig default_vehicle_config()
@@ -328,6 +351,9 @@ bool validate_vehicle_config(const VehicleConfig& config, std::string* error)
     }
     if (!validate_engine_config(config.engine, "engine", error) ||
         !validate_tanks(config.tanks, "vehicle", error)) {
+        return false;
+    }
+    if (!validate_aero_config(config.aero, error)) {
         return false;
     }
 
@@ -438,7 +464,11 @@ std::string vehicle_config_summary(const VehicleConfig& config)
            << " | payload " << payload_stage_dry_mass_kg(config)
            << " kg"
            << " | prop " << propellant_kg
-           << " kg";
+           << " kg"
+           << " | aero " << (config.aero.enabled ? "on" : "off")
+           << " Cd " << config.aero.cd
+           << " A " << config.aero.reference_area_m2
+           << " m2";
     return output.str();
 }
 
@@ -469,6 +499,11 @@ std::string vehicle_config_to_text(const VehicleConfig& config)
     output << "format=post2_vehicle_config_v1\n";
     output << "name=" << normalized.name << '\n';
     output << "dry_mass_kg=" << normalized.dry_mass_kg << '\n';
+    output << "aero.enabled=" << (normalized.aero.enabled ? "true" : "false") << '\n';
+    output << "aero.reference_area_m2=" << normalized.aero.reference_area_m2 << '\n';
+    output << "aero.cd=" << normalized.aero.cd << '\n';
+    output << "aero.cl=" << normalized.aero.cl << '\n';
+    output << "aero.table_path=" << normalized.aero.aero_table_path << '\n';
     output << "engine.enabled=" << (normalized.engine.enabled ? "true" : "false") << '\n';
     output << "engine.max_thrust_n=" << normalized.engine.max_thrust_n << '\n';
     output << "engine.isp_s=" << normalized.engine.isp_s << '\n';
@@ -603,6 +638,10 @@ bool vehicle_config_from_text(const std::string& text, VehicleConfig* config, st
         parsed.name = it->second;
     }
     if (!set_double("dry_mass_kg", &parsed.dry_mass_kg) ||
+        !set_bool("aero.enabled", &parsed.aero.enabled) ||
+        !set_double("aero.reference_area_m2", &parsed.aero.reference_area_m2) ||
+        !set_double("aero.cd", &parsed.aero.cd) ||
+        !set_double("aero.cl", &parsed.aero.cl) ||
         !set_bool_alias("engine.enabled", "thrust.enabled", &parsed.engine.enabled) ||
         !set_double_alias("engine.max_thrust_n", "thrust.max_thrust_n", &parsed.engine.max_thrust_n) ||
         !set_double_alias("engine.isp_s", "thrust.isp_s", &parsed.engine.isp_s) ||
@@ -611,6 +650,9 @@ bool vehicle_config_from_text(const std::string& text, VehicleConfig* config, st
         !set_double_alias("engine.direction_z", "thrust.direction_z", &parsed.engine.direction_body.z) ||
         !parse_engine_feed_tanks(values, "engine.", &parsed.engine, error)) {
         return false;
+    }
+    if (const auto it = values.find("aero.table_path"); it != values.end()) {
+        parsed.aero.aero_table_path = it->second;
     }
 
     std::size_t tank_count = parsed.tanks.size();

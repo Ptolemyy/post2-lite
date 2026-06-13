@@ -243,7 +243,7 @@ std::string make_remote_request(const SimulationConfig& config)
     post2::vehicle::sync_legacy_vehicle_fields_from_first_stage(&vehicle);
     std::ostringstream output;
     output << std::setprecision(17)
-           << "SIMV3 "
+           << "SIMV4 "
            << config.duration_s << ' '
            << config.step_s << ' '
            << config.initial_altitude_m << ' '
@@ -257,6 +257,11 @@ std::string make_remote_request(const SimulationConfig& config)
            << (config.normal_force.enabled ? 1 : 0) << ' '
            << std::quoted(vehicle.name) << ' '
            << vehicle.dry_mass_kg << ' '
+           << (vehicle.aero.enabled ? 1 : 0) << ' '
+           << vehicle.aero.reference_area_m2 << ' '
+           << vehicle.aero.cd << ' '
+           << vehicle.aero.cl << ' '
+           << std::quoted(vehicle.aero.aero_table_path) << ' '
            << (vehicle.engine.enabled ? 1 : 0) << ' '
            << vehicle.engine.max_thrust_n << ' '
            << vehicle.engine.isp_s << ' '
@@ -290,9 +295,9 @@ bool parse_remote_request(const std::string& request, SimulationConfig* config, 
     std::string command;
     SimulationConfig parsed;
     input >> command;
-    if (command != "SIM" && command != "SIMV2" && command != "SIMV3") {
+    if (command != "SIM" && command != "SIMV2" && command != "SIMV3" && command != "SIMV4") {
         if (error) {
-            *error = "expected SIM, SIMV2, or SIMV3 request";
+            *error = "expected SIM, SIMV2, SIMV3, or SIMV4 request";
         }
         return false;
     }
@@ -311,7 +316,7 @@ bool parse_remote_request(const std::string& request, SimulationConfig* config, 
         return false;
     }
 
-    if (command == "SIMV3") {
+    if (command == "SIMV3" || command == "SIMV4") {
         int hold_down_clamp_enabled = 0;
         int normal_force_enabled = 1;
         input
@@ -333,12 +338,22 @@ bool parse_remote_request(const std::string& request, SimulationConfig* config, 
         parsed.normal_force.enabled = normal_force_enabled != 0;
     }
 
-    if (command == "SIMV2" || command == "SIMV3") {
+    if (command == "SIMV2" || command == "SIMV3" || command == "SIMV4") {
         int engine_enabled = 0;
+        int aero_enabled = 0;
         std::size_t tank_count = 0;
         input
             >> std::quoted(parsed.vehicle.name)
-            >> parsed.vehicle.dry_mass_kg
+            >> parsed.vehicle.dry_mass_kg;
+        if (command == "SIMV4") {
+            input
+                >> aero_enabled
+                >> parsed.vehicle.aero.reference_area_m2
+                >> parsed.vehicle.aero.cd
+                >> parsed.vehicle.aero.cl
+                >> std::quoted(parsed.vehicle.aero.aero_table_path);
+        }
+        input
             >> engine_enabled
             >> parsed.vehicle.engine.max_thrust_n
             >> parsed.vehicle.engine.isp_s
@@ -349,11 +364,12 @@ bool parse_remote_request(const std::string& request, SimulationConfig* config, 
 
         if (!input) {
             if (error) {
-                *error = "invalid SIMV2 vehicle fields";
+                *error = "invalid SIM vehicle fields";
             }
             return false;
         }
 
+        parsed.vehicle.aero.enabled = aero_enabled != 0;
         parsed.vehicle.engine.enabled = engine_enabled != 0;
         parsed.vehicle.tanks.assign(tank_count, post2::vehicle::TankConfig{});
         for (auto& tank : parsed.vehicle.tanks) {
@@ -364,10 +380,16 @@ bool parse_remote_request(const std::string& request, SimulationConfig* config, 
                 >> tank.initial_kg;
             if (!input) {
                 if (error) {
-                    *error = "invalid SIMV2 tank fields";
+                    *error = "invalid SIM tank fields";
                 }
                 return false;
             }
+        }
+        if (parsed.vehicle.engine.enabled &&
+            parsed.vehicle.engine.max_thrust_n > 0.0 &&
+            parsed.vehicle.engine.feed_tanks.empty() &&
+            !parsed.vehicle.tanks.empty()) {
+            parsed.vehicle.engine.feed_tanks = {{"stage 1", parsed.vehicle.tanks.front().name}};
         }
         parsed.vehicle.stages = post2::vehicle::effective_stage_configs(parsed.vehicle);
     }

@@ -4,6 +4,7 @@
 #include "post2/core/optimization.hpp"
 #include "post2/core/projection.hpp"
 #include "post2/core/trajectory_service.hpp"
+#include "post2/environment/atmosphere.hpp"
 #include "post2/propagation/force_model.hpp"
 #include "post2/propagation/force_models.hpp"
 #include "post2/vehicle/runtime_state.hpp"
@@ -67,6 +68,26 @@ int main()
     }
 
     {
+        post2::environment::ExponentialAtmosphereModel atmosphere(post2::core::kEarthRadiusM);
+        const auto sea_level = atmosphere.sample(
+            0.0,
+            {post2::core::kEarthRadiusM, 0.0, 0.0},
+            {});
+        const auto scale_height = atmosphere.sample(
+            0.0,
+            {post2::core::kEarthRadiusM + 7200.0, 0.0, 0.0},
+            {});
+        if (std::abs(sea_level.density_kgpm3 - 1.225) > 1.0e-12 ||
+            std::abs(scale_height.density_kgpm3 - 1.225 / std::exp(1.0)) > 1.0e-12 ||
+            sea_level.pressure_pa <= 0.0 ||
+            sea_level.temperature_k <= 0.0 ||
+            sea_level.speed_of_sound_mps <= 0.0 ||
+            !std::isfinite(sea_level.pressure_pa) ||
+            !std::isfinite(sea_level.speed_of_sound_mps)) {
+            std::cerr << "exponential atmosphere sample was not physically sane\n";
+            return 1;
+        }
+
         post2::core::CaseConfig gravity_case;
         gravity_case.earth_radius_m = post2::core::kEarthRadiusM;
         gravity_case.earth_mu_m3s2 = post2::core::kEarthMuM3S2;
@@ -135,9 +156,53 @@ int main()
         }
     }
 
+    {
+        post2::core::CaseConfig drag_case;
+        drag_case.earth_rotation_rad_per_s = 0.0;
+        drag_case.vehicle = post2::vehicle::default_vehicle_config();
+        drag_case.vehicle.aero.enabled = true;
+        drag_case.vehicle.aero.reference_area_m2 = 2.0;
+        drag_case.vehicle.aero.cd = 1.5;
+
+        post2::core::PhaseConfig drag_phase;
+        drag_phase.force_models.aerodynamic = true;
+
+        post2::vehicle::VehicleRuntimeState runtime;
+        runtime.vehicle.total_mass_kg = 100.0;
+
+        post2::propagation::EnvironmentState environment;
+        environment.time_s = 0.0;
+        environment.density_kgpm3 = 1.0;
+
+        post2::integrators::ExtendedState drag_state;
+        drag_state.motion.position_m = {post2::core::kEarthRadiusM + 1000.0, 0.0, 0.0};
+        drag_state.motion.velocity_mps = {10.0, 0.0, 0.0};
+
+        const post2::propagation::ForceModelContext drag_context{
+            &drag_case,
+            &drag_phase,
+            &runtime,
+            &environment,
+            {},
+        };
+        post2::propagation::AtmosphericDragModel drag_model;
+        const auto drag_output = drag_model.evaluate(drag_context, drag_state);
+        if (std::abs(drag_output.acceleration_eci_mps2.x + 1.5) > 1.0e-12 ||
+            std::abs(drag_output.acceleration_eci_mps2.y) > 1.0e-12 ||
+            std::abs(drag_output.acceleration_eci_mps2.z) > 1.0e-12) {
+            std::cerr << "atmospheric drag force model returned wrong acceleration\n";
+            return 1;
+        }
+    }
+
     post2::vehicle::VehicleConfig vehicle_config = post2::vehicle::default_vehicle_config();
     vehicle_config.name = "smoke";
     vehicle_config.dry_mass_kg = 1200.0;
+    vehicle_config.aero.enabled = true;
+    vehicle_config.aero.reference_area_m2 = 12.5;
+    vehicle_config.aero.cd = 0.6;
+    vehicle_config.aero.cl = 0.05;
+    vehicle_config.aero.aero_table_path = "aero.csv";
     vehicle_config.engine.enabled = true;
     vehicle_config.engine.max_thrust_n = 4500.0;
     vehicle_config.engine.isp_s = 310.0;
@@ -174,7 +239,12 @@ int main()
         loaded_vehicle_config.stages[0].dry_mass_kg != 900.0 ||
         loaded_vehicle_config.stages[1].name != "booster" ||
         loaded_vehicle_config.stages[1].dry_mass_kg != 300.0 ||
-        loaded_vehicle_config.stages[1].tanks.front().initial_kg != 80.0) {
+        loaded_vehicle_config.stages[1].tanks.front().initial_kg != 80.0 ||
+        !loaded_vehicle_config.aero.enabled ||
+        loaded_vehicle_config.aero.reference_area_m2 != 12.5 ||
+        loaded_vehicle_config.aero.cd != 0.6 ||
+        loaded_vehicle_config.aero.cl != 0.05 ||
+        loaded_vehicle_config.aero.aero_table_path != "aero.csv") {
         std::cerr << "vehicle config roundtrip changed values\n";
         return 1;
     }
@@ -250,6 +320,8 @@ int main()
     hdc_phase.force_models.gravity_model.j2 = case_config.earth_j2;
     hdc_phase.force_models.gravity_model.degree = 2;
     hdc_phase.force_models.gravity_model.order = 0;
+    hdc_phase.force_models.aerodynamic = true;
+    hdc_phase.force_models.atmosphere_model.type = "none";
     hdc_phase.actions.push_back({30.0, "set_hold_down_clamp_active", false});
     case_config.phases.push_back(hdc_phase);
 
@@ -302,7 +374,14 @@ int main()
         loaded_case.phases[0].force_models.gravity_model.j2 != case_config.earth_j2 ||
         loaded_case.phases[0].force_models.gravity_model.degree != 2 ||
         loaded_case.phases[0].force_models.gravity_model.order != 0 ||
+        !loaded_case.phases[0].force_models.aerodynamic ||
+        loaded_case.phases[0].force_models.atmosphere_model.type != "none" ||
         loaded_case.phases[1].force_models.gravity_model.type != "point_mass" ||
+        !loaded_case.vehicle.aero.enabled ||
+        loaded_case.vehicle.aero.reference_area_m2 != 12.5 ||
+        loaded_case.vehicle.aero.cd != 0.6 ||
+        loaded_case.vehicle.aero.cl != 0.05 ||
+        loaded_case.vehicle.aero.aero_table_path != "aero.csv" ||
         loaded_case.phases[0].actions.size() != 1 ||
         loaded_case.phases[0].steering_model.azimuth_deg.c0 != 90.0 ||
         loaded_case.phases[1].throttle_model.type != "t2w" ||
@@ -334,6 +413,27 @@ int main()
         parsed_case_request.vehicle.stages.size() != 2 ||
         parsed_case_request.phases[0].name != "hold") {
         std::cerr << "CASEJSON remote request roundtrip failed: " << error << '\n';
+        return 1;
+    }
+
+    post2::core::SimulationConfig sim_request_config;
+    sim_request_config.vehicle = loaded_vehicle_config;
+    const std::string sim_request = post2::core::make_remote_request(sim_request_config);
+    post2::core::SimulationConfig parsed_sim_request;
+    if (!post2::core::parse_remote_request(sim_request, &parsed_sim_request, &error) ||
+        !parsed_sim_request.vehicle.aero.enabled ||
+        parsed_sim_request.vehicle.aero.reference_area_m2 != 12.5 ||
+        parsed_sim_request.vehicle.aero.cd != 0.6 ||
+        parsed_sim_request.vehicle.aero.cl != 0.05 ||
+        parsed_sim_request.vehicle.aero.aero_table_path != "aero.csv") {
+        std::cerr << "SIMV4 remote request roundtrip failed: " << error << '\n';
+        return 1;
+    }
+    post2::core::CaseConfig parsed_sim_case_request;
+    if (!post2::core::parse_remote_request(sim_request, &parsed_sim_case_request, &error) ||
+        parsed_sim_case_request.phases.empty() ||
+        !parsed_sim_case_request.phases.front().force_models.aerodynamic) {
+        std::cerr << "SIMV4 case conversion did not preserve aero enablement: " << error << '\n';
         return 1;
     }
 

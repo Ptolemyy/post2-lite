@@ -85,6 +85,11 @@ void print_help()
         << "  --engine-dir-x VALUE      Override engine body direction X\n"
         << "  --engine-dir-y VALUE      Override engine body direction Y\n"
         << "  --engine-dir-z VALUE      Override engine body direction Z\n"
+        << "  --aero-enabled true|false Enable or disable constant-Cd aero drag\n"
+        << "  --reference-area M2       Override aero reference area\n"
+        << "  --cd VALUE                Override drag coefficient\n"
+        << "  --cl VALUE                Override lift coefficient (stored only in v1)\n"
+        << "  --aero-table PATH         Store optional aero table path\n"
         << "  --tank-name NAME          Override first tank name\n"
         << "  --tank-propellant NAME    Override first tank propellant\n"
         << "  --tank-capacity KG        Override first tank capacity\n"
@@ -501,6 +506,28 @@ bool parse_options(int argc, char** argv, Options* options)
                 std::cerr << "Invalid --engine-dir-z value: " << value << '\n';
                 return false;
             }
+        } else if (arg == "--aero-enabled") {
+            if (!parse_bool(value, &options->config.vehicle.aero.enabled)) {
+                std::cerr << "Invalid --aero-enabled value: " << value << '\n';
+                return false;
+            }
+        } else if (arg == "--reference-area") {
+            if (!parse_double(value, &options->config.vehicle.aero.reference_area_m2)) {
+                std::cerr << "Invalid --reference-area value: " << value << '\n';
+                return false;
+            }
+        } else if (arg == "--cd") {
+            if (!parse_double(value, &options->config.vehicle.aero.cd)) {
+                std::cerr << "Invalid --cd value: " << value << '\n';
+                return false;
+            }
+        } else if (arg == "--cl") {
+            if (!parse_double(value, &options->config.vehicle.aero.cl)) {
+                std::cerr << "Invalid --cl value: " << value << '\n';
+                return false;
+            }
+        } else if (arg == "--aero-table") {
+            options->config.vehicle.aero.aero_table_path = value;
         } else if (arg == "--tank-name") {
             first_tank(options->config.vehicle).name = value;
         } else if (arg == "--tank-propellant") {
@@ -549,6 +576,8 @@ void sync_loaded_case_from_legacy_surface(Options* options)
     if (!options->case_config.phases.empty()) {
         options->case_config.phases.front().duration_s = options->config.duration_s;
         options->case_config.phases.front().force_models.normal_force = options->config.normal_force.enabled;
+        options->case_config.phases.front().force_models.aerodynamic =
+            options->config.vehicle.aero.enabled;
     }
 }
 

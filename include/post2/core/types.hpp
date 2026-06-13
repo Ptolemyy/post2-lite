@@ -50,7 +50,7 @@ struct GravityModelConfig {
 };
 
 struct AtmosphereModelConfig {
-    std::string type = "none";
+    std::string type = "exponential";
 };
 
 struct AeroModelConfig {

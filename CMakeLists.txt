@@ -18,6 +18,7 @@ add_library(post2_core STATIC
     src/core/simulation_driver.cpp
     src/core/state_log.cpp
     src/core/trajectory_service.cpp
+    src/environment/atmosphere.cpp
     src/integrators/ode_integrator.cpp
     src/propagation/force_model.cpp
     src/propagation/force_model_set.cpp

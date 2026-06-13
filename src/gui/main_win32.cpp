@@ -51,6 +51,7 @@ constexpr int kPhaseHoldDownInitial = 1907;
 constexpr int kPhaseGravity = 1908;
 constexpr int kPhaseThrust = 1909;
 constexpr int kPhaseNormalForce = 1910;
+constexpr int kPhaseAero = 1929;
 constexpr int kPhaseOptimizeEnabled = 1919;
 constexpr int kPhaseThrottleType = 1911;
 constexpr int kPhaseThrottleC0 = 1912;
@@ -70,6 +71,7 @@ constexpr int kPhaseActionType = 1926;
 constexpr int kPhaseActionValue = 1927;
 constexpr int kPhaseActionStage = 1928;
 constexpr int kPhaseScrollPane = 1930;
+constexpr int kPhaseAtmosphereType = 1931;
 constexpr int kSidebarWidth = 326;
 constexpr int kRemoteHostEdit = 1201;
 constexpr int kRemotePortEdit = 1202;
@@ -92,6 +94,11 @@ constexpr int kVehicleStageAdd = 1414;
 constexpr int kVehicleStageDelete = 1415;
 constexpr int kVehicleStageEdit = 1416;
 constexpr int kVehicleStageActive = 1417;
+constexpr int kVehicleAeroEnabled = 1418;
+constexpr int kVehicleAeroAreaEdit = 1419;
+constexpr int kVehicleAeroCdEdit = 1420;
+constexpr int kVehicleAeroClEdit = 1421;
+constexpr int kVehicleAeroTableEdit = 1422;
 constexpr int kLaunchLatitudeEdit = 1701;
 constexpr int kLaunchLongitudeEdit = 1702;
 constexpr int kLaunchAltitudeEdit = 1703;
@@ -146,6 +153,8 @@ HWND g_phase_optimize_enabled = nullptr;
 HWND g_phase_gravity = nullptr;
 HWND g_phase_thrust = nullptr;
 HWND g_phase_normal_force = nullptr;
+HWND g_phase_aero = nullptr;
+HWND g_phase_atmosphere_type = nullptr;
 HWND g_phase_throttle_type = nullptr;
 HWND g_phase_throttle_c0 = nullptr;
 HWND g_phase_throttle_c1 = nullptr;
@@ -211,6 +220,8 @@ void clear_phase_editor_handles()
     g_phase_gravity = nullptr;
     g_phase_thrust = nullptr;
     g_phase_normal_force = nullptr;
+    g_phase_aero = nullptr;
+    g_phase_atmosphere_type = nullptr;
     g_phase_throttle_type = nullptr;
     g_phase_throttle_c0 = nullptr;
     g_phase_throttle_c1 = nullptr;
@@ -249,6 +260,11 @@ struct VehicleSettingsDialogState {
     HWND hwnd = nullptr;
     HWND name_edit = nullptr;
     HWND dry_mass_edit = nullptr;
+    HWND aero_enabled = nullptr;
+    HWND aero_area_edit = nullptr;
+    HWND aero_cd_edit = nullptr;
+    HWND aero_cl_edit = nullptr;
+    HWND aero_table_edit = nullptr;
     HWND stage_list = nullptr;
     post2::vehicle::VehicleConfig config;
     post2::core::OptimizationConfig optimization;
@@ -884,15 +900,63 @@ void create_vehicle_dialog_controls(VehicleSettingsDialogState* state)
     create_label(state->hwnd, 18, 52, 90, L"Dry mass kg", font);
     state->dry_mass_edit = create_edit(state->hwnd, kVehicleDryMassEdit, 118, 48, 120, format_double(state->config.dry_mass_kg), font);
 
-    create_label(state->hwnd, 18, 92, 90, L"Stages", font);
+    state->aero_enabled = create_checkbox(
+        state->hwnd,
+        kVehicleAeroEnabled,
+        18,
+        84,
+        130,
+        L"Aero drag",
+        font);
+
+    create_label(state->hwnd, 18, 122, 90, L"Area m2", font);
+    state->aero_area_edit = create_edit(
+        state->hwnd,
+        kVehicleAeroAreaEdit,
+        118,
+        118,
+        90,
+        format_double(state->config.aero.reference_area_m2),
+        font);
+    create_label(state->hwnd, 230, 122, 28, L"Cd", font);
+    state->aero_cd_edit = create_edit(
+        state->hwnd,
+        kVehicleAeroCdEdit,
+        260,
+        118,
+        70,
+        format_double(state->config.aero.cd),
+        font);
+    create_label(state->hwnd, 350, 122, 28, L"Cl", font);
+    state->aero_cl_edit = create_edit(
+        state->hwnd,
+        kVehicleAeroClEdit,
+        380,
+        118,
+        70,
+        format_double(state->config.aero.cl),
+        font);
+
+    create_label(state->hwnd, 18, 156, 90, L"Aero table", font);
+    state->aero_table_edit = create_edit(
+        state->hwnd,
+        kVehicleAeroTableEdit,
+        118,
+        152,
+        382,
+        widen(state->config.aero.aero_table_path),
+        font);
+    Button_SetCheck(state->aero_enabled, state->config.aero.enabled ? BST_CHECKED : BST_UNCHECKED);
+
+    create_label(state->hwnd, 18, 198, 90, L"Stages", font);
     state->stage_list = CreateWindowExW(
         WS_EX_CLIENTEDGE,
         L"LISTBOX",
         L"",
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | LBS_NOTIFY | WS_VSCROLL,
         18,
-        116,
-        432,
+        222,
+        482,
         150,
         state->hwnd,
         control_id(kVehicleStageList),
@@ -910,25 +974,25 @@ void create_vehicle_dialog_controls(VehicleSettingsDialogState* state)
 
     HWND add_button = CreateWindowExW(
         0, L"BUTTON", L"Add", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
-        18, 278, 76, 28, state->hwnd, control_id(kVehicleStageAdd), g_instance, nullptr);
+        18, 384, 76, 28, state->hwnd, control_id(kVehicleStageAdd), g_instance, nullptr);
     set_child_font(add_button, font);
     HWND edit_button = CreateWindowExW(
         0, L"BUTTON", L"Edit", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
-        108, 278, 76, 28, state->hwnd, control_id(kVehicleStageEdit), g_instance, nullptr);
+        108, 384, 76, 28, state->hwnd, control_id(kVehicleStageEdit), g_instance, nullptr);
     set_child_font(edit_button, font);
     HWND delete_button = CreateWindowExW(
         0, L"BUTTON", L"Delete", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
-        198, 278, 76, 28, state->hwnd, control_id(kVehicleStageDelete), g_instance, nullptr);
+        198, 384, 76, 28, state->hwnd, control_id(kVehicleStageDelete), g_instance, nullptr);
     set_child_font(delete_button, font);
 
     HWND ok_button = CreateWindowExW(
         0, L"BUTTON", L"OK", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
-        284, 278, 76, 28, state->hwnd, control_id(IDOK), g_instance, nullptr);
+        334, 384, 76, 28, state->hwnd, control_id(IDOK), g_instance, nullptr);
     set_child_font(ok_button, font);
 
     HWND cancel_button = CreateWindowExW(
         0, L"BUTTON", L"Cancel", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
-        374, 278, 76, 28, state->hwnd, control_id(IDCANCEL), g_instance, nullptr);
+        424, 384, 76, 28, state->hwnd, control_id(IDCANCEL), g_instance, nullptr);
     set_child_font(cancel_button, font);
 }
 
@@ -1679,6 +1743,13 @@ bool accept_vehicle_dialog(VehicleSettingsDialogState* state)
     if (!read_double_field(state->hwnd, state->dry_mass_edit, L"Dry mass", &config.dry_mass_kg)) {
         return false;
     }
+    config.aero.enabled = Button_GetCheck(state->aero_enabled) == BST_CHECKED;
+    config.aero.aero_table_path = narrow(get_window_text(state->aero_table_edit));
+    if (!read_double_field(state->hwnd, state->aero_area_edit, L"Aero area", &config.aero.reference_area_m2) ||
+        !read_double_field(state->hwnd, state->aero_cd_edit, L"Cd", &config.aero.cd) ||
+        !read_double_field(state->hwnd, state->aero_cl_edit, L"Cl", &config.aero.cl)) {
+        return false;
+    }
     ensure_vehicle_stages(config);
     post2::vehicle::sync_legacy_vehicle_fields_from_first_stage(&config);
 
@@ -1833,8 +1904,8 @@ bool show_vehicle_settings_dialog(HWND parent)
 
     RECT parent_rect;
     GetWindowRect(parent, &parent_rect);
-    constexpr int dialog_width = 462;
-    constexpr int dialog_height = 360;
+    constexpr int dialog_width = 542;
+    constexpr int dialog_height = 468;
     const int x = parent_rect.left + ((parent_rect.right - parent_rect.left) - dialog_width) / 2;
     const int y = parent_rect.top + ((parent_rect.bottom - parent_rect.top) - dialog_height) / 2;
 
@@ -3102,7 +3173,9 @@ void load_selected_phase_controls()
     Button_SetCheck(g_phase_gravity, phase->force_models.gravity ? BST_CHECKED : BST_UNCHECKED);
     Button_SetCheck(g_phase_thrust, phase->force_models.thrust ? BST_CHECKED : BST_UNCHECKED);
     Button_SetCheck(g_phase_normal_force, phase->force_models.normal_force ? BST_CHECKED : BST_UNCHECKED);
+    Button_SetCheck(g_phase_aero, phase->force_models.aerodynamic ? BST_CHECKED : BST_UNCHECKED);
 
+    select_combo_text(g_phase_atmosphere_type, phase->force_models.atmosphere_model.type);
     select_combo_text(g_phase_throttle_type, phase->throttle_model.type);
     select_combo_text(g_phase_steering_type, phase->steering_model.type);
     load_phase_numeric_rows_from_case();
@@ -3133,6 +3206,8 @@ bool apply_phase_controls(HWND hwnd)
     edited.force_models.gravity = Button_GetCheck(g_phase_gravity) == BST_CHECKED;
     edited.force_models.thrust = Button_GetCheck(g_phase_thrust) == BST_CHECKED;
     edited.force_models.normal_force = Button_GetCheck(g_phase_normal_force) == BST_CHECKED;
+    edited.force_models.aerodynamic = Button_GetCheck(g_phase_aero) == BST_CHECKED;
+    edited.force_models.atmosphere_model.type = get_combo_text(g_phase_atmosphere_type);
 
     edited.throttle_model.type = get_combo_text(g_phase_throttle_type);
     edited.steering_model.type = get_combo_text(g_phase_steering_type);
@@ -3256,6 +3331,13 @@ void create_phase_editor_controls(HWND hwnd)
     g_phase_gravity = create_checkbox(g_phase_scroll_pane, kPhaseGravity, 118, y, 86, L"Gravity", font);
     g_phase_thrust = create_checkbox(g_phase_scroll_pane, kPhaseThrust, 220, y, 78, L"Thrust", font);
     g_phase_normal_force = create_checkbox(g_phase_scroll_pane, kPhaseNormalForce, 314, y, 110, L"Normal", font);
+    g_phase_aero = create_checkbox(g_phase_scroll_pane, kPhaseAero, 440, y, 86, L"Aero", font);
+    y += 40;
+
+    create_label(g_phase_scroll_pane, 18, y + 4, 86, L"Atmosphere", font);
+    g_phase_atmosphere_type = create_combo(g_phase_scroll_pane, kPhaseAtmosphereType, 118, y, 154, font);
+    add_combo_item(g_phase_atmosphere_type, L"exponential");
+    add_combo_item(g_phase_atmosphere_type, L"none");
     y += 40;
 
     create_phase_numeric_headers(g_phase_scroll_pane, y - 18, font);
