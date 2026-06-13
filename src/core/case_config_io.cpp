@@ -343,6 +343,8 @@ JsonValue optimization_to_json(const OptimizationConfig& optimization)
         targets.push_back(JsonValue::object({
             {"metric", string(target.metric)},
             {"mode", string(target.mode)},
+            {"scope", string(target.scope)},
+            {"phase_index", number(static_cast<double>(target.phase_index))},
             {"value", number(target.value)},
             {"min_value", number(target.min_value)},
             {"max_value", number(target.max_value)},
@@ -353,9 +355,16 @@ JsonValue optimization_to_json(const OptimizationConfig& optimization)
     return JsonValue::object({
         {"mode", string(optimization.mode)},
         {"optimizer", string(optimization.optimizer)},
+        {"qp_solver", string(optimization.qp_solver)},
+        {"fd_mode", string(optimization.fd_mode)},
         {"max_iterations", number(optimization.max_iterations)},
         {"tolerance", number(optimization.tolerance)},
+        {"stationarity_tolerance", number(optimization.stationarity_tolerance)},
+        {"feasibility_tolerance", number(optimization.feasibility_tolerance)},
+        {"constraint_tolerance", number(optimization.constraint_tolerance)},
         {"initial_step_fraction", number(optimization.initial_step_fraction)},
+        {"parallel_fd", boolean(optimization.parallel_fd)},
+        {"max_restoration_iterations", number(optimization.max_restoration_iterations)},
         {"variables", JsonValue::array(std::move(variables))},
         {"targets", JsonValue::array(std::move(targets))},
         {"objective", JsonValue::object({
@@ -956,16 +965,27 @@ bool parse_optimization(const JsonValue& value, OptimizationConfig* target, std:
 
     OptimizationConfig parsed = *target;
     if (!read_string(value, "mode", &parsed.mode, error) ||
-        !read_string(value, "optimizer", &parsed.optimizer, error)) {
+        !read_string(value, "optimizer", &parsed.optimizer, error) ||
+        !read_string(value, "qp_solver", &parsed.qp_solver, error) ||
+        !read_string(value, "fd_mode", &parsed.fd_mode, error)) {
         return false;
     }
     double max_iterations = static_cast<double>(parsed.max_iterations);
+    double max_restoration_iterations = static_cast<double>(parsed.max_restoration_iterations);
     if (!read_number(value, "max_iterations", &max_iterations, error) ||
         !read_number(value, "tolerance", &parsed.tolerance, error) ||
+        !read_number(value, "stationarity_tolerance", &parsed.stationarity_tolerance, error) ||
+        !read_number(value, "feasibility_tolerance", &parsed.feasibility_tolerance, error) ||
+        !read_number(value, "constraint_tolerance", &parsed.constraint_tolerance, error) ||
         !read_number(value, "initial_step_fraction", &parsed.initial_step_fraction, error)) {
         return false;
     }
+    if (!read_bool(value, "parallel_fd", &parsed.parallel_fd, error) ||
+        !read_number(value, "max_restoration_iterations", &max_restoration_iterations, error)) {
+        return false;
+    }
     parsed.max_iterations = static_cast<int>(max_iterations);
+    parsed.max_restoration_iterations = static_cast<int>(max_restoration_iterations);
 
     if (const JsonValue* variables = find_member(value, "variables")) {
         if (!variables->is_array()) {
@@ -997,14 +1017,18 @@ bool parse_optimization(const JsonValue& value, OptimizationConfig* target, std:
                 return fail(error, "optimization target must be an object");
             }
             OptimizationTargetConfig target_config;
+            double phase_index = static_cast<double>(target_config.phase_index);
             if (!read_string(target_value, "metric", &target_config.metric, error) ||
                 !read_string(target_value, "mode", &target_config.mode, error) ||
+                !read_string(target_value, "scope", &target_config.scope, error) ||
+                !read_number(target_value, "phase_index", &phase_index, error) ||
                 !read_number(target_value, "value", &target_config.value, error) ||
                 !read_number(target_value, "min_value", &target_config.min_value, error) ||
                 !read_number(target_value, "max_value", &target_config.max_value, error) ||
                 !read_number(target_value, "weight", &target_config.weight, error)) {
                 return false;
             }
+            target_config.phase_index = static_cast<int>(phase_index);
             parsed.targets.push_back(std::move(target_config));
         }
     }

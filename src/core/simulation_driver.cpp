@@ -92,9 +92,12 @@ void append_entry_with_environment(
     StateLog* state_log,
     const post2::vehicle::VehicleRuntimeState& runtime,
     const post2::propagation::EnvironmentState& env,
-    double earth_rotation_rad_per_s)
+    double earth_rotation_rad_per_s,
+    const Vec3& acceleration_eci_mps2 = {0.0, 0.0, 0.0})
 {
     LaunchVehicleStateLogEntry entry = state_log->build_entry(runtime);
+    entry.acceleration_eci_mps2 = acceleration_eci_mps2;
+    entry.acceleration_mps2 = post2::vehicle::norm(acceleration_eci_mps2);
     entry.ambient_pressure_pa = env.pressure_pa;
     entry.atmosphere_density_kgpm3 = env.density_kgpm3;
     // Atmosphere rotates with Earth: v_rel = v_eci - omega x r - wind_eci.
@@ -578,6 +581,7 @@ StateLog propagate_phase(
         };
 
         post2::propagation::DerivativeResult last_eval;
+        Vec3 last_acceleration_eci_mps2{0.0, 0.0, 0.0};
         post2::integrators::ExtendedState integrated;
         if (control.hold_down_clamp_active) {
             // Engine still burns while clamped: integrate tank masses with
@@ -585,6 +589,7 @@ StateLog propagate_phase(
             // and is overridden at the end of the step regardless).
             last_eval = vehicle_propagator.compute_derivatives(
                 time_s, runtime, current_extended.tank_masses_kg, current_state, command);
+            last_acceleration_eci_mps2 = {0.0, 0.0, 0.0};
             integrated.motion = make_hold_down_clamp_state(simulation_config, time_s + step_s);
             integrated.tank_masses_kg.resize(current_extended.tank_masses_kg.size());
             for (std::size_t i = 0; i < integrated.tank_masses_kg.size(); ++i) {
@@ -660,6 +665,7 @@ StateLog propagate_phase(
                         force_context,
                         dynamics_state,
                         eval.tank_mass_dots_kgps);
+                    last_acceleration_eci_mps2 = deriv.motion_dot.d_velocity_mps2;
                     last_eval = std::move(eval);
                     return deriv;
                 },
@@ -701,7 +707,11 @@ StateLog propagate_phase(
             const auto env_after_step = make_environment_state(
                 simulation_config, phase, next_time_s, runtime.vehicle.motion);
             append_entry_with_environment(
-                &state_log, runtime, env_after_step, simulation_config.earth_rotation_rad_per_s);
+                &state_log,
+                runtime,
+                env_after_step,
+                simulation_config.earth_rotation_rad_per_s,
+                last_acceleration_eci_mps2);
         }
         time_s = next_time_s;
     }

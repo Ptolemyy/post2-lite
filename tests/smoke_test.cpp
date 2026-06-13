@@ -456,12 +456,30 @@ int main()
     }
 
     const auto metrics = post2::core::evaluate_trajectory_metrics(case_result.state_log, loaded_case);
-    if (metrics.size() != 5 ||
-        std::abs(metrics[0].value - case_result.state_log.back().altitude_m) > 1.0e-9 ||
-        std::abs(metrics[1].value - case_result.state_log.back().speed_mps) > 1.0e-9 ||
-        !std::isfinite(metrics[2].value) ||
-        !std::isfinite(metrics[3].value) ||
-        metrics[4].metric != "payload_mass_kg") {
+    auto metric_value = [&](const std::string& name, double* value) {
+        const auto it = std::find_if(metrics.begin(), metrics.end(), [&](const auto& candidate) {
+            return candidate.metric == name;
+        });
+        if (it == metrics.end()) {
+            return false;
+        }
+        *value = it->value;
+        return true;
+    };
+    double terminal_altitude_m = 0.0;
+    double terminal_speed_mps = 0.0;
+    double inclination_deg = 0.0;
+    double periapsis_altitude_m = 0.0;
+    double payload_mass_kg = 0.0;
+    if (!metric_value("terminal_altitude_m", &terminal_altitude_m) ||
+        !metric_value("terminal_speed_mps", &terminal_speed_mps) ||
+        !metric_value("inclination_deg", &inclination_deg) ||
+        !metric_value("periapsis_altitude_m", &periapsis_altitude_m) ||
+        !metric_value("payload_mass_kg", &payload_mass_kg) ||
+        std::abs(terminal_altitude_m - case_result.state_log.back().altitude_m) > 1.0e-9 ||
+        std::abs(terminal_speed_mps - case_result.state_log.back().speed_mps) > 1.0e-9 ||
+        !std::isfinite(inclination_deg) ||
+        !std::isfinite(periapsis_altitude_m)) {
         std::cerr << "trajectory metrics were not stable\n";
         return 1;
     }
@@ -546,13 +564,19 @@ int main()
         return 1;
     }
     const double after_residual = std::abs(optimize_result.final_simulation.state_log.back().altitude_m - 950.0);
+    const auto payload_metric = std::find_if(
+        optimize_result.final_metrics.begin(),
+        optimize_result.final_metrics.end(),
+        [](const auto& metric) {
+            return metric.metric == "payload_mass_kg";
+        });
     if (after_residual >= before_residual ||
         !drop_case.optimization.variables[0].enabled ||
         !drop_case.optimization.variables[1].enabled ||
         !drop_case.phases[0].optimize_enabled ||
         optimize_result.variable_changes.empty() ||
-        optimize_result.final_metrics.back().metric != "payload_mass_kg" ||
-        optimize_result.final_metrics.back().value < 100.0 ||
+        payload_metric == optimize_result.final_metrics.end() ||
+        payload_metric->value < 100.0 ||
         optimize_result.variable_changes[0].new_value <= optimize_result.variable_changes[0].old_value) {
         std::cerr << "optimizer did not improve target or preserve case flags\n";
         return 1;

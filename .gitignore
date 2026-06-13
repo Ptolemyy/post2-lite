@@ -4,6 +4,7 @@ out/
 *.user
 *.suo
 *.ninja
+.claude/
 
 trajectory.csv
 trajectory.svg

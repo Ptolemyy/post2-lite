@@ -20,12 +20,14 @@ public:
     virtual ~ITrajectoryService() = default;
     virtual SimulationResult simulate(const SimulationConfig& config) = 0;
     virtual SimulationResult simulate(const CaseConfig& config) = 0;
+    virtual bool supports_parallel_simulation() const { return false; }
 };
 
 class LocalTrajectoryService final : public ITrajectoryService {
 public:
     SimulationResult simulate(const SimulationConfig& config) override;
     SimulationResult simulate(const CaseConfig& config) override;
+    bool supports_parallel_simulation() const override { return true; }
 };
 
 class RemoteTrajectoryService final : public ITrajectoryService {

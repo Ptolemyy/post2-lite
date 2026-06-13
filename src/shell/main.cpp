@@ -36,8 +36,14 @@ struct Options {
     post2::core::OptimizationConfig optimization_overrides;
     bool has_optimization_overrides = false;
     bool optimizer_set = false;
+    bool qp_solver_set = false;
+    bool fd_mode_set = false;
+    bool parallel_fd_set = false;
     bool max_iterations_set = false;
     bool tolerance_set = false;
+    bool constraint_tolerance_set = false;
+    bool stationarity_tolerance_set = false;
+    bool max_restoration_iterations_set = false;
     bool initial_step_fraction_set = false;
     bool objective_set = false;
     std::vector<PhaseOverride> phase_overrides;
@@ -100,8 +106,16 @@ void print_help()
         << "  --no-svg                  Do not write SVG\n\n"
         << "Optimize options:\n"
         << "  --optimizer fmincon|sqp\n"
+        << "  --qp-solver active-set|kkt-fallback\n"
+        << "  --fd-mode forward|central|auto\n"
+        << "  --parallel-fd true|false\n"
         << "  --max-iterations N        Override optimizer simulation budget\n"
         << "  --tolerance X             Override KKT / constraint tolerance\n"
+        << "  --constraint-tolerance X  Override feasibility tolerance\n"
+        << "  --stationarity-tolerance X\n"
+        << "                            Override stationarity tolerance\n"
+        << "  --max-restoration-iterations N\n"
+        << "                            Override SQP restoration budget\n"
         << "  --initial-step-fraction X Override finite-difference base step fraction\n"
         << "  --target metric=value     Add equality target\n"
         << "  --target-range metric=min:max\n"
@@ -401,6 +415,21 @@ bool parse_options(int argc, char** argv, Options* options)
             options->optimization_overrides.optimizer = value;
             options->has_optimization_overrides = true;
             options->optimizer_set = true;
+        } else if (arg == "--qp-solver") {
+            options->optimization_overrides.qp_solver = value;
+            options->has_optimization_overrides = true;
+            options->qp_solver_set = true;
+        } else if (arg == "--fd-mode") {
+            options->optimization_overrides.fd_mode = value;
+            options->has_optimization_overrides = true;
+            options->fd_mode_set = true;
+        } else if (arg == "--parallel-fd") {
+            if (!parse_bool(value, &options->optimization_overrides.parallel_fd)) {
+                std::cerr << "Invalid --parallel-fd value: " << value << '\n';
+                return false;
+            }
+            options->has_optimization_overrides = true;
+            options->parallel_fd_set = true;
         } else if (arg == "--max-iterations") {
             if (!parse_int(value, &options->optimization_overrides.max_iterations)) {
                 std::cerr << "Invalid --max-iterations value: " << value << '\n';
@@ -415,6 +444,27 @@ bool parse_options(int argc, char** argv, Options* options)
             }
             options->has_optimization_overrides = true;
             options->tolerance_set = true;
+        } else if (arg == "--constraint-tolerance") {
+            if (!parse_double(value, &options->optimization_overrides.constraint_tolerance)) {
+                std::cerr << "Invalid --constraint-tolerance value: " << value << '\n';
+                return false;
+            }
+            options->has_optimization_overrides = true;
+            options->constraint_tolerance_set = true;
+        } else if (arg == "--stationarity-tolerance") {
+            if (!parse_double(value, &options->optimization_overrides.stationarity_tolerance)) {
+                std::cerr << "Invalid --stationarity-tolerance value: " << value << '\n';
+                return false;
+            }
+            options->has_optimization_overrides = true;
+            options->stationarity_tolerance_set = true;
+        } else if (arg == "--max-restoration-iterations") {
+            if (!parse_int(value, &options->optimization_overrides.max_restoration_iterations)) {
+                std::cerr << "Invalid --max-restoration-iterations value: " << value << '\n';
+                return false;
+            }
+            options->has_optimization_overrides = true;
+            options->max_restoration_iterations_set = true;
         } else if (arg == "--initial-step-fraction") {
             if (!parse_double(value, &options->optimization_overrides.initial_step_fraction)) {
                 std::cerr << "Invalid --initial-step-fraction value: " << value << '\n';
@@ -596,11 +646,30 @@ bool prepare_optimization_case(Options* options)
     if (options->optimizer_set) {
         optimization.optimizer = options->optimization_overrides.optimizer;
     }
+    if (options->qp_solver_set) {
+        optimization.qp_solver = options->optimization_overrides.qp_solver;
+    }
+    if (options->fd_mode_set) {
+        optimization.fd_mode = options->optimization_overrides.fd_mode;
+    }
+    if (options->parallel_fd_set) {
+        optimization.parallel_fd = options->optimization_overrides.parallel_fd;
+    }
     if (options->max_iterations_set) {
         optimization.max_iterations = options->optimization_overrides.max_iterations;
     }
     if (options->tolerance_set) {
         optimization.tolerance = options->optimization_overrides.tolerance;
+    }
+    if (options->constraint_tolerance_set) {
+        optimization.constraint_tolerance = options->optimization_overrides.constraint_tolerance;
+    }
+    if (options->stationarity_tolerance_set) {
+        optimization.stationarity_tolerance = options->optimization_overrides.stationarity_tolerance;
+    }
+    if (options->max_restoration_iterations_set) {
+        optimization.max_restoration_iterations =
+            options->optimization_overrides.max_restoration_iterations;
     }
     if (options->initial_step_fraction_set) {
         optimization.initial_step_fraction = options->optimization_overrides.initial_step_fraction;
@@ -672,9 +741,12 @@ void print_optimization_summary(const post2::core::OptimizationResult& result)
 {
     std::cout
         << "optimization_ok: " << (result.ok ? "true" : "false") << '\n'
+        << "found_feasible: " << (result.found_feasible ? "true" : "false") << '\n'
         << "iterations: " << result.iterations << '\n'
         << "evaluations: " << result.evaluations << '\n'
-        << "best_score: " << result.best_score << '\n';
+        << "best_score: " << result.best_score << '\n'
+        << "max_constraint_violation: " << result.max_constraint_violation << '\n'
+        << "l1_constraint_violation: " << result.l1_constraint_violation << '\n';
     for (const auto& change : result.variable_changes) {
         std::cout << "variable: " << change.path
                   << " | " << change.old_value

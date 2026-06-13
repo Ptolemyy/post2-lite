@@ -20,6 +20,8 @@ struct LaunchVehicleStateLogEntry {
     double propellant_mass_kg = 0.0;
     double engine_thrust_n = 0.0;
     double engine_mass_flow_kgps = 0.0;
+    post2::vehicle::Vec3 acceleration_eci_mps2 = {0.0, 0.0, 0.0};
+    double acceleration_mps2 = 0.0;
     // Engine command snapshot at this step. throttle and direction come from
     // the steering / throttle models that fed into the integrator step; env
     // fields are populated by simulation_driver from the EnvironmentState

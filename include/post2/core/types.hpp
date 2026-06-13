@@ -169,6 +169,8 @@ struct OptimizationTargetConfig {
     double min_value = 0.0;
     double max_value = 0.0;
     double weight = 1.0;
+    std::string scope = "terminal";
+    int phase_index = -1;
 };
 
 struct OptimizationObjectiveConfig {
@@ -181,9 +183,16 @@ struct OptimizationObjectiveConfig {
 struct OptimizationConfig {
     std::string mode = "target";
     std::string optimizer = "fmincon";
+    std::string qp_solver = "kkt-fallback";
+    std::string fd_mode = "auto";
     int max_iterations = 100;
     double tolerance = 1.0e-4;
+    double stationarity_tolerance = -1.0;
+    double feasibility_tolerance = -1.0;
+    double constraint_tolerance = -1.0;
     double initial_step_fraction = 0.25;
+    bool parallel_fd = true;
+    int max_restoration_iterations = 8;
     std::vector<OptimizationVariableConfig> variables;
     std::vector<OptimizationTargetConfig> targets;
     OptimizationObjectiveConfig objective;
@@ -251,10 +260,13 @@ struct OptimizationMetricValue {
 
 struct OptimizationResult {
     bool ok = false;
+    bool found_feasible = false;
     std::string error;
     int iterations = 0;
     int evaluations = 0;
     double best_score = 0.0;
+    double max_constraint_violation = 0.0;
+    double l1_constraint_violation = 0.0;
     std::vector<std::string> messages;
     std::vector<OptimizationVariableChange> variable_changes;
     std::vector<OptimizationMetricValue> final_metrics;

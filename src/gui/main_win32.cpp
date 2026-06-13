@@ -549,9 +549,12 @@ std::string format_optimization_outputs(const post2::core::OptimizationResult& r
     output
         << "Optimize\n"
         << "OK: " << (result.ok ? "true" : "false") << '\n'
+        << "Found feasible: " << (result.found_feasible ? "true" : "false") << '\n'
         << "Iterations: " << result.iterations << '\n'
         << "Evaluations: " << result.evaluations << '\n'
         << "Best score: " << result.best_score << '\n'
+        << "Max violation: " << result.max_constraint_violation << '\n'
+        << "L1 violation: " << result.l1_constraint_violation << '\n'
         << "Payload mass (kg): " << post2::vehicle::payload_stage_dry_mass_kg(g_case.vehicle) << '\n';
     if (!result.error.empty()) {
         output << "Error: " << result.error << '\n';
@@ -2414,7 +2417,20 @@ void add_metric_items(HWND combo)
     add_combo_item(combo, L"terminal_speed_mps");
     add_combo_item(combo, L"inclination_deg");
     add_combo_item(combo, L"periapsis_altitude_m");
+    add_combo_item(combo, L"apoapsis_altitude_m");
+    add_combo_item(combo, L"eccentricity");
+    add_combo_item(combo, L"flight_path_angle_deg");
+    add_combo_item(combo, L"downrange_m");
+    add_combo_item(combo, L"latitude_deg");
+    add_combo_item(combo, L"longitude_deg");
     add_combo_item(combo, L"payload_mass_kg");
+    add_combo_item(combo, L"propellant_remaining_kg");
+    add_combo_item(combo, L"max_q_pa");
+    add_combo_item(combo, L"max_dynamic_pressure_pa");
+    add_combo_item(combo, L"max_accel_mps2");
+    add_combo_item(combo, L"min_altitude_m");
+    add_combo_item(combo, L"min_throttle");
+    add_combo_item(combo, L"max_throttle");
     if (!g_case_initialized) {
         return;
     }
@@ -2423,6 +2439,14 @@ void add_metric_items(HWND combo)
         "terminal_speed_mps",
         "inclination_deg",
         "periapsis_altitude_m",
+        "apoapsis_altitude_m",
+        "eccentricity",
+        "flight_path_angle_deg",
+        "duration_s",
+        "propellant_remaining_kg",
+        "max_q_pa",
+        "max_dynamic_pressure_pa",
+        "max_accel_mps2",
     };
     for (std::size_t phase_index = 0; phase_index < g_case.phases.size(); ++phase_index) {
         for (const char* metric : phase_metrics) {
@@ -2560,6 +2584,8 @@ void create_optimization_settings_controls(OptimizationSettingsDialogState* stat
     state->target_mode_combo = create_combo(state->hwnd, kOptTargetModeCombo, 384, 166, 120, font);
     add_combo_item(state->target_mode_combo, L"equal");
     add_combo_item(state->target_mode_combo, L"range");
+    add_combo_item(state->target_mode_combo, L"upper");
+    add_combo_item(state->target_mode_combo, L"lower");
 
     create_label(state->hwnd, 298, 208, 60, L"Value", font);
     state->target_value_edit = create_edit(state->hwnd, kOptTargetValueEdit, 384, 204, 120, L"", font);

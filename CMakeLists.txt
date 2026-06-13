@@ -11,10 +11,15 @@ add_library(post2_core STATIC
     src/core/control_models.cpp
     src/core/io.cpp
     src/core/json.cpp
+    src/core/finite_difference.cpp
+    src/core/nlp_evaluator.cpp
+    src/core/nlp_problem.cpp
     src/core/optimization.cpp
+    src/core/optimizer.cpp
     src/core/coordinates.cpp
     src/core/frames.cpp
     src/core/projection.cpp
+    src/core/qp_solver.cpp
     src/core/remote_service.cpp
     src/core/simulation_driver.cpp
     src/core/state_log.cpp
@@ -97,4 +102,10 @@ if(BUILD_TESTING)
     )
     target_link_libraries(post2_integrator_test PRIVATE post2_core)
     add_test(NAME post2_integrator_test COMMAND post2_integrator_test)
+
+    add_executable(post2_optimization_components_test
+        tests/optimization_components_test.cpp
+    )
+    target_link_libraries(post2_optimization_components_test PRIVATE post2_core)
+    add_test(NAME post2_optimization_components_test COMMAND post2_optimization_components_test)
 endif()
