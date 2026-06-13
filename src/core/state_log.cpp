@@ -1,5 +1,7 @@
 #include "post2/core/state_log.hpp"
 
+#include "post2/core/frames.hpp"
+
 #include <algorithm>
 #include <stdexcept>
 #include <utility>
@@ -144,12 +146,17 @@ LaunchVehicleStateLogEntry StateLog::make_entry(double time_s, const post2::vehi
 LaunchVehicleStateLogEntry StateLog::make_entry(const post2::vehicle::VehicleRuntimeState& runtime) const
 {
     const double radius_m = post2::vehicle::norm(runtime.vehicle.motion.position_m);
+    // Geodetic altitude (height above WGS84 ellipsoid) is rotation-invariant
+    // about the z-axis, so ecef_to_geodetic on the ECI position yields the
+    // correct altitude regardless of Earth rotation phase.
+    const double geodetic_altitude_m =
+        frames::ecef_to_geodetic(runtime.vehicle.motion.position_m).altitude_m;
     return {
         runtime.time_s,
         runtime,
         runtime.vehicle.motion,
         radius_m,
-        radius_m - reference_radius_m_,
+        geodetic_altitude_m,
         post2::vehicle::norm(runtime.vehicle.motion.velocity_mps),
         runtime.vehicle.total_mass_kg,
         runtime.vehicle.propellant_mass_kg,

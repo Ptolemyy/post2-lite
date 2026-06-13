@@ -13,13 +13,17 @@ add_library(post2_core STATIC
     src/core/json.cpp
     src/core/optimization.cpp
     src/core/coordinates.cpp
+    src/core/frames.cpp
     src/core/projection.cpp
     src/core/remote_service.cpp
     src/core/simulation_driver.cpp
     src/core/state_log.cpp
     src/core/trajectory_service.cpp
     src/environment/atmosphere.cpp
+    src/integrators/dopri5.cpp
     src/integrators/ode_integrator.cpp
+    src/propagation/builtin_events.cpp
+    src/propagation/engine_performance.cpp
     src/propagation/force_model.cpp
     src/propagation/force_model_set.cpp
     src/propagation/force_models.cpp
@@ -74,4 +78,22 @@ if(BUILD_TESTING)
     )
     target_link_libraries(post2_smoke_test PRIVATE post2_core)
     add_test(NAME post2_smoke_test COMMAND post2_smoke_test)
+
+    add_executable(post2_frames_test
+        tests/frames_test.cpp
+    )
+    target_link_libraries(post2_frames_test PRIVATE post2_core)
+    add_test(NAME post2_frames_test COMMAND post2_frames_test)
+
+    add_executable(post2_engine_performance_test
+        tests/engine_performance_test.cpp
+    )
+    target_link_libraries(post2_engine_performance_test PRIVATE post2_core)
+    add_test(NAME post2_engine_performance_test COMMAND post2_engine_performance_test)
+
+    add_executable(post2_integrator_test
+        tests/integrator_test.cpp
+    )
+    target_link_libraries(post2_integrator_test PRIVATE post2_core)
+    add_test(NAME post2_integrator_test COMMAND post2_integrator_test)
 endif()

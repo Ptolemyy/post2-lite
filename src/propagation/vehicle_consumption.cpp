@@ -1,5 +1,7 @@
 #include "post2/propagation/vehicle_consumption.hpp"
 
+#include "post2/propagation/engine_performance.hpp"
+
 #include <algorithm>
 #include <cstddef>
 #include <utility>
@@ -9,20 +11,16 @@ namespace post2::propagation {
 namespace {
 
 constexpr double kStandardGravityMps2 = 9.80665;
-// Smooth gate width used to keep tank-empty and tank-full transitions
-// Lipschitz-continuous for RK4. 0.01 kg is small enough that any leakage
-// past 0 stays well below propellant-mass noise from rounding.
-constexpr double kEpsKg = 0.01;
+// Tank-empty / tank-full hard threshold. Below this mass the integrator's
+// event detection is expected to have already truncated the step and the
+// simulation_driver to have clamped the tank to 0. We still apply a hard
+// cutoff in the derivative as a safety net in case events are disabled or
+// the integrator missed the crossing.
+constexpr double kEpsKg = 1.0e-3;
 
 double clamp(double value, double low, double high)
 {
     return std::max(low, std::min(value, high));
-}
-
-double smoothstep_gate(double x)
-{
-    // 0 at x <= 0, 1 at x >= kEpsKg, linear in between.
-    return clamp(x / kEpsKg, 0.0, 1.0);
 }
 
 post2::vehicle::Vec3 normalized_or(const post2::vehicle::Vec3& value, const post2::vehicle::Vec3& fallback)
@@ -154,9 +152,9 @@ DerivativeResult VehicleConsumptionPropagator::compute_derivatives(
         const double src_kg = tank_masses_kg[i_src];
         const double dst_kg = tank_masses_kg[i_dst];
         const double dst_cap = tank_capacity_kg(config_, c.dest.stage_name, c.dest.tank_name);
-        const double g_src = smoothstep_gate(src_kg);
-        const double g_dst = dst_cap > 0.0 ? smoothstep_gate(dst_cap - dst_kg) : 1.0;
-        const double rate = std::max(0.0, c.rate_kgps) * g_src * g_dst;
+        const bool src_has_mass = src_kg > kEpsKg;
+        const bool dst_has_room = dst_cap > 0.0 ? (dst_kg < dst_cap - kEpsKg) : true;
+        const double rate = (src_has_mass && dst_has_room) ? std::max(0.0, c.rate_kgps) : 0.0;
         result.tank_mass_dots_kgps[i_src] -= rate;
         result.tank_mass_dots_kgps[i_dst] += rate;
     }
@@ -173,21 +171,31 @@ DerivativeResult VehicleConsumptionPropagator::compute_derivatives(
             const auto& stage_cfg = stage_configs[i];
             post2::vehicle::EngineState& engine_out = result.per_stage_engine[i];
             engine_out.enabled = stage_cfg.engine.enabled;
-            engine_out.isp_s = stage_cfg.engine.isp_s;
+            engine_out.isp_s = stage_cfg.engine.isp_vac_s;
             engine_out.direction_body = result.engine_direction_eci;
 
             if (!stage_rt.attached || !stage_rt.active ||
                 !stage_cfg.engine.enabled ||
-                stage_cfg.engine.max_thrust_n <= 0.0 ||
-                stage_cfg.engine.isp_s <= 0.0 ||
+                stage_cfg.engine.thrust_vac_n <= 0.0 ||
+                stage_cfg.engine.isp_vac_s <= 0.0 ||
                 throttle <= 0.0 ||
                 stage_cfg.engine.feed_tanks.empty()) {
                 continue;
             }
 
-            const double commanded_thrust_n = stage_cfg.engine.max_thrust_n * throttle;
-            const double requested_flow_kgps =
-                commanded_thrust_n / (stage_cfg.engine.isp_s * kStandardGravityMps2);
+            // EnginePerformanceModel produces the cluster-aggregate thrust/mdot
+            // at the commanded throttle and ambient pressure. The tank gating
+            // below downscales these by the propellant available this step.
+            EnginePerformanceInputs perf_in;
+            perf_in.throttle_command = throttle;
+            perf_in.ambient_pressure_pa = command.ambient_pressure_pa;
+            const EnginePerformanceOutputs perf = evaluate_engine(stage_cfg.engine, perf_in);
+            if (perf.thrust_n <= 0.0 || perf.mdot_kgps <= 0.0) {
+                continue;
+            }
+
+            const double commanded_thrust_n = perf.thrust_n;
+            const double requested_flow_kgps = perf.mdot_kgps;
 
             double remaining = requested_flow_kgps;
             for (const auto& feed : stage_cfg.engine.feed_tanks) {
@@ -204,8 +212,13 @@ DerivativeResult VehicleConsumptionPropagator::compute_derivatives(
                     continue;
                 }
                 const double available_kg = tank_masses_kg[flat];
-                const double g = smoothstep_gate(available_kg);
-                const double take = remaining * g;
+                // Hard cutoff: a tank below kEpsKg supplies nothing. The
+                // integrator's tank-empty event normally pre-empts the step
+                // before we reach this case; this guard catches the rest.
+                if (available_kg <= kEpsKg) {
+                    continue;
+                }
+                const double take = remaining;
                 result.tank_mass_dots_kgps[flat] -= take;
                 remaining -= take;
             }
@@ -216,16 +229,17 @@ DerivativeResult VehicleConsumptionPropagator::compute_derivatives(
                 : 0.0;
             const double actual_thrust_n = commanded_thrust_n * flow_ratio;
 
-            engine_out.throttle = throttle;
+            engine_out.throttle = perf.effective_throttle;
             engine_out.commanded_thrust_n = commanded_thrust_n;
             engine_out.actual_thrust_n = actual_thrust_n;
+            engine_out.isp_s = perf.isp_s;
             engine_out.mass_flow_kgps = actual_flow_kgps;
             engine_out.firing = actual_thrust_n > 0.0;
 
             result.total_commanded_thrust_n += commanded_thrust_n;
             result.total_actual_thrust_n += actual_thrust_n;
             result.total_mass_flow_kgps += actual_flow_kgps;
-            result.weighted_isp_s += stage_cfg.engine.isp_s * actual_thrust_n;
+            result.weighted_isp_s += perf.isp_s * actual_thrust_n;
         }
     }
 

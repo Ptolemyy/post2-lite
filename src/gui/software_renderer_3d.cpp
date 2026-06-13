@@ -2,6 +2,8 @@
 
 #include "resource.h"
 
+#include "post2/core/frames.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -323,6 +325,26 @@ bool intersect_sphere_nearest(
     return true;
 }
 
+// WGS84 ellipsoid ray intersection. Re-uses the sphere solver after scaling
+// the problem by (1/a, 1/a, 1/b) into a unit-sphere space.
+bool intersect_wgs84_ellipsoid_nearest(
+    const Vec3& ray_origin_m,
+    const Vec3& ray_direction,
+    Vec3* hit_m)
+{
+    const double a_m = post2::core::frames::Wgs84::a_m;
+    const double b_m = post2::core::frames::Wgs84::b_m;
+    const Vec3 scaled_origin{ray_origin_m.x / a_m, ray_origin_m.y / a_m, ray_origin_m.z / b_m};
+    const Vec3 scaled_direction{ray_direction.x / a_m, ray_direction.y / a_m, ray_direction.z / b_m};
+
+    Vec3 scaled_hit = {};
+    if (!intersect_sphere_nearest(scaled_origin, scaled_direction, 1.0, &scaled_hit)) {
+        return false;
+    }
+    *hit_m = {scaled_hit.x * a_m, scaled_hit.y * a_m, scaled_hit.z * b_m};
+    return true;
+}
+
 } // namespace
 
 void Camera3D::reset(double scene_radius_m)
@@ -569,23 +591,32 @@ void SoftwareRenderer3D::draw_earth(HDC hdc, const Camera3D& camera) const
     std::vector<std::uint32_t> pixels(static_cast<std::size_t>(width) * height, background_color);
     const Vec3 eye = camera.eye_position();
 
+    const double a_m = post2::core::frames::Wgs84::a_m;
+    const double b_m = post2::core::frames::Wgs84::b_m;
+    const double inv_a2 = 1.0 / (a_m * a_m);
+    const double inv_b2 = 1.0 / (b_m * b_m);
+
     for (int y = 0; y < height; ++y) {
         const double screen_y = static_cast<double>(top + y) + 0.5;
         for (int x = 0; x < width; ++x) {
             const double screen_x = static_cast<double>(left + x) + 0.5;
             const Vec3 ray_direction = camera.ray_direction_for_pixel(screen_x, screen_y);
             Vec3 hit = {};
-            if (!intersect_sphere_nearest(eye, ray_direction, post2::core::kEarthRadiusM, &hit)) {
+            if (!intersect_wgs84_ellipsoid_nearest(eye, ray_direction, &hit)) {
                 continue;
             }
 
-            const Vec3 normal = hit / post2::core::kEarthRadiusM;
+            // Outward normal of the ellipsoid is (x/a^2, y/a^2, z/b^2)
+            // normalized. Texture uses WGS84 geodetic lat/lon.
+            Vec3 normal{hit.x * inv_a2, hit.y * inv_a2, hit.z * inv_b2};
+            const double normal_inv = 1.0 / post2::vehicle::norm(normal);
+            normal = normal * normal_inv;
             const Vec3 to_eye = normalized_or(eye - hit, {normal.x, normal.y, normal.z});
             const double limb = clamp(post2::vehicle::dot(normal, to_eye), 0.0, 1.0);
-            const double lon = std::atan2(normal.y, normal.x);
-            const double lat = std::asin(clamp(normal.z, -1.0, 1.0));
-            const double u = lon / (2.0 * kPi) + 0.5;
-            const double v = 0.5 - lat / kPi;
+            const post2::core::frames::Geodetic geo =
+                post2::core::frames::ecef_to_geodetic(hit);
+            const double u = geo.longitude_rad / (2.0 * kPi) + 0.5;
+            const double v = 0.5 - geo.latitude_rad / kPi;
             pixels[static_cast<std::size_t>(y) * width + x] =
                 apply_limb_shading(sample_texture_bilinear(texture, u, v), limb);
         }
@@ -658,8 +689,10 @@ void SoftwareRenderer3D::draw_earth_axis(HDC hdc, const Camera3D& camera) const
         LineTo(hdc, outer.screen.x, outer.screen.y);
     };
 
-    draw_axis_stub({0.0, 0.0, radius_m}, {0.0, 0.0, axis_extent_m});
-    draw_axis_stub({0.0, 0.0, -radius_m}, {0.0, 0.0, -axis_extent_m});
+    // Poles sit at z = +/-b on the WGS84 ellipsoid, not +/-a.
+    const double polar_radius_m = post2::core::frames::Wgs84::b_m;
+    draw_axis_stub({0.0, 0.0, polar_radius_m}, {0.0, 0.0, axis_extent_m});
+    draw_axis_stub({0.0, 0.0, -polar_radius_m}, {0.0, 0.0, -axis_extent_m});
 
     SelectObject(hdc, old_pen);
     DeleteObject(axis_pen);

@@ -154,7 +154,7 @@ VehicleRuntimeState make_initial_runtime_state(
     runtime.engine.throttle = 0.0;
     runtime.engine.commanded_thrust_n = 0.0;
     runtime.engine.actual_thrust_n = 0.0;
-    runtime.engine.isp_s = config.engine.isp_s;
+    runtime.engine.isp_s = config.engine.isp_vac_s;
     runtime.engine.mass_flow_kgps = 0.0;
     runtime.engine.direction_body = config.engine.direction_body;
 
@@ -171,7 +171,7 @@ VehicleRuntimeState make_initial_runtime_state(
         stage.engine.throttle = 0.0;
         stage.engine.commanded_thrust_n = 0.0;
         stage.engine.actual_thrust_n = 0.0;
-        stage.engine.isp_s = stage_config.engine.isp_s;
+        stage.engine.isp_s = stage_config.engine.isp_vac_s;
         stage.engine.mass_flow_kgps = 0.0;
         stage.engine.direction_body = stage_config.engine.direction_body;
         stage.tanks.reserve(stage_config.tanks.size());
@@ -259,8 +259,11 @@ double consume_stage_propellant_kg(
 double active_max_thrust_n(const VehicleConfig& config, const VehicleRuntimeState& runtime)
 {
     const std::vector<StageConfig> stage_configs = effective_stage_configs(config);
+    auto cluster_thrust_n = [](const EngineConfig& e) {
+        return std::max(0.0, e.thrust_vac_n) * std::max(0, e.engine_count);
+    };
     if (runtime.stages.empty()) {
-        return config.engine.enabled ? config.engine.max_thrust_n : 0.0;
+        return config.engine.enabled ? cluster_thrust_n(config.engine) : 0.0;
     }
 
     double total = 0.0;
@@ -269,7 +272,7 @@ double active_max_thrust_n(const VehicleConfig& config, const VehicleRuntimeStat
             runtime.stages[i].active &&
             runtime.stages[i].engine.enabled &&
             stage_configs[i].engine.enabled) {
-            total += std::max(0.0, stage_configs[i].engine.max_thrust_n);
+            total += cluster_thrust_n(stage_configs[i].engine);
         }
     }
     return total;

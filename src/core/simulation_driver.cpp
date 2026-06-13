@@ -2,7 +2,10 @@
 
 #include "post2/core/control_models.hpp"
 #include "post2/core/coordinates.hpp"
+#include "post2/core/frames.hpp"
 #include "post2/environment/atmosphere.hpp"
+#include "post2/integrators/dopri5.hpp"
+#include "post2/integrators/integrator.hpp"
 #include "post2/integrators/ode_integrator.hpp"
 #include "post2/propagation/force_model_set.hpp"
 #include "post2/propagation/force_models.hpp"
@@ -55,26 +58,22 @@ post2::propagation::EnvironmentState make_environment_state(
     environment.time_s = time_s;
     environment.position_eci_m = motion.position_m;
     environment.velocity_eci_mps = motion.velocity_mps;
-    environment.position_ecef_m = inertial_to_planet_fixed(
+    const double theta_rad = frames::earth_rotation_angle_rad(
+        config.earth_rotation_at_epoch_rad,
+        config.earth_rotation_rad_per_s,
+        time_s);
+    const frames::EcefState ecef_state = frames::eci_to_ecef_state(
         motion.position_m,
-        time_s,
-        config.earth_rotation_rad_per_s);
-    const Vec3 rotated_velocity_ecef_mps = inertial_to_planet_fixed(
         motion.velocity_mps,
-        time_s,
+        theta_rad,
         config.earth_rotation_rad_per_s);
-    environment.velocity_ecef_mps =
-        rotated_velocity_ecef_mps -
-        cross_product({0.0, 0.0, config.earth_rotation_rad_per_s}, environment.position_ecef_m);
+    environment.position_ecef_m = ecef_state.position_m;
+    environment.velocity_ecef_mps = ecef_state.velocity_mps;
     environment.radius_m = post2::vehicle::norm(motion.position_m);
-    environment.altitude_m = environment.radius_m - config.earth_radius_m;
-    if (environment.radius_m > 0.0) {
-        const double sin_latitude =
-            std::clamp(environment.position_ecef_m.z / environment.radius_m, -1.0, 1.0);
-        environment.latitude_rad = std::asin(sin_latitude);
-        environment.longitude_rad =
-            std::atan2(environment.position_ecef_m.y, environment.position_ecef_m.x);
-    }
+    const frames::Geodetic geo = frames::ecef_to_geodetic(environment.position_ecef_m);
+    environment.altitude_m = geo.altitude_m;
+    environment.latitude_rad = geo.latitude_rad;
+    environment.longitude_rad = geo.longitude_rad;
     if (phase.force_models.atmosphere_model.type == "exponential") {
         const post2::environment::ExponentialAtmosphereModel atmosphere(config.earth_radius_m);
         const post2::environment::AtmosphereSample sample =
@@ -85,6 +84,7 @@ post2::propagation::EnvironmentState make_environment_state(
         environment.speed_of_sound_mps = sample.speed_of_sound_mps;
         environment.wind_ecef_mps = sample.wind_ecef_mps;
     }
+    environment.wind_eci_mps = frames::ecef_to_eci_position(environment.wind_ecef_mps, theta_rad);
     return environment;
 }
 
@@ -204,10 +204,11 @@ bool vehicle_impacted_earth(const StateLog& state_log, const SimulationConfig& c
 {
     constexpr double tolerance_m = 1.0;
     for (const auto& entry : state_log.entries()) {
-        if (entry.radius_m < config.earth_radius_m - tolerance_m) {
+        // altitude_m is WGS84 geodetic; below ellipsoid means below ground.
+        if (entry.altitude_m < -tolerance_m) {
             return true;
         }
-        if (entry.radius_m <= config.earth_radius_m &&
+        if (entry.altitude_m <= 0.0 &&
             !entry.hold_down_clamp_active &&
             !config.normal_force.enabled) {
             return true;
@@ -225,6 +226,8 @@ SimulationConfig make_phase_simulation_config(
     config.earth_radius_m = case_config.earth_radius_m;
     config.earth_mu_m3s2 = case_config.earth_mu_m3s2;
     config.earth_rotation_rad_per_s = case_config.earth_rotation_rad_per_s;
+    config.epoch_utc = case_config.epoch_utc;
+    config.earth_rotation_at_epoch_rad = case_config.earth_rotation_at_epoch_rad;
     config.duration_s = phase_end_time_s;
     config.step_s = case_config.step_s;
     config.launch_site = case_config.launch_site;
@@ -290,8 +293,18 @@ bool validate_case_config(const CaseConfig& config, std::string* error)
             *error = "phase " + std::to_string(i) + " duration_s must be positive";
             return false;
         }
-        if (phase.integrator != "ode") {
-            *error = "phase " + std::to_string(i) + " integrator must be \"ode\"";
+        if (phase.integrator != "ode" &&
+            phase.integrator != "rk4" &&
+            phase.integrator != "dopri5") {
+            *error = "phase " + std::to_string(i) +
+                " integrator must be \"rk4\", \"dopri5\", or legacy \"ode\"";
+            return false;
+        }
+        if (phase.tolerances.rtol <= 0.0 ||
+            phase.tolerances.atol_position_m <= 0.0 ||
+            phase.tolerances.atol_velocity_mps <= 0.0 ||
+            phase.tolerances.atol_tank_mass_kg <= 0.0) {
+            *error = "phase " + std::to_string(i) + " tolerances must be positive";
             return false;
         }
         if (!validate_gravity_model_config(
@@ -334,7 +347,7 @@ bool case_vehicle_impacted_earth(const StateLog& state_log, const CaseConfig& co
 {
     constexpr double tolerance_m = 1.0;
     for (const auto& entry : state_log.entries()) {
-        if (entry.radius_m < config.earth_radius_m - tolerance_m) {
+        if (entry.altitude_m < -tolerance_m) {
             return true;
         }
         const bool phase_normal_force_enabled =
@@ -342,7 +355,7 @@ bool case_vehicle_impacted_earth(const StateLog& state_log, const CaseConfig& co
             static_cast<std::size_t>(entry.phase_index) < config.phases.size()
                 ? config.phases[static_cast<std::size_t>(entry.phase_index)].force_models.normal_force
                 : true;
-        if (entry.radius_m <= config.earth_radius_m &&
+        if (entry.altitude_m <= 0.0 &&
             !entry.hold_down_clamp_active &&
             !phase_normal_force_enabled) {
             return true;
@@ -473,7 +486,8 @@ StateLog propagate_phase(
     const SimulationConfig simulation_config =
         make_phase_simulation_config(case_config, phase, phase_end_time_s);
     post2::propagation::VehicleConsumptionPropagator vehicle_propagator(case_config.vehicle);
-    post2::integrators::Rk4OdeIntegrator integrator({case_config.step_s});
+    auto integrator = post2::integrators::make_integrator(
+        phase.integrator, case_config.step_s, phase.tolerances);
     const auto throttle_model = make_throttle_model(phase.throttle_model);
     const auto steering_model = make_steering_model(phase.steering_model);
     const PhaseContext context{&case_config, &phase, phase_index, phase_start_time_s};
@@ -509,7 +523,7 @@ StateLog propagate_phase(
         }
 
         const State current_state = runtime.vehicle.motion;
-        const auto command = make_engine_command(
+        auto command = make_engine_command(
             phase,
             context,
             *throttle_model,
@@ -518,6 +532,14 @@ StateLog propagate_phase(
             current_state,
             time_s,
             control.engine_enabled);
+        // Pre-sample environment at the start-of-step state so engine
+        // performance (pressure correction) and downstream force models see a
+        // consistent ambient pressure.
+        {
+            const post2::propagation::EnvironmentState env_at_start =
+                make_environment_state(simulation_config, phase, time_s, current_state);
+            command.ambient_pressure_pa = env_at_start.pressure_pa;
+        }
 
         post2::integrators::ExtendedState current_extended{
             current_state,
@@ -542,12 +564,44 @@ StateLog propagate_phase(
                     std::max(0.0, current_extended.tank_masses_kg[i] + dot * step_s);
             }
         } else {
-            integrated = integrator.step(
+            // Tank-empty events: any tank currently above the threshold
+            // gets a g(t,state) = mass - eps watcher. When the integrator
+            // detects a crossing it truncates the step at the event time so
+            // we can hard-clamp the tank to 0 below.
+            constexpr double kTankEpsKg = 1.0e-3;
+            std::vector<post2::integrators::EventFunction> events;
+            std::vector<std::size_t> event_tank_indices;
+            events.reserve(current_extended.tank_masses_kg.size());
+            event_tank_indices.reserve(current_extended.tank_masses_kg.size());
+            for (std::size_t i = 0; i < current_extended.tank_masses_kg.size(); ++i) {
+                if (current_extended.tank_masses_kg[i] > kTankEpsKg) {
+                    post2::integrators::EventFunction ev;
+                    ev.name = "tank_empty_" + std::to_string(i);
+                    ev.terminating = true;
+                    const std::size_t flat = i;
+                    ev.g = [flat](double, const post2::integrators::ExtendedState& s) {
+                        return (flat < s.tank_masses_kg.size() ? s.tank_masses_kg[flat] : 0.0)
+                            - kTankEpsKg;
+                    };
+                    events.push_back(std::move(ev));
+                    event_tank_indices.push_back(i);
+                }
+            }
+
+            const post2::integrators::StepResult step_result = integrator->step(
                 current_extended,
                 time_s,
                 step_s,
                 [&](double dynamics_time_s, const post2::integrators::ExtendedState& dynamics_state) {
-                    const auto dynamics_command = make_engine_command(
+                    // Environment first so engine performance can read ambient
+                    // pressure for the pressure-correction term.
+                    const post2::propagation::EnvironmentState environment =
+                        make_environment_state(
+                            simulation_config,
+                            phase,
+                            dynamics_time_s,
+                            dynamics_state.motion);
+                    auto dynamics_command = make_engine_command(
                         phase,
                         context,
                         *throttle_model,
@@ -556,18 +610,13 @@ StateLog propagate_phase(
                         dynamics_state.motion,
                         dynamics_time_s,
                         control.engine_enabled);
+                    dynamics_command.ambient_pressure_pa = environment.pressure_pa;
                     auto eval = vehicle_propagator.compute_derivatives(
                         dynamics_time_s,
                         runtime,
                         dynamics_state.tank_masses_kg,
                         dynamics_state.motion,
                         dynamics_command);
-                    const post2::propagation::EnvironmentState environment =
-                        make_environment_state(
-                            simulation_config,
-                            phase,
-                            dynamics_time_s,
-                            dynamics_state.motion);
                     const post2::propagation::ForceModelContext force_context{
                         &case_config,
                         &phase,
@@ -582,7 +631,22 @@ StateLog propagate_phase(
                         eval.tank_mass_dots_kgps);
                     last_eval = std::move(eval);
                     return deriv;
-                });
+                },
+                events);
+            integrated = step_result.state_end;
+            // Reflect the (possibly shortened) step used by the integrator.
+            step_s = step_result.h_used;
+            // If a tank-empty event fired, clamp that tank to exactly zero
+            // so the next step's gating logic sees it as drained.
+            if (step_result.event.has_value()) {
+                const std::size_t event_idx = step_result.event->event_index;
+                if (event_idx < event_tank_indices.size()) {
+                    const std::size_t tank_idx = event_tank_indices[event_idx];
+                    if (tank_idx < integrated.tank_masses_kg.size()) {
+                        integrated.tank_masses_kg[tank_idx] = 0.0;
+                    }
+                }
+            }
             if (phase.force_models.normal_force) {
                 integrated.motion = post2::propagation::apply_surface_contact_constraint(
                     simulation_config, integrated.motion);
@@ -618,14 +682,18 @@ StateLog propagate_hold_down_clamp(
     set_hold_down_clamp_state(&runtime, config, true);
 
     const double clamp_end_s = std::min(config.duration_s, config.hold_down_clamp.release_time_s);
+    PhaseConfig hdc_phase;
     while (time_s < clamp_end_s) {
         const double next_time_s = std::min(time_s + config.step_s, clamp_end_s);
         const double step_s = next_time_s - time_s;
-        const post2::propagation::EngineCommand cmd{
+        const post2::propagation::EnvironmentState env =
+            make_environment_state(config, hdc_phase, time_s, runtime.vehicle.motion);
+        post2::propagation::EngineCommand cmd{
             runtime.engine.enabled,
             vehicle_propagator.throttle_at(time_s),
             runtime.engine.direction_body,
         };
+        cmd.ambient_pressure_pa = env.pressure_pa;
         auto tank_masses = post2::vehicle::read_tank_masses_flat(runtime);
         auto eval = vehicle_propagator.compute_derivatives(
             time_s, runtime, tank_masses, runtime.vehicle.motion, cmd);
@@ -675,16 +743,17 @@ StateLog GravityPropagator::propagate(const SimulationConfig& config, const Stat
         termination,
         [&config, &case_config, &phase, &force_models, &vehicle_propagator, &current_runtime, last_eval, last_cmd](
             double time_s, const post2::integrators::ExtendedState& state) {
-            const post2::propagation::EngineCommand cmd{
+            const post2::propagation::EnvironmentState environment =
+                make_environment_state(config, phase, time_s, state.motion);
+            post2::propagation::EngineCommand cmd{
                 current_runtime.engine.enabled,
                 vehicle_propagator.throttle_at(time_s),
                 current_runtime.engine.direction_body,
             };
+            cmd.ambient_pressure_pa = environment.pressure_pa;
             *last_cmd = cmd;
             auto eval = vehicle_propagator.compute_derivatives(
                 time_s, current_runtime, state.tank_masses_kg, state.motion, cmd);
-            const post2::propagation::EnvironmentState environment =
-                make_environment_state(config, phase, time_s, state.motion);
             const post2::propagation::ForceModelContext force_context{
                 &case_config,
                 &phase,

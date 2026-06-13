@@ -2,6 +2,8 @@
 
 #include "resource.h"
 
+#include "post2/core/frames.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -203,7 +205,11 @@ EarthTexture load_earth_texture_from_resource()
 
 void emit_earth_sphere_mesh()
 {
-    const double radius_m = post2::core::kEarthRadiusM;
+    // WGS84 oblate ellipsoid: x,y use a (equatorial radius), z uses b (polar).
+    // The texture's lat/lon UV mapping is unchanged — parametric lat is fed to
+    // the same cos/sin and the geometry is then flattened along z.
+    const double a_m = post2::core::frames::Wgs84::a_m;
+    const double b_m = post2::core::frames::Wgs84::b_m;
     for (int stack = 0; stack < kEarthStacks; ++stack) {
         const double stack0 = static_cast<double>(stack) / static_cast<double>(kEarthStacks);
         const double stack1 = static_cast<double>(stack + 1) / static_cast<double>(kEarthStacks);
@@ -222,9 +228,16 @@ void emit_earth_sphere_mesh()
                 const double sin_lat = std::sin(lat);
                 const double u = lon / (2.0 * kPi) + 0.5;
                 const double v = 0.5 - lat / kPi;
+                // Outward normal of the ellipsoid (x/a^2, y/a^2, z/b^2),
+                // simplified to (cos*cos/a, cos*sin/a, sin/b) before
+                // normalization. Renormalize so OpenGL gets a unit vector.
+                const double nx = cos_lat * cos_lon / a_m;
+                const double ny = cos_lat * sin_lon / a_m;
+                const double nz = sin_lat / b_m;
+                const double n_inv = 1.0 / std::sqrt(nx * nx + ny * ny + nz * nz);
                 glTexCoord2d(u, v);
-                glNormal3d(cos_lat * cos_lon, cos_lat * sin_lon, sin_lat);
-                glVertex3d(radius_m * cos_lat * cos_lon, radius_m * cos_lat * sin_lon, radius_m * sin_lat);
+                glNormal3d(nx * n_inv, ny * n_inv, nz * n_inv);
+                glVertex3d(a_m * cos_lat * cos_lon, a_m * cos_lat * sin_lon, b_m * sin_lat);
             };
 
             emit_vertex(lat0);

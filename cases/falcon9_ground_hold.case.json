@@ -278,7 +278,7 @@
                                         },
                        "hold_down_clamp_initial_active":  true,
                        "inherit_initial_state":  false,
-                       "integrator":  "ode",
+                       "integrator":  "dopri5",
                        "name":  "pad hold",
                        "optimize_enabled":  false,
                        "steering_model":  {
@@ -364,7 +364,7 @@
                                         },
                        "hold_down_clamp_initial_active":  false,
                        "inherit_initial_state":  true,
-                       "integrator":  "ode",
+                       "integrator":  "dopri5",
                        "name":  "booster ascent 1",
                        "optimize_enabled":  true,
                        "steering_model":  {
@@ -444,7 +444,7 @@
                                         },
                        "hold_down_clamp_initial_active":  false,
                        "inherit_initial_state":  true,
-                       "integrator":  "ode",
+                       "integrator":  "dopri5",
                        "name":  "booster ascent 2",
                        "optimize_enabled":  true,
                        "steering_model":  {
@@ -524,7 +524,7 @@
                                         },
                        "hold_down_clamp_initial_active":  false,
                        "inherit_initial_state":  true,
-                       "integrator":  "ode",
+                       "integrator":  "dopri5",
                        "name":  "booster ascent 3",
                        "optimize_enabled":  true,
                        "steering_model":  {
@@ -631,7 +631,7 @@
                                         },
                        "hold_down_clamp_initial_active":  false,
                        "inherit_initial_state":  true,
-                       "integrator":  "ode",
+                       "integrator":  "dopri5",
                        "name":  "second-stage insertion 1",
                        "optimize_enabled":  true,
                        "steering_model":  {
@@ -711,7 +711,7 @@
                                         },
                        "hold_down_clamp_initial_active":  false,
                        "inherit_initial_state":  true,
-                       "integrator":  "ode",
+                       "integrator":  "dopri5",
                        "name":  "second-stage insertion 2",
                        "optimize_enabled":  true,
                        "steering_model":  {
@@ -791,7 +791,7 @@
                                         },
                        "hold_down_clamp_initial_active":  false,
                        "inherit_initial_state":  true,
-                       "integrator":  "ode",
+                       "integrator":  "dopri5",
                        "name":  "second-stage insertion 3",
                        "optimize_enabled":  true,
                        "steering_model":  {
@@ -871,7 +871,7 @@
                                         },
                        "hold_down_clamp_initial_active":  false,
                        "inherit_initial_state":  true,
-                       "integrator":  "ode",
+                       "integrator":  "dopri5",
                        "name":  "orbital coast half orbit",
                        "optimize_enabled":  false,
                        "steering_model":  {

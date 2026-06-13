@@ -18,6 +18,10 @@ struct EngineCommand {
     bool enabled = false;
     double throttle = 0.0;
     post2::vehicle::Vec3 direction_eci = {1.0, 0.0, 0.0};
+    // Ambient atmospheric pressure at the vehicle position. Drives the
+    // pressure-correction term F(p) = F_vac - p * Ae inside the engine
+    // performance model. Zero means vacuum (no correction).
+    double ambient_pressure_pa = 0.0;
 };
 
 class EngineActionSchedule {

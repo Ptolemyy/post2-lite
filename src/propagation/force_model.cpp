@@ -1,6 +1,5 @@
 #include "post2/propagation/force_model.hpp"
 
-#include "post2/core/coordinates.hpp"
 #include "post2/propagation/force_models.hpp"
 
 #include <cmath>
@@ -99,12 +98,8 @@ ForceModelOutput AtmosphericDragModel::evaluate(
     const double omega_radps = context.case_config->earth_rotation_rad_per_s;
     const post2::core::Vec3 atmosphere_rotation_velocity_mps =
         cross_product({0.0, 0.0, omega_radps}, state.motion.position_m);
-    const post2::core::Vec3 wind_eci_mps = post2::core::planet_fixed_to_inertial(
-        context.environment->wind_ecef_mps,
-        context.environment->time_s,
-        omega_radps);
     const post2::core::Vec3 relative_velocity_mps =
-        state.motion.velocity_mps - atmosphere_rotation_velocity_mps - wind_eci_mps;
+        state.motion.velocity_mps - atmosphere_rotation_velocity_mps - context.environment->wind_eci_mps;
     const double relative_speed_mps = post2::vehicle::norm(relative_velocity_mps);
     if (relative_speed_mps <= 1.0e-12) {
         return zero_output();

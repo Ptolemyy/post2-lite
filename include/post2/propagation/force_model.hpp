@@ -25,6 +25,7 @@ struct EnvironmentState {
     double speed_of_sound_mps = 0.0;
 
     post2::core::Vec3 wind_ecef_mps;
+    post2::core::Vec3 wind_eci_mps;
 };
 
 struct ForceModelContext {

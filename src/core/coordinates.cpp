@@ -1,5 +1,7 @@
 #include "post2/core/coordinates.hpp"
 
+#include "post2/core/frames.hpp"
+
 #include <cmath>
 
 namespace post2::core {
@@ -7,15 +9,6 @@ namespace post2::core {
 namespace {
 
 constexpr double kPi = 3.141592653589793238462643383279502884;
-
-Vec3 cross_product(const Vec3& lhs, const Vec3& rhs)
-{
-    return {
-        lhs.y * rhs.z - lhs.z * rhs.y,
-        lhs.z * rhs.x - lhs.x * rhs.z,
-        lhs.x * rhs.y - lhs.y * rhs.x,
-    };
-}
 
 } // namespace
 
@@ -37,16 +30,13 @@ Vec3 rotate_z(const Vec3& value, double angle_rad)
 
 Vec3 launch_site_planet_fixed_position_m(const SimulationConfig& config)
 {
-    const double latitude_rad = degrees_to_radians(config.launch_site.latitude_deg);
-    const double longitude_rad = degrees_to_radians(config.launch_site.longitude_deg);
-    const double radius_m = config.earth_radius_m + config.launch_site.altitude_m;
-    const double cos_latitude = std::cos(latitude_rad);
-
-    return {
-        radius_m * cos_latitude * std::cos(longitude_rad),
-        radius_m * cos_latitude * std::sin(longitude_rad),
-        radius_m * std::sin(latitude_rad),
-    };
+    // Launch site latitude is interpreted as WGS84 geodetic latitude.
+    // altitude_m is the ellipsoid altitude.
+    return frames::geodetic_to_ecef({
+        degrees_to_radians(config.launch_site.latitude_deg),
+        degrees_to_radians(config.launch_site.longitude_deg),
+        config.launch_site.altitude_m,
+    });
 }
 
 Vec3 planet_fixed_to_inertial(
@@ -54,7 +44,7 @@ Vec3 planet_fixed_to_inertial(
     double time_s,
     double rotation_rad_per_s)
 {
-    return rotate_z(planet_fixed_m, rotation_rad_per_s * time_s);
+    return frames::ecef_to_eci_position(planet_fixed_m, rotation_rad_per_s * time_s);
 }
 
 Vec3 inertial_to_planet_fixed(
@@ -62,7 +52,7 @@ Vec3 inertial_to_planet_fixed(
     double time_s,
     double rotation_rad_per_s)
 {
-    return rotate_z(inertial_m, -rotation_rad_per_s * time_s);
+    return frames::eci_to_ecef_position(inertial_m, rotation_rad_per_s * time_s);
 }
 
 Vec3 planet_fixed_ground_velocity_inertial_mps(
@@ -70,17 +60,26 @@ Vec3 planet_fixed_ground_velocity_inertial_mps(
     double time_s,
     double rotation_rad_per_s)
 {
-    const Vec3 inertial_position_m = planet_fixed_to_inertial(planet_fixed_m, time_s, rotation_rad_per_s);
-    return cross_product({0.0, 0.0, rotation_rad_per_s}, inertial_position_m);
+    const Vec3 inertial_position_m =
+        frames::ecef_to_eci_position(planet_fixed_m, rotation_rad_per_s * time_s);
+    return {-rotation_rad_per_s * inertial_position_m.y,
+             rotation_rad_per_s * inertial_position_m.x,
+             0.0};
 }
 
 State launch_site_inertial_state(const SimulationConfig& config, double time_s)
 {
     const Vec3 planet_fixed_m = launch_site_planet_fixed_position_m(config);
-    return {
-        planet_fixed_to_inertial(planet_fixed_m, time_s, config.earth_rotation_rad_per_s),
-        planet_fixed_ground_velocity_inertial_mps(planet_fixed_m, time_s, config.earth_rotation_rad_per_s),
-    };
+    const double theta_rad = frames::earth_rotation_angle_rad(
+        config.earth_rotation_at_epoch_rad,
+        config.earth_rotation_rad_per_s,
+        time_s);
+    const frames::EciState eci = frames::ecef_to_eci_state(
+        planet_fixed_m,
+        {0.0, 0.0, 0.0},
+        theta_rad,
+        config.earth_rotation_rad_per_s);
+    return {eci.position_m, eci.velocity_mps};
 }
 
 } // namespace post2::core

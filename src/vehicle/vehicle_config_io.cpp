@@ -239,21 +239,46 @@ bool parse_t2t_connections(
 
 bool validate_engine_config(const EngineConfig& engine, const std::string& prefix, std::string* error)
 {
-    if (engine.max_thrust_n < 0.0) {
+    if (engine.thrust_vac_n < 0.0) {
         if (error) {
-            *error = prefix + ".max_thrust_n cannot be negative";
+            *error = prefix + ".thrust_vac_n cannot be negative";
         }
         return false;
     }
-    if (engine.isp_s < 0.0) {
+    if (engine.isp_vac_s < 0.0) {
         if (error) {
-            *error = prefix + ".isp_s cannot be negative";
+            *error = prefix + ".isp_vac_s cannot be negative";
         }
         return false;
     }
-    if (engine.enabled && engine.max_thrust_n > 0.0 && engine.isp_s <= 0.0) {
+    if (engine.enabled && engine.thrust_vac_n > 0.0 && engine.isp_vac_s <= 0.0) {
         if (error) {
-            *error = "enabled engine with positive thrust requires positive " + prefix + ".isp_s";
+            *error = "enabled engine with positive thrust requires positive " + prefix + ".isp_vac_s";
+        }
+        return false;
+    }
+    if (engine.engine_count < 0) {
+        if (error) {
+            *error = prefix + ".engine_count cannot be negative";
+        }
+        return false;
+    }
+    if (engine.nozzle_exit_area_m2 < 0.0) {
+        if (error) {
+            *error = prefix + ".nozzle_exit_area_m2 cannot be negative";
+        }
+        return false;
+    }
+    if (engine.min_throttle < 0.0 || engine.max_throttle > 1.0 ||
+        engine.min_throttle > engine.max_throttle) {
+        if (error) {
+            *error = prefix + " throttle bounds must satisfy 0 <= min_throttle <= max_throttle <= 1";
+        }
+        return false;
+    }
+    if (engine.gimbal_max_rad < 0.0 || engine.gimbal_rate_rad_s < 0.0) {
+        if (error) {
+            *error = prefix + " gimbal limits cannot be negative";
         }
         return false;
     }
@@ -323,8 +348,8 @@ VehicleConfig default_vehicle_config()
     config.name = "default";
     config.dry_mass_kg = 1000.0;
     config.engine.enabled = false;
-    config.engine.max_thrust_n = 0.0;
-    config.engine.isp_s = 0.0;
+    config.engine.thrust_vac_n = 0.0;
+    config.engine.isp_vac_s = 0.0;
     config.engine.direction_body = {1.0, 0.0, 0.0};
     // Ship a non-empty feed_tanks so configs built from defaults pass
     // validation if the user later enables the engine without supplying
@@ -386,7 +411,7 @@ bool validate_vehicle_config(const VehicleConfig& config, std::string* error)
         // T2E: every stage with an enabled engine on an active stage with
         // positive thrust must have feed_tanks, and every entry must resolve.
         const bool engine_contributes =
-            stage.active && stage.engine.enabled && stage.engine.max_thrust_n > 0.0;
+            stage.active && stage.engine.enabled && stage.engine.thrust_vac_n > 0.0;
         if (engine_contributes) {
             if (stage.engine.feed_tanks.empty()) {
                 if (error) {
@@ -483,6 +508,29 @@ void write_engine_feed_tanks(std::ostringstream& output, const std::string& pref
     }
 }
 
+void write_engine_extended_fields(
+    std::ostringstream& output, const std::string& prefix, const EngineConfig& engine)
+{
+    output << prefix << "thrust_sl_n=" << engine.thrust_sl_n << '\n';
+    output << prefix << "isp_sl_s=" << engine.isp_sl_s << '\n';
+    output << prefix << "nozzle_exit_area_m2=" << engine.nozzle_exit_area_m2 << '\n';
+    output << prefix << "min_throttle=" << engine.min_throttle << '\n';
+    output << prefix << "max_throttle=" << engine.max_throttle << '\n';
+    output << prefix << "ignition_delay_s=" << engine.ignition_delay_s << '\n';
+    output << prefix << "thrust_buildup_s=" << engine.thrust_buildup_s << '\n';
+    output << prefix << "shutdown_delay_s=" << engine.shutdown_delay_s << '\n';
+    output << prefix << "engine_count=" << engine.engine_count << '\n';
+    output << prefix << "gimbal_max_rad=" << engine.gimbal_max_rad << '\n';
+    output << prefix << "gimbal_rate_rad_s=" << engine.gimbal_rate_rad_s << '\n';
+    output << prefix << "throttle_curve.count=" << engine.throttle_curve.size() << '\n';
+    for (std::size_t k = 0; k < engine.throttle_curve.size(); ++k) {
+        output << prefix << "throttle_curve." << k << ".throttle="
+               << engine.throttle_curve[k].throttle << '\n';
+        output << prefix << "throttle_curve." << k << ".mdot_ratio="
+               << engine.throttle_curve[k].mdot_ratio << '\n';
+    }
+}
+
 } // namespace
 
 std::string vehicle_config_to_text(const VehicleConfig& config)
@@ -505,11 +553,12 @@ std::string vehicle_config_to_text(const VehicleConfig& config)
     output << "aero.cl=" << normalized.aero.cl << '\n';
     output << "aero.table_path=" << normalized.aero.aero_table_path << '\n';
     output << "engine.enabled=" << (normalized.engine.enabled ? "true" : "false") << '\n';
-    output << "engine.max_thrust_n=" << normalized.engine.max_thrust_n << '\n';
-    output << "engine.isp_s=" << normalized.engine.isp_s << '\n';
+    output << "engine.thrust_vac_n=" << normalized.engine.thrust_vac_n << '\n';
+    output << "engine.isp_vac_s=" << normalized.engine.isp_vac_s << '\n';
     output << "engine.direction_x=" << normalized.engine.direction_body.x << '\n';
     output << "engine.direction_y=" << normalized.engine.direction_body.y << '\n';
     output << "engine.direction_z=" << normalized.engine.direction_body.z << '\n';
+    write_engine_extended_fields(output, "engine.", normalized.engine);
     write_engine_feed_tanks(output, "engine.", normalized.engine);
     output << "tank.count=" << normalized.tanks.size() << '\n';
     for (std::size_t i = 0; i < normalized.tanks.size(); ++i) {
@@ -528,11 +577,12 @@ std::string vehicle_config_to_text(const VehicleConfig& config)
         output << stage_prefix << "attached=" << (stage.attached ? "true" : "false") << '\n';
         output << stage_prefix << "dry_mass_kg=" << stage.dry_mass_kg << '\n';
         output << stage_prefix << "engine.enabled=" << (stage.engine.enabled ? "true" : "false") << '\n';
-        output << stage_prefix << "engine.max_thrust_n=" << stage.engine.max_thrust_n << '\n';
-        output << stage_prefix << "engine.isp_s=" << stage.engine.isp_s << '\n';
+        output << stage_prefix << "engine.thrust_vac_n=" << stage.engine.thrust_vac_n << '\n';
+        output << stage_prefix << "engine.isp_vac_s=" << stage.engine.isp_vac_s << '\n';
         output << stage_prefix << "engine.direction_x=" << stage.engine.direction_body.x << '\n';
         output << stage_prefix << "engine.direction_y=" << stage.engine.direction_body.y << '\n';
         output << stage_prefix << "engine.direction_z=" << stage.engine.direction_body.z << '\n';
+        write_engine_extended_fields(output, stage_prefix + "engine.", stage.engine);
         write_engine_feed_tanks(output, stage_prefix + "engine.", stage.engine);
         output << stage_prefix << "tank.count=" << stage.tanks.size() << '\n';
         for (std::size_t j = 0; j < stage.tanks.size(); ++j) {
@@ -637,14 +687,79 @@ bool vehicle_config_from_text(const std::string& text, VehicleConfig* config, st
     if (const auto it = values.find("name"); it != values.end()) {
         parsed.name = it->second;
     }
+    auto set_engine_fields = [&](const std::string& prefix, EngineConfig* engine) -> bool {
+        // Top-level convenience: thrust_vac_n preferred, max_thrust_n legacy.
+        if (values.find(prefix + "thrust_vac_n") != values.end()) {
+            if (!set_double((prefix + "thrust_vac_n").c_str(), &engine->thrust_vac_n)) {
+                return false;
+            }
+        } else if (!set_double((prefix + "max_thrust_n").c_str(), &engine->thrust_vac_n)) {
+            return false;
+        }
+        if (values.find(prefix + "isp_vac_s") != values.end()) {
+            if (!set_double((prefix + "isp_vac_s").c_str(), &engine->isp_vac_s)) {
+                return false;
+            }
+        } else if (!set_double((prefix + "isp_s").c_str(), &engine->isp_vac_s)) {
+            return false;
+        }
+        if (!set_double((prefix + "thrust_sl_n").c_str(), &engine->thrust_sl_n) ||
+            !set_double((prefix + "isp_sl_s").c_str(), &engine->isp_sl_s) ||
+            !set_double((prefix + "nozzle_exit_area_m2").c_str(), &engine->nozzle_exit_area_m2) ||
+            !set_double((prefix + "min_throttle").c_str(), &engine->min_throttle) ||
+            !set_double((prefix + "max_throttle").c_str(), &engine->max_throttle) ||
+            !set_double((prefix + "ignition_delay_s").c_str(), &engine->ignition_delay_s) ||
+            !set_double((prefix + "thrust_buildup_s").c_str(), &engine->thrust_buildup_s) ||
+            !set_double((prefix + "shutdown_delay_s").c_str(), &engine->shutdown_delay_s) ||
+            !set_double((prefix + "gimbal_max_rad").c_str(), &engine->gimbal_max_rad) ||
+            !set_double((prefix + "gimbal_rate_rad_s").c_str(), &engine->gimbal_rate_rad_s)) {
+            return false;
+        }
+        if (const auto it = values.find(prefix + "engine_count"); it != values.end()) {
+            double count_d = 1.0;
+            if (!parse_double(it->second, &count_d)) {
+                if (error) {
+                    *error = "invalid number for " + prefix + "engine_count";
+                }
+                return false;
+            }
+            engine->engine_count = std::max(1, static_cast<int>(count_d));
+        }
+        std::size_t curve_count = 0;
+        if (const auto it = values.find(prefix + "throttle_curve.count"); it != values.end()) {
+            if (!parse_size(it->second, &curve_count)) {
+                if (error) {
+                    *error = "invalid number for " + prefix + "throttle_curve.count";
+                }
+                return false;
+            }
+        }
+        if (curve_count > 0) {
+            engine->throttle_curve.assign(curve_count, EngineThrottleCurvePoint{});
+            for (std::size_t i = 0; i < curve_count; ++i) {
+                const std::string entry_prefix =
+                    prefix + "throttle_curve." + std::to_string(i) + ".";
+                if (!set_double((entry_prefix + "throttle").c_str(), &engine->throttle_curve[i].throttle) ||
+                    !set_double((entry_prefix + "mdot_ratio").c_str(), &engine->throttle_curve[i].mdot_ratio)) {
+                    return false;
+                }
+            }
+            std::sort(
+                engine->throttle_curve.begin(), engine->throttle_curve.end(),
+                [](const EngineThrottleCurvePoint& a, const EngineThrottleCurvePoint& b) {
+                    return a.throttle < b.throttle;
+                });
+        }
+        return true;
+    };
+
     if (!set_double("dry_mass_kg", &parsed.dry_mass_kg) ||
         !set_bool("aero.enabled", &parsed.aero.enabled) ||
         !set_double("aero.reference_area_m2", &parsed.aero.reference_area_m2) ||
         !set_double("aero.cd", &parsed.aero.cd) ||
         !set_double("aero.cl", &parsed.aero.cl) ||
         !set_bool_alias("engine.enabled", "thrust.enabled", &parsed.engine.enabled) ||
-        !set_double_alias("engine.max_thrust_n", "thrust.max_thrust_n", &parsed.engine.max_thrust_n) ||
-        !set_double_alias("engine.isp_s", "thrust.isp_s", &parsed.engine.isp_s) ||
+        !set_engine_fields("engine.", &parsed.engine) ||
         !set_double_alias("engine.direction_x", "thrust.direction_x", &parsed.engine.direction_body.x) ||
         !set_double_alias("engine.direction_y", "thrust.direction_y", &parsed.engine.direction_body.y) ||
         !set_double_alias("engine.direction_z", "thrust.direction_z", &parsed.engine.direction_body.z) ||
@@ -819,15 +934,94 @@ bool vehicle_config_from_text(const std::string& text, VehicleConfig* config, st
                     }
                     return false;
                 }
-            } else if (field == "engine.max_thrust_n") {
-                if (!parse_double(value, &stage.engine.max_thrust_n)) {
+            } else if (field == "engine.thrust_vac_n" || field == "engine.max_thrust_n") {
+                if (!parse_double(value, &stage.engine.thrust_vac_n)) {
                     if (error) {
                         *error = "invalid number for " + key;
                     }
                     return false;
                 }
-            } else if (field == "engine.isp_s") {
-                if (!parse_double(value, &stage.engine.isp_s)) {
+            } else if (field == "engine.isp_vac_s" || field == "engine.isp_s") {
+                if (!parse_double(value, &stage.engine.isp_vac_s)) {
+                    if (error) {
+                        *error = "invalid number for " + key;
+                    }
+                    return false;
+                }
+            } else if (field == "engine.thrust_sl_n") {
+                if (!parse_double(value, &stage.engine.thrust_sl_n)) {
+                    if (error) {
+                        *error = "invalid number for " + key;
+                    }
+                    return false;
+                }
+            } else if (field == "engine.isp_sl_s") {
+                if (!parse_double(value, &stage.engine.isp_sl_s)) {
+                    if (error) {
+                        *error = "invalid number for " + key;
+                    }
+                    return false;
+                }
+            } else if (field == "engine.nozzle_exit_area_m2") {
+                if (!parse_double(value, &stage.engine.nozzle_exit_area_m2)) {
+                    if (error) {
+                        *error = "invalid number for " + key;
+                    }
+                    return false;
+                }
+            } else if (field == "engine.min_throttle") {
+                if (!parse_double(value, &stage.engine.min_throttle)) {
+                    if (error) {
+                        *error = "invalid number for " + key;
+                    }
+                    return false;
+                }
+            } else if (field == "engine.max_throttle") {
+                if (!parse_double(value, &stage.engine.max_throttle)) {
+                    if (error) {
+                        *error = "invalid number for " + key;
+                    }
+                    return false;
+                }
+            } else if (field == "engine.ignition_delay_s") {
+                if (!parse_double(value, &stage.engine.ignition_delay_s)) {
+                    if (error) {
+                        *error = "invalid number for " + key;
+                    }
+                    return false;
+                }
+            } else if (field == "engine.thrust_buildup_s") {
+                if (!parse_double(value, &stage.engine.thrust_buildup_s)) {
+                    if (error) {
+                        *error = "invalid number for " + key;
+                    }
+                    return false;
+                }
+            } else if (field == "engine.shutdown_delay_s") {
+                if (!parse_double(value, &stage.engine.shutdown_delay_s)) {
+                    if (error) {
+                        *error = "invalid number for " + key;
+                    }
+                    return false;
+                }
+            } else if (field == "engine.engine_count") {
+                double count_d = 1.0;
+                if (!parse_double(value, &count_d)) {
+                    if (error) {
+                        *error = "invalid number for " + key;
+                    }
+                    return false;
+                }
+                stage.engine.engine_count = std::max(1, static_cast<int>(count_d));
+            } else if (field == "engine.gimbal_max_rad") {
+                if (!parse_double(value, &stage.engine.gimbal_max_rad)) {
+                    if (error) {
+                        *error = "invalid number for " + key;
+                    }
+                    return false;
+                }
+            } else if (field == "engine.gimbal_rate_rad_s") {
+                if (!parse_double(value, &stage.engine.gimbal_rate_rad_s)) {
                     if (error) {
                         *error = "invalid number for " + key;
                     }

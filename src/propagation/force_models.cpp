@@ -1,5 +1,7 @@
 #include "post2/propagation/force_models.hpp"
 
+#include "post2/core/frames.hpp"
+
 #include <cmath>
 #include <stdexcept>
 
@@ -16,22 +18,6 @@ post2::core::Vec3 cross_product(
         lhs.z * rhs.x - lhs.x * rhs.z,
         lhs.x * rhs.y - lhs.y * rhs.x,
     };
-}
-
-post2::core::Vec3 normalized_or(
-    const post2::core::Vec3& value,
-    const post2::core::Vec3& fallback)
-{
-    const double length = post2::vehicle::norm(value);
-    if (length <= 1.0e-12) {
-        return fallback;
-    }
-    return value / length;
-}
-
-double surface_radius_m(const post2::core::SimulationConfig& config)
-{
-    return config.earth_radius_m + config.launch_site.altitude_m;
 }
 
 double effective_j2(const post2::core::SimulationConfig& config)
@@ -106,7 +92,15 @@ post2::core::Vec3 surface_normal_acceleration_mps2(
     }
 
     const double radius_m = post2::vehicle::norm(state.position_m);
-    if (radius_m <= 0.0 || radius_m > surface_radius_m(config)) {
+    if (radius_m <= 0.0) {
+        return {};
+    }
+    // Below WGS84 ellipsoid (offset by launch_site altitude) -> apply contact
+    // acceleration that exactly cancels gravity & centripetal so vehicle stays
+    // on surface.
+    const post2::core::frames::Geodetic geo =
+        post2::core::frames::ecef_to_geodetic(state.position_m);
+    if (geo.altitude_m > config.launch_site.altitude_m) {
         return {};
     }
 
@@ -126,20 +120,34 @@ post2::core::State apply_surface_contact_constraint(
     }
 
     const double radius_m = post2::vehicle::norm(state.position_m);
-    const double contact_radius_m = surface_radius_m(config);
-    if (radius_m <= 0.0 || radius_m >= contact_radius_m) {
+    if (radius_m <= 0.0) {
+        return state;
+    }
+    post2::core::frames::Geodetic geo =
+        post2::core::frames::ecef_to_geodetic(state.position_m);
+    const double floor_alt_m = config.launch_site.altitude_m;
+    if (geo.altitude_m >= floor_alt_m) {
         return state;
     }
 
-    const post2::core::Vec3 normal = normalized_or(state.position_m, {1.0, 0.0, 0.0});
+    // Push position outward along the ellipsoid normal to altitude = floor.
+    // Both ecef_to_geodetic and geodetic_to_ecef are rotation-invariant about
+    // the z-axis (the ellipsoid is z-symmetric), so the constraint can be
+    // applied directly to the ECI position vector without an ECI<->ECEF
+    // transform.
+    geo.altitude_m = floor_alt_m;
+    const post2::core::Vec3 surface_position_m =
+        post2::core::frames::geodetic_to_ecef(geo);
+    const post2::core::frames::EnuBasis enu =
+        post2::core::frames::enu_basis_at(geo);
+    const post2::core::Vec3& normal = enu.up;
+
     post2::core::State constrained = state;
-    constrained.position_m = normal * contact_radius_m;
-
-    const double radial_velocity_mps = post2::vehicle::dot(constrained.velocity_mps, normal);
+    constrained.position_m = surface_position_m;
+    const double radial_velocity_mps = post2::vehicle::dot(state.velocity_mps, normal);
     if (radial_velocity_mps < 0.0) {
-        constrained.velocity_mps = constrained.velocity_mps - normal * radial_velocity_mps;
+        constrained.velocity_mps = state.velocity_mps - normal * radial_velocity_mps;
     }
-
     return constrained;
 }
 

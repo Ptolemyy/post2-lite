@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "post2/core/state_log.hpp"
+#include "post2/integrators/integrator.hpp"
 #include "post2/vehicle/vehicle.hpp"
 
 namespace post2::core {
@@ -31,6 +32,15 @@ struct LaunchSiteConfig {
     double latitude_deg = kDefaultLaunchLatitudeDeg;
     double longitude_deg = kDefaultLaunchLongitudeDeg;
     double altitude_m = 0.0;
+};
+
+struct EpochUtc {
+    int year = 2000;
+    int month = 1;
+    int day = 1;
+    int hour = 12;
+    int minute = 0;
+    double second = 0.0;
 };
 
 struct HoldDownClampConfig {
@@ -136,7 +146,9 @@ struct PhaseConfig {
     bool inherit_initial_state = true;
     std::optional<State> initial_state_eci;
     bool hold_down_clamp_initial_active = false;
-    std::string integrator = "ode";
+    // "rk4" (fixed step), "dopri5" (adaptive 5/4), or legacy "ode" alias for rk4.
+    std::string integrator = "rk4";
+    post2::integrators::IntegratorTolerances tolerances;
     ForceModelSwitches force_models;
     ThrottleModelConfig throttle_model;
     SteeringModelConfig steering_model;
@@ -181,20 +193,26 @@ struct CaseConfig {
     std::string name = "default";
     post2::vehicle::VehicleConfig vehicle;
     LaunchSiteConfig launch_site;
+    EpochUtc epoch_utc;
     double earth_radius_m = kEarthRadiusM;
     double earth_mu_m3s2 = kEarthMuM3S2;
     double earth_j2 = kEarthJ2;
     double earth_rotation_rad_per_s = kEarthRotationRadPerS;
+    // GMST at epoch (radians). Derived from epoch_utc during case load and
+    // cached here so per-step transforms avoid recomputing JD/GMST.
+    double earth_rotation_at_epoch_rad = 0.0;
     double step_s = kDefaultStepS;
     std::vector<PhaseConfig> phases;
     OptimizationConfig optimization;
 };
 
 struct SimulationConfig {
+    EpochUtc epoch_utc;
     double earth_radius_m = kEarthRadiusM;
     double earth_mu_m3s2 = kEarthMuM3S2;
     double earth_j2 = kEarthJ2;
     double earth_rotation_rad_per_s = kEarthRotationRadPerS;
+    double earth_rotation_at_epoch_rad = 0.0;
     GravityModelConfig gravity_model;
     double initial_altitude_m = kDefaultAltitudeM;
     double initial_speed_mps = 0.0;

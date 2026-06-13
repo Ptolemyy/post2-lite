@@ -204,8 +204,8 @@ int main()
     vehicle_config.aero.cl = 0.05;
     vehicle_config.aero.aero_table_path = "aero.csv";
     vehicle_config.engine.enabled = true;
-    vehicle_config.engine.max_thrust_n = 4500.0;
-    vehicle_config.engine.isp_s = 310.0;
+    vehicle_config.engine.thrust_vac_n = 4500.0;
+    vehicle_config.engine.isp_vac_s = 310.0;
     vehicle_config.tanks.front().capacity_kg = 200.0;
     vehicle_config.tanks.front().initial_kg = 150.0;
     vehicle_config.stages = post2::vehicle::effective_stage_configs(vehicle_config);
@@ -215,7 +215,7 @@ int main()
     post2::vehicle::StageConfig booster = vehicle_config.stages.front();
     booster.name = "booster";
     booster.dry_mass_kg = 300.0;
-    booster.engine.max_thrust_n = 2500.0;
+    booster.engine.thrust_vac_n = 2500.0;
     booster.engine.feed_tanks = {{"booster", "main"}};
     booster.tanks.front().capacity_kg = 100.0;
     booster.tanks.front().initial_kg = 80.0;
@@ -231,7 +231,7 @@ int main()
     }
     if (loaded_vehicle_config.name != "smoke" ||
         !loaded_vehicle_config.engine.enabled ||
-        loaded_vehicle_config.engine.max_thrust_n != 4500.0 ||
+        loaded_vehicle_config.engine.thrust_vac_n != 4500.0 ||
         loaded_vehicle_config.tanks.front().initial_kg != 150.0 ||
         loaded_vehicle_config.stages.size() != 2 ||
         loaded_vehicle_config.stages[0].name != "core" ||
@@ -633,8 +633,8 @@ int main()
         src_stage.active = true;
         src_stage.dry_mass_kg = 250.0;
         src_stage.engine.enabled = false;
-        src_stage.engine.max_thrust_n = 0.0;
-        src_stage.engine.isp_s = 0.0;
+        src_stage.engine.thrust_vac_n = 0.0;
+        src_stage.engine.isp_vac_s = 0.0;
         src_stage.tanks = {{"src_tank", "rp1", 200.0, 200.0}};
         post2::vehicle::StageConfig dst_stage = src_stage;
         dst_stage.name = "dst_stage";
@@ -699,8 +699,8 @@ int main()
         stage.active = true;
         stage.dry_mass_kg = 600.0;
         stage.engine.enabled = true;
-        stage.engine.max_thrust_n = 9806.65;  // 1 kg/s at isp=1000
-        stage.engine.isp_s = 1000.0;
+        stage.engine.thrust_vac_n = 9806.65;  // 1 kg/s at isp=1000
+        stage.engine.isp_vac_s = 1000.0;
         stage.engine.feed_tanks = {{"core", "tank_a"}, {"core", "tank_b"}};
         stage.tanks = {
             {"tank_a", "rp1", 30.0, 30.0},
@@ -782,8 +782,8 @@ int main()
         stage.active = true;
         stage.dry_mass_kg = 1000.0;
         stage.engine.enabled = true;
-        stage.engine.max_thrust_n = 9806.65;  // 1 kg/s @ isp 1000 s
-        stage.engine.isp_s = 1000.0;
+        stage.engine.thrust_vac_n = 9806.65;  // 1 kg/s @ isp 1000 s
+        stage.engine.isp_vac_s = 1000.0;
         stage.engine.feed_tanks = {{"core", "main"}};
         stage.tanks = {{"main", "rp1", 200.0, 100.0}};
         clamp_case.vehicle.stages = {stage};
@@ -825,6 +825,51 @@ int main()
         if (drained_kg < 28.0 || drained_kg > 30.5) {
             std::cerr << "clamp+burn: drained " << drained_kg
                       << " kg (expected ~30)\n";
+            return 1;
+        }
+    }
+
+    // (d) DOPRI5 integrator: same LEO orbit as the headline check, but use
+    // the adaptive integrator path end-to-end. Energy should be conserved to
+    // a tight tolerance over a single period.
+    {
+        post2::core::CaseConfig dopri_case;
+        dopri_case.step_s = 30.0;
+        dopri_case.vehicle.dry_mass_kg = 1000.0;
+        dopri_case.vehicle.tanks.front().capacity_kg = 0.0;
+        post2::core::PhaseConfig phase;
+        phase.name = "dopri5 leo";
+        phase.duration_s = 5400.0;
+        phase.inherit_initial_state = false;
+        phase.initial_state_eci = post2::core::State{
+            {post2::core::kEarthRadiusM + 200000.0, 0.0, 0.0},
+            {0.0, 7784.0, 0.0},
+        };
+        phase.integrator = "dopri5";
+        phase.tolerances.rtol = 1.0e-9;
+        phase.force_models.gravity = true;
+        phase.force_models.thrust = false;
+        phase.force_models.normal_force = false;
+        phase.force_models.gravity_model.type = "point_mass";
+        phase.throttle_model.c0 = 0.0;
+        dopri_case.phases = {phase};
+
+        const auto dopri_result = service.simulate(dopri_case);
+        if (!dopri_result.ok) {
+            std::cerr << "dopri5 LEO simulation failed: " << dopri_result.error << '\n';
+            return 1;
+        }
+        const auto& head = dopri_result.state_log.front();
+        const auto& tail = dopri_result.state_log.back();
+        const double r0 = head.radius_m;
+        const double v0 = head.speed_mps;
+        const double r1 = tail.radius_m;
+        const double v1 = tail.speed_mps;
+        const double e0 = 0.5 * v0 * v0 - post2::core::kEarthMuM3S2 / r0;
+        const double e1 = 0.5 * v1 * v1 - post2::core::kEarthMuM3S2 / r1;
+        if (std::abs(e1 - e0) / std::abs(e0) > 1.0e-6) {
+            std::cerr << "dopri5 LEO did not conserve energy: e0=" << e0
+                      << " e1=" << e1 << '\n';
             return 1;
         }
     }

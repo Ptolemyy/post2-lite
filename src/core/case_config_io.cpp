@@ -1,10 +1,12 @@
 #include "post2/core/case_config_io.hpp"
 
 #include "post2/core/coordinates.hpp"
+#include "post2/core/frames.hpp"
 #include "post2/core/json.hpp"
 #include "post2/vehicle/runtime_state.hpp"
 #include "post2/vehicle/vehicle_config_io.hpp"
 
+#include <algorithm>
 #include <fstream>
 #include <memory>
 #include <sstream>
@@ -82,12 +84,38 @@ JsonValue feed_tanks_to_json(const std::vector<post2::vehicle::TankRef>& feed_ta
     return JsonValue::array(std::move(out));
 }
 
+JsonValue throttle_curve_to_json(
+    const std::vector<post2::vehicle::EngineThrottleCurvePoint>& curve)
+{
+    JsonValue::Array out;
+    out.reserve(curve.size());
+    for (const auto& point : curve) {
+        out.push_back(JsonValue::object({
+            {"throttle", number(point.throttle)},
+            {"mdot_ratio", number(point.mdot_ratio)},
+        }));
+    }
+    return JsonValue::array(std::move(out));
+}
+
 JsonValue engine_to_json(const post2::vehicle::EngineConfig& engine)
 {
     return JsonValue::object({
         {"enabled", boolean(engine.enabled)},
-        {"max_thrust_n", number(engine.max_thrust_n)},
-        {"isp_s", number(engine.isp_s)},
+        {"thrust_vac_n", number(engine.thrust_vac_n)},
+        {"isp_vac_s", number(engine.isp_vac_s)},
+        {"thrust_sl_n", number(engine.thrust_sl_n)},
+        {"isp_sl_s", number(engine.isp_sl_s)},
+        {"nozzle_exit_area_m2", number(engine.nozzle_exit_area_m2)},
+        {"min_throttle", number(engine.min_throttle)},
+        {"max_throttle", number(engine.max_throttle)},
+        {"throttle_curve", throttle_curve_to_json(engine.throttle_curve)},
+        {"ignition_delay_s", number(engine.ignition_delay_s)},
+        {"thrust_buildup_s", number(engine.thrust_buildup_s)},
+        {"shutdown_delay_s", number(engine.shutdown_delay_s)},
+        {"engine_count", number(static_cast<double>(engine.engine_count))},
+        {"gimbal_max_rad", number(engine.gimbal_max_rad)},
+        {"gimbal_rate_rad_s", number(engine.gimbal_rate_rad_s)},
         {"direction_body", vec3_to_json(engine.direction_body)},
         {"feed_tanks", feed_tanks_to_json(engine.feed_tanks)},
     });
@@ -281,6 +309,12 @@ JsonValue phase_to_json(const PhaseConfig& phase)
         {"inherit_initial_state", boolean(phase.inherit_initial_state)},
         {"hold_down_clamp_initial_active", boolean(phase.hold_down_clamp_initial_active)},
         {"integrator", string(phase.integrator)},
+        {"tolerances", JsonValue::object({
+            {"rtol", number(phase.tolerances.rtol)},
+            {"atol_position_m", number(phase.tolerances.atol_position_m)},
+            {"atol_velocity_mps", number(phase.tolerances.atol_velocity_mps)},
+            {"atol_tank_mass_kg", number(phase.tolerances.atol_tank_mass_kg)},
+        })},
         {"force_models", force_models_to_json(phase.force_models)},
         {"throttle_model", throttle_to_json(phase.throttle_model)},
         {"steering_model", steering_to_json(phase.steering_model)},
@@ -347,6 +381,14 @@ JsonValue case_to_json_value(const CaseConfig& config)
         {"earth_j2", number(config.earth_j2)},
         {"earth_rotation_rad_per_s", number(config.earth_rotation_rad_per_s)},
         {"step_s", number(config.step_s)},
+        {"epoch_utc", JsonValue::object({
+            {"year", number(static_cast<double>(config.epoch_utc.year))},
+            {"month", number(static_cast<double>(config.epoch_utc.month))},
+            {"day", number(static_cast<double>(config.epoch_utc.day))},
+            {"hour", number(static_cast<double>(config.epoch_utc.hour))},
+            {"minute", number(static_cast<double>(config.epoch_utc.minute))},
+            {"second", number(config.epoch_utc.second)},
+        })},
         {"launch_site", JsonValue::object({
             {"latitude_deg", number(config.launch_site.latitude_deg)},
             {"longitude_deg", number(config.launch_site.longitude_deg)},
@@ -604,11 +646,73 @@ bool parse_vehicle(const JsonValue& value, post2::vehicle::VehicleConfig* target
         if (!engine.is_object()) {
             return fail(error, "vehicle.engine must be an object");
         }
-        if (!read_bool(engine, "enabled", &engine_config->enabled, error) ||
-            !read_number(engine, "max_thrust_n", &engine_config->max_thrust_n, error) ||
-            !read_number(engine, "isp_s", &engine_config->isp_s, error) ||
+        if (!read_bool(engine, "enabled", &engine_config->enabled, error)) {
+            return false;
+        }
+        // Thrust: prefer new name, fall back to legacy max_thrust_n.
+        if (find_member(engine, "thrust_vac_n")) {
+            if (!read_number(engine, "thrust_vac_n", &engine_config->thrust_vac_n, error)) {
+                return false;
+            }
+        } else if (find_member(engine, "max_thrust_n")) {
+            if (!read_number(engine, "max_thrust_n", &engine_config->thrust_vac_n, error)) {
+                return false;
+            }
+        }
+        // Isp: prefer new name, fall back to legacy isp_s.
+        if (find_member(engine, "isp_vac_s")) {
+            if (!read_number(engine, "isp_vac_s", &engine_config->isp_vac_s, error)) {
+                return false;
+            }
+        } else if (find_member(engine, "isp_s")) {
+            if (!read_number(engine, "isp_s", &engine_config->isp_vac_s, error)) {
+                return false;
+            }
+        }
+        if (!read_number(engine, "thrust_sl_n", &engine_config->thrust_sl_n, error) ||
+            !read_number(engine, "isp_sl_s", &engine_config->isp_sl_s, error) ||
+            !read_number(engine, "nozzle_exit_area_m2", &engine_config->nozzle_exit_area_m2, error) ||
+            !read_number(engine, "min_throttle", &engine_config->min_throttle, error) ||
+            !read_number(engine, "max_throttle", &engine_config->max_throttle, error) ||
+            !read_number(engine, "ignition_delay_s", &engine_config->ignition_delay_s, error) ||
+            !read_number(engine, "thrust_buildup_s", &engine_config->thrust_buildup_s, error) ||
+            !read_number(engine, "shutdown_delay_s", &engine_config->shutdown_delay_s, error) ||
+            !read_number(engine, "gimbal_max_rad", &engine_config->gimbal_max_rad, error) ||
+            !read_number(engine, "gimbal_rate_rad_s", &engine_config->gimbal_rate_rad_s, error) ||
             !read_vec3(engine, "direction_body", &engine_config->direction_body, error)) {
             return false;
+        }
+        if (const JsonValue* count = find_member(engine, "engine_count")) {
+            if (!count->is_number()) {
+                return fail(error, "engine.engine_count must be a number");
+            }
+            engine_config->engine_count =
+                std::max(1, static_cast<int>(count->number_value));
+        }
+        if (const JsonValue* curve = find_member(engine, "throttle_curve")) {
+            if (!curve->is_array()) {
+                return fail(error, "engine.throttle_curve must be an array");
+            }
+            engine_config->throttle_curve.clear();
+            engine_config->throttle_curve.reserve(curve->array_value.size());
+            for (const auto& entry : curve->array_value) {
+                if (!entry.is_object()) {
+                    return fail(error, "throttle_curve entry must be an object");
+                }
+                post2::vehicle::EngineThrottleCurvePoint point;
+                if (!read_number(entry, "throttle", &point.throttle, error) ||
+                    !read_number(entry, "mdot_ratio", &point.mdot_ratio, error)) {
+                    return false;
+                }
+                engine_config->throttle_curve.push_back(point);
+            }
+            std::sort(
+                engine_config->throttle_curve.begin(),
+                engine_config->throttle_curve.end(),
+                [](const post2::vehicle::EngineThrottleCurvePoint& a,
+                   const post2::vehicle::EngineThrottleCurvePoint& b) {
+                    return a.throttle < b.throttle;
+                });
         }
         if (const JsonValue* feed = find_member(engine, "feed_tanks")) {
             if (!feed->is_array()) {
@@ -944,6 +1048,18 @@ bool parse_phase(const JsonValue& value, PhaseConfig* target, std::string* error
         parsed.initial_state_eci = state;
     }
 
+    if (const JsonValue* tol = find_member(value, "tolerances")) {
+        if (!tol->is_object()) {
+            return fail(error, "phase.tolerances must be an object");
+        }
+        if (!read_number(*tol, "rtol", &parsed.tolerances.rtol, error) ||
+            !read_number(*tol, "atol_position_m", &parsed.tolerances.atol_position_m, error) ||
+            !read_number(*tol, "atol_velocity_mps", &parsed.tolerances.atol_velocity_mps, error) ||
+            !read_number(*tol, "atol_tank_mass_kg", &parsed.tolerances.atol_tank_mass_kg, error)) {
+            return false;
+        }
+    }
+
     if (const JsonValue* force = find_member(value, "force_models")) {
         if (!force->is_object()) {
             return fail(error, "force_models must be an object");
@@ -1028,6 +1144,8 @@ CaseConfig case_from_simulation_config(const SimulationConfig& config)
         ? config.gravity_model.j2
         : config.earth_j2;
     case_config.earth_rotation_rad_per_s = config.earth_rotation_rad_per_s;
+    case_config.epoch_utc = config.epoch_utc;
+    case_config.earth_rotation_at_epoch_rad = config.earth_rotation_at_epoch_rad;
     case_config.step_s = config.step_s;
 
     PhaseConfig phase;
@@ -1064,6 +1182,8 @@ SimulationConfig simulation_config_from_case(const CaseConfig& config)
     simulation.earth_mu_m3s2 = config.earth_mu_m3s2;
     simulation.earth_j2 = config.earth_j2;
     simulation.earth_rotation_rad_per_s = config.earth_rotation_rad_per_s;
+    simulation.epoch_utc = config.epoch_utc;
+    simulation.earth_rotation_at_epoch_rad = config.earth_rotation_at_epoch_rad;
     simulation.step_s = config.step_s;
     simulation.launch_site = config.launch_site;
     simulation.vehicle = config.vehicle;
@@ -1126,6 +1246,30 @@ bool case_config_from_json(const std::string& text, CaseConfig* config, std::str
         }
     }
 
+    if (const JsonValue* epoch = find_member(root, "epoch_utc")) {
+        if (!epoch->is_object()) {
+            return fail(error, "epoch_utc must be an object");
+        }
+        double year_d = parsed.epoch_utc.year;
+        double month_d = parsed.epoch_utc.month;
+        double day_d = parsed.epoch_utc.day;
+        double hour_d = parsed.epoch_utc.hour;
+        double minute_d = parsed.epoch_utc.minute;
+        if (!read_number(*epoch, "year", &year_d, error) ||
+            !read_number(*epoch, "month", &month_d, error) ||
+            !read_number(*epoch, "day", &day_d, error) ||
+            !read_number(*epoch, "hour", &hour_d, error) ||
+            !read_number(*epoch, "minute", &minute_d, error) ||
+            !read_number(*epoch, "second", &parsed.epoch_utc.second, error)) {
+            return false;
+        }
+        parsed.epoch_utc.year = static_cast<int>(year_d);
+        parsed.epoch_utc.month = static_cast<int>(month_d);
+        parsed.epoch_utc.day = static_cast<int>(day_d);
+        parsed.epoch_utc.hour = static_cast<int>(hour_d);
+        parsed.epoch_utc.minute = static_cast<int>(minute_d);
+    }
+
     if (const JsonValue* vehicle = find_member(root, "vehicle")) {
         if (!parse_vehicle(*vehicle, &parsed.vehicle, error)) {
             return false;
@@ -1160,6 +1304,9 @@ bool case_config_from_json(const std::string& text, CaseConfig* config, std::str
             return false;
         }
     }
+
+    parsed.earth_rotation_at_epoch_rad =
+        frames::gmst_rad(frames::julian_date_utc(parsed.epoch_utc));
 
     *config = std::move(parsed);
     return true;

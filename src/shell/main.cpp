@@ -482,12 +482,12 @@ bool parse_options(int argc, char** argv, Options* options)
                 return false;
             }
         } else if (arg == "--engine-max-thrust" || arg == "--thrust-max") {
-            if (!parse_double(value, &options->config.vehicle.engine.max_thrust_n)) {
+            if (!parse_double(value, &options->config.vehicle.engine.thrust_vac_n)) {
                 std::cerr << "Invalid --engine-max-thrust value: " << value << '\n';
                 return false;
             }
         } else if (arg == "--engine-isp" || arg == "--thrust-isp") {
-            if (!parse_double(value, &options->config.vehicle.engine.isp_s)) {
+            if (!parse_double(value, &options->config.vehicle.engine.isp_vac_s)) {
                 std::cerr << "Invalid --engine-isp value: " << value << '\n';
                 return false;
             }

@@ -26,7 +26,25 @@
       "Bash(cmake --build build --config Release --target post2_core --clean-first)",
       "Bash(python -c ' *)",
       "Bash(awk '/^bool gradient_forward/,/^\\\\}$/' C:/Users/32796/Desktop/post2-lite/src/core/optimization.cpp)",
-      "Bash(awk '/^SqpJacobians compute_fd_jacobians/,/^\\\\}$/' C:/Users/32796/Desktop/post2-lite/src/core/optimization.cpp)"
+      "Bash(awk '/^SqpJacobians compute_fd_jacobians/,/^\\\\}$/' C:/Users/32796/Desktop/post2-lite/src/core/optimization.cpp)",
+      "Bash(cmake --build build --config Debug --target post2_frames_test)",
+      "Bash(./build/Debug/post2_frames_test.exe)",
+      "Bash(cmake --build build --config Debug --target post2_smoke_test)",
+      "Bash(./build/Debug/post2_smoke_test.exe)",
+      "Bash(cmake --build build --config Debug)",
+      "Bash(echo \"frames exit: $?\")",
+      "Bash(./build/Debug/post2_shell.exe --help)",
+      "Bash(./build/Debug/post2_shell.exe run *)",
+      "Bash(ctest -C Debug --output-on-failure)",
+      "Bash(cmake --build build --config Debug --target post2_core)",
+      "Bash(xargs grep *)",
+      "Bash(cmake --build build --config Debug --target post2_engine_performance_test)",
+      "Bash(grep -n \"integrator\\\\|step_s\" C:\\\\\\\\Users\\\\\\\\32796\\\\\\\\Desktop\\\\\\\\post2-lite\\\\\\\\src\\\\\\\\core\\\\\\\\case_config_io.cpp)",
+      "Bash(cmake --build build --config Debug --target post2_integrator_test)",
+      "Bash(./build/Debug/post2_integrator_test.exe)",
+      "Bash(ctest -C Debug)",
+      "Bash(ctest -C Release --output-on-failure)",
+      "Bash(./build/Release/post2_shell.exe run *)"
     ]
   }
 }

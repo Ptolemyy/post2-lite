@@ -1283,10 +1283,10 @@ void create_stage_editor_controls(StageEditorDialogState* state)
     Button_SetCheck(state->engine_enabled, engine.enabled ? BST_CHECKED : BST_UNCHECKED);
 
     create_label(state->hwnd, 18, 180, 90, L"Max thrust N", font);
-    state->engine_thrust_edit = create_edit(state->hwnd, kVehicleEngineThrustEdit, 118, 176, 120, format_double(engine.max_thrust_n), font);
+    state->engine_thrust_edit = create_edit(state->hwnd, kVehicleEngineThrustEdit, 118, 176, 120, format_double(engine.thrust_vac_n), font);
 
     create_label(state->hwnd, 258, 180, 55, L"Isp s", font);
-    state->engine_isp_edit = create_edit(state->hwnd, kVehicleEngineIspEdit, 318, 176, 100, format_double(engine.isp_s), font);
+    state->engine_isp_edit = create_edit(state->hwnd, kVehicleEngineIspEdit, 318, 176, 100, format_double(engine.isp_vac_s), font);
 
     create_label(state->hwnd, 18, 214, 90, L"Engine dir", font);
     state->engine_dir_x_edit = create_edit(state->hwnd, kVehicleEngineDirXEdit, 118, 210, 70, format_double(engine.direction_body.x), font);
@@ -1325,8 +1325,8 @@ bool accept_stage_editor_dialog(StageEditorDialogState* state)
     stage.engine.enabled = Button_GetCheck(state->engine_enabled) == BST_CHECKED;
 
     if (!read_double_field(state->hwnd, state->dry_mass_edit, L"Dry mass", &stage.dry_mass_kg) ||
-        !read_double_field(state->hwnd, state->engine_thrust_edit, L"Max thrust", &stage.engine.max_thrust_n) ||
-        !read_double_field(state->hwnd, state->engine_isp_edit, L"Isp", &stage.engine.isp_s) ||
+        !read_double_field(state->hwnd, state->engine_thrust_edit, L"Max thrust", &stage.engine.thrust_vac_n) ||
+        !read_double_field(state->hwnd, state->engine_isp_edit, L"Isp", &stage.engine.isp_vac_s) ||
         !read_double_field(state->hwnd, state->engine_dir_x_edit, L"Engine dir X", &stage.engine.direction_body.x) ||
         !read_double_field(state->hwnd, state->engine_dir_y_edit, L"Engine dir Y", &stage.engine.direction_body.y) ||
         !read_double_field(state->hwnd, state->engine_dir_z_edit, L"Engine dir Z", &stage.engine.direction_body.z)) {

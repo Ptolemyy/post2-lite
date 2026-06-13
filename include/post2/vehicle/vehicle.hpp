@@ -30,10 +30,60 @@ struct TankRef {
 bool operator==(const TankRef& lhs, const TankRef& rhs);
 bool operator!=(const TankRef& lhs, const TankRef& rhs);
 
+struct EngineThrottleCurvePoint {
+    double throttle = 0.0;    // commanded throttle in [0, 1]
+    double mdot_ratio = 0.0;  // actual mdot / vacuum mdot at commanded throttle
+};
+
 struct EngineConfig {
     bool enabled = false;
-    double max_thrust_n = 0.0;
-    double isp_s = 0.0;
+
+    // Per-engine vacuum performance. The cluster (engine_count engines)
+    // aggregated values are F_cluster = engine_count * thrust_vac_n,
+    // mdot_cluster = engine_count * (thrust_vac_n / (isp_vac_s * g0)).
+    double thrust_vac_n = 0.0;
+    double isp_vac_s = 0.0;
+
+    // Optional sea-level reference. If thrust_sl_n > 0 it is used for the
+    // case_config_io legacy alias migration and as a sanity check (we expect
+    // thrust_sl_n ~= thrust_vac_n - p_sl * nozzle_exit_area_m2). Not used at
+    // runtime: the physical model uses (thrust_vac_n, nozzle_exit_area_m2,
+    // ambient_pressure_pa).
+    double thrust_sl_n = 0.0;
+    double isp_sl_s = 0.0;
+
+    // Nozzle exit area for pressure-corrected thrust F(p) = F_vac - p * Ae.
+    // When zero the engine behaves as a constant-thrust model (legacy).
+    double nozzle_exit_area_m2 = 0.0;
+
+    // Throttle bounds. Commanded throttle is clamped to
+    // [min_throttle, max_throttle] before being mapped through throttle_curve.
+    // Defaults of 0/1 preserve the legacy "any throttle in [0, 1]" behavior.
+    double min_throttle = 0.0;
+    double max_throttle = 1.0;
+
+    // Optional non-linear throttle map. Empty -> mdot_ratio = throttle (linear).
+    // Otherwise sorted by .throttle ascending and piecewise-linearly
+    // interpolated; values outside the table clamp to the endpoints.
+    std::vector<EngineThrottleCurvePoint> throttle_curve;
+
+    // Transient timing. Fields are persisted in config/JSON but the runtime
+    // currently models ignition and shutdown as instantaneous; the ramping
+    // physics will land once the event-detection integrator is available.
+    double ignition_delay_s = 0.0;
+    double thrust_buildup_s = 0.0;
+    double shutdown_delay_s = 0.0;
+
+    // Number of engines in this stage's cluster. Thrust and mass flow scale
+    // linearly. Default 1 reproduces the pre-cluster (aggregated) behavior.
+    int engine_count = 1;
+
+    // Gimbal envelope. Fields are persisted but not enforced at runtime
+    // (enforcing the half-angle cone requires the vehicle body axis, which
+    // depends on the attitude state that is out of scope here).
+    double gimbal_max_rad = 0.0;
+    double gimbal_rate_rad_s = 0.0;
+
     Vec3 direction_body = {1.0, 0.0, 0.0};
     // Priority-ordered list of tanks feeding this engine. The first feed_tank
     // with mass > eps takes the full draw; flow smoothly transfers to the

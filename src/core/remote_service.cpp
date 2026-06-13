@@ -263,8 +263,8 @@ std::string make_remote_request(const SimulationConfig& config)
            << vehicle.aero.cl << ' '
            << std::quoted(vehicle.aero.aero_table_path) << ' '
            << (vehicle.engine.enabled ? 1 : 0) << ' '
-           << vehicle.engine.max_thrust_n << ' '
-           << vehicle.engine.isp_s << ' '
+           << vehicle.engine.thrust_vac_n << ' '
+           << vehicle.engine.isp_vac_s << ' '
            << vehicle.engine.direction_body.x << ' '
            << vehicle.engine.direction_body.y << ' '
            << vehicle.engine.direction_body.z << ' '
@@ -355,8 +355,8 @@ bool parse_remote_request(const std::string& request, SimulationConfig* config, 
         }
         input
             >> engine_enabled
-            >> parsed.vehicle.engine.max_thrust_n
-            >> parsed.vehicle.engine.isp_s
+            >> parsed.vehicle.engine.thrust_vac_n
+            >> parsed.vehicle.engine.isp_vac_s
             >> parsed.vehicle.engine.direction_body.x
             >> parsed.vehicle.engine.direction_body.y
             >> parsed.vehicle.engine.direction_body.z
@@ -386,7 +386,7 @@ bool parse_remote_request(const std::string& request, SimulationConfig* config, 
             }
         }
         if (parsed.vehicle.engine.enabled &&
-            parsed.vehicle.engine.max_thrust_n > 0.0 &&
+            parsed.vehicle.engine.thrust_vac_n > 0.0 &&
             parsed.vehicle.engine.feed_tanks.empty() &&
             !parsed.vehicle.tanks.empty()) {
             parsed.vehicle.engine.feed_tanks = {{"stage 1", parsed.vehicle.tanks.front().name}};
