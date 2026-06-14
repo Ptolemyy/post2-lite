@@ -1,16 +1,19 @@
 // Open-loop kOS player for POST2-Lite trajectory CSV exports.
-// kOS cannot read host absolute paths directly. Copy or link
-// C:/Users/32796/Desktop/post2-lite/build/Release/gui_trajectory.csv
-// into the kOS archive path used by TRAJ_PATH before running.
+// kOS cannot read host absolute paths directly. In POST2 Lite, use
+// File > Export kOS trajectory CSV before running this script.
 
 @LAZYGLOBAL OFF.
 
 PARAMETER TRAJ_PATH IS "archive:/post2-lite/gui_trajectory.csv".
 PARAMETER AUTO_LAUNCH IS TRUE.
+PARAMETER AUTO_RELEASE_LAUNCH_SUPPORT IS TRUE.
 PARAMETER AUTO_STAGE_ON_PHASE_CHANGE IS FALSE.
+PARAMETER ENGINE_STARTUP_LEAD_S IS 3.0.
+PARAMETER LAUNCH_SUPPORT_RELEASE_DELAY IS 0.25.
+PARAMETER FALLBACK_RELEASE_ON_CSV_HOLD_DOWN IS TRUE.
 PARAMETER SAMPLE_DT IS 0.05.
+PARAMETER KOS_TARGET_IPU IS 2000.
 
-LOCAL SOURCE_WINDOWS_PATH IS "C:/Users/32796/Desktop/post2-lite/build/Release/gui_trajectory.csv".
 LOCAL MIN_COMMAND_THROTTLE IS 0.001.
 LOCAL MIN_STEER_THROTTLE IS 0.001.
 
@@ -45,6 +48,101 @@ FUNCTION FIND_COL {
         SET INDEX_VALUE TO INDEX_VALUE + 1.
     }.
     RETURN -1.
+}.
+
+FUNCTION RAISE_KOS_IPU {
+    IF KOS_TARGET_IPU <= 0 {
+        RETURN.
+    }.
+    IF CONFIG:IPU < KOS_TARGET_IPU {
+        SET CONFIG:IPU TO KOS_TARGET_IPU.
+        PRINT "kOS IPU set to " + CONFIG:IPU + ".".
+    } ELSE {
+        PRINT "kOS IPU already " + CONFIG:IPU + ".".
+    }.
+}.
+
+FUNCTION PART_HAS_MODULE {
+    PARAMETER PART_ITEM, MODULE_NAME.
+
+    IF NOT PART_ITEM:HASSUFFIX("MODULES") {
+        RETURN FALSE.
+    }.
+    FOR MOD_NAME IN PART_ITEM:MODULES {
+        IF MOD_NAME = MODULE_NAME {
+            RETURN TRUE.
+        }.
+    }.
+    RETURN FALSE.
+}.
+
+FUNCTION STAGE_HAS_LAUNCH_SUPPORT {
+    PARAMETER STAGE_NUMBER.
+
+    FOR PART_ITEM IN SHIP:PARTS {
+        IF PART_ITEM:STAGE = STAGE_NUMBER {
+            IF PART_HAS_MODULE(PART_ITEM, "LaunchClamp") {
+                RETURN TRUE.
+            }.
+            IF PART_HAS_MODULE(PART_ITEM, "ModuleLaunchClamp") {
+                RETURN TRUE.
+            }.
+        }.
+    }.
+    RETURN FALSE.
+}.
+
+FUNCTION VESSEL_HAS_LAUNCH_SUPPORT {
+    FOR PART_ITEM IN SHIP:PARTS {
+        IF PART_HAS_MODULE(PART_ITEM, "LaunchClamp") {
+            RETURN TRUE.
+        }.
+        IF PART_HAS_MODULE(PART_ITEM, "ModuleLaunchClamp") {
+            RETURN TRUE.
+        }.
+    }.
+    RETURN FALSE.
+}.
+
+FUNCTION RELEASE_NEXT_LAUNCH_SUPPORT_STAGE {
+    PARAMETER TARGET_ELAPSED_S.
+    PARAMETER CSV_EXPECTS_RELEASE IS FALSE.
+
+    IF NOT AUTO_RELEASE_LAUNCH_SUPPORT {
+        RETURN FALSE.
+    }.
+
+    LOCAL NEXT_STAGE IS -999999.
+    LOCAL STAGE_MATCH IS FALSE.
+    IF SHIP:HASSUFFIX("STAGENUM") {
+        SET NEXT_STAGE TO SHIP:STAGENUM.
+        SET STAGE_MATCH TO STAGE_HAS_LAUNCH_SUPPORT(NEXT_STAGE).
+        IF NOT STAGE_MATCH {
+            SET STAGE_MATCH TO STAGE_HAS_LAUNCH_SUPPORT(NEXT_STAGE - 1).
+        }.
+        IF NOT STAGE_MATCH {
+            SET STAGE_MATCH TO STAGE_HAS_LAUNCH_SUPPORT(NEXT_STAGE + 1).
+        }.
+    }.
+
+    IF STAGE_MATCH {
+        PRINT "Release launch support at CSV t+" + ROUND(TARGET_ELAPSED_S, 2) + "s stage " + NEXT_STAGE.
+        STAGE.
+        RETURN TRUE.
+    }.
+
+    IF CSV_EXPECTS_RELEASE AND FALLBACK_RELEASE_ON_CSV_HOLD_DOWN {
+        PRINT "Release launch support at CSV t+" + ROUND(TARGET_ELAPSED_S, 2) + "s by fallback stage.".
+        STAGE.
+        RETURN TRUE.
+    }.
+
+    IF VESSEL_HAS_LAUNCH_SUPPORT() {
+        PRINT "Launch support exists, but next stage was not detected.".
+    } ELSE {
+        PRINT "No launch support found on vessel; release stage skipped.".
+    }.
+    RETURN FALSE.
 }.
 
 FUNCTION CROSS_RH {
@@ -138,10 +236,12 @@ FUNCTION REQUIRED_COLUMNS_OK {
 }.
 
 FUNCTION OPEN_LOOP_MAIN {
+    RAISE_KOS_IPU().
+
     IF NOT EXISTS(TRAJ_PATH) {
         PRINT "Missing trajectory CSV: " + TRAJ_PATH.
-        PRINT "Source on host PC: " + SOURCE_WINDOWS_PATH.
-        PRINT "Copy or link it into the kOS archive volume path above.".
+        PRINT "In POST2 Lite, use File > Export kOS trajectory CSV.".
+        PRINT "Then run this script again.".
         RETURN.
     }.
 
@@ -152,19 +252,12 @@ FUNCTION OPEN_LOOP_MAIN {
         RETURN.
     }.
 
-    SAS OFF.
-    RCS OFF.
-    SET_UP_ATTITUDE().
-    SET POST2_THROTTLE_CMD TO 0.
-    LOCK STEERING TO HEADING(POST2_HEADING_DEG, POST2_PITCH_DEG).
-    LOCK THROTTLE TO POST2_THROTTLE_CMD.
-
     LOCAL HEADER_READY IS FALSE.
     LOCAL FIRST_PLAN_TIME_S IS -1.
-    LOCAL START_TIME_S IS TIME:SECONDS.
-    LOCAL ROW_COUNT IS 0.
-    LOCAL LAUNCHED IS FALSE.
-    LOCAL LAST_PHASE_INDEX IS -999999.
+    LOCAL FIRST_POWERED_PLAN_TIME_S IS -1.
+    LOCAL FIRST_RELEASE_PLAN_TIME_S IS -1.
+    LOCAL FIRST_POWERED_FIELDS IS LIST().
+    LOCAL SAW_HOLD_DOWN_ACTIVE IS FALSE.
 
     LOCAL COL_TIME IS -1.
     LOCAL COL_X IS -1.
@@ -174,9 +267,8 @@ FUNCTION OPEN_LOOP_MAIN {
     LOCAL COL_DIR_Y IS -1.
     LOCAL COL_DIR_Z IS -1.
     LOCAL COL_THROTTLE IS -1.
+    LOCAL COL_HOLD_DOWN IS -1.
     LOCAL COL_PHASE_INDEX IS -1.
-
-    PRINT "POST2 open-loop CSV: " + TRAJ_PATH.
 
     FOR RAW_LINE IN TRAJ_CONTENT {
         LOCAL LINE_TEXT IS RAW_LINE:TRIM().
@@ -192,14 +284,12 @@ FUNCTION OPEN_LOOP_MAIN {
             SET COL_DIR_Y TO FIND_COL(HEADER_FIELDS, "engine_direction_eci_y").
             SET COL_DIR_Z TO FIND_COL(HEADER_FIELDS, "engine_direction_eci_z").
             SET COL_THROTTLE TO FIND_COL(HEADER_FIELDS, "throttle").
+            SET COL_HOLD_DOWN TO FIND_COL(HEADER_FIELDS, "hold_down_clamp_active").
             SET COL_PHASE_INDEX TO FIND_COL(HEADER_FIELDS, "phase_index").
 
             IF NOT REQUIRED_COLUMNS_OK(COL_TIME, COL_X, COL_Y, COL_Z, COL_DIR_X, COL_DIR_Y, COL_DIR_Z, COL_THROTTLE) {
                 PRINT "CSV missing required POST2 columns.".
                 PRINT "Need time_s,x_m,y_m,z_m,throttle,engine_direction_eci_*.".
-                SET POST2_THROTTLE_CMD TO 0.
-                UNLOCK THROTTLE.
-                UNLOCK STEERING.
                 RETURN.
             }.
             SET HEADER_READY TO TRUE.
@@ -208,50 +298,143 @@ FUNCTION OPEN_LOOP_MAIN {
             LOCAL PLAN_TIME_S IS FIELD_NUM(ROW_FIELDS, COL_TIME, 0).
             IF FIRST_PLAN_TIME_S < 0 {
                 SET FIRST_PLAN_TIME_S TO PLAN_TIME_S.
-                SET START_TIME_S TO TIME:SECONDS.
             }.
-
-            LOCAL TARGET_ELAPSED_S IS PLAN_TIME_S - FIRST_PLAN_TIME_S.
-            UNTIL TIME:SECONDS - START_TIME_S >= TARGET_ELAPSED_S {
-                WAIT SAMPLE_DT.
+            LOCAL HOLD_DOWN_ACTIVE IS FALSE.
+            IF COL_HOLD_DOWN >= 0 {
+                SET HOLD_DOWN_ACTIVE TO FIELD_NUM(ROW_FIELDS, COL_HOLD_DOWN, 0) > 0.5.
+                IF HOLD_DOWN_ACTIVE {
+                    SET SAW_HOLD_DOWN_ACTIVE TO TRUE.
+                } ELSE IF SAW_HOLD_DOWN_ACTIVE AND FIRST_RELEASE_PLAN_TIME_S < 0 {
+                    SET FIRST_RELEASE_PLAN_TIME_S TO PLAN_TIME_S.
+                }.
             }.
-
-            LOCAL COMMAND_RESULT IS APPLY_ROW_COMMAND(
-                ROW_FIELDS,
-                COL_X, COL_Y, COL_Z,
-                COL_DIR_X, COL_DIR_Y, COL_DIR_Z,
-                COL_THROTTLE).
-
-            LOCAL THROTTLE_NOW IS COMMAND_RESULT[2].
-            LOCAL PHASE_INDEX_NOW IS FIELD_NUM(ROW_FIELDS, COL_PHASE_INDEX, LAST_PHASE_INDEX).
-            LOCAL STAGED_THIS_ROW IS FALSE.
-            LOCAL SHOULD_AUTO_LAUNCH IS AUTO_LAUNCH.
-            SET SHOULD_AUTO_LAUNCH TO SHOULD_AUTO_LAUNCH AND (NOT LAUNCHED).
-            SET SHOULD_AUTO_LAUNCH TO SHOULD_AUTO_LAUNCH AND (THROTTLE_NOW > MIN_COMMAND_THROTTLE).
-
-            IF SHOULD_AUTO_LAUNCH {
-                PRINT "Ignition/stage at t+" + ROUND(TARGET_ELAPSED_S, 2) + "s".
-                STAGE.
-                SET LAUNCHED TO TRUE.
-                SET STAGED_THIS_ROW TO TRUE.
-                WAIT 0.2.
+            IF FIRST_POWERED_PLAN_TIME_S < 0 {
+                LOCAL PREVIEW_THROTTLE IS CLAMP(FIELD_NUM(ROW_FIELDS, COL_THROTTLE, 0), 0, 1).
+                IF PREVIEW_THROTTLE > MIN_COMMAND_THROTTLE {
+                    SET FIRST_POWERED_PLAN_TIME_S TO PLAN_TIME_S.
+                    SET FIRST_POWERED_FIELDS TO ROW_FIELDS.
+                }.
             }.
+        }.
+    }.
 
-            LOCAL SHOULD_PHASE_STAGE IS AUTO_STAGE_ON_PHASE_CHANGE.
-            SET SHOULD_PHASE_STAGE TO SHOULD_PHASE_STAGE AND LAUNCHED.
-            SET SHOULD_PHASE_STAGE TO SHOULD_PHASE_STAGE AND (NOT STAGED_THIS_ROW).
-            SET SHOULD_PHASE_STAGE TO SHOULD_PHASE_STAGE AND (PHASE_INDEX_NOW <> LAST_PHASE_INDEX).
-            SET SHOULD_PHASE_STAGE TO SHOULD_PHASE_STAGE AND (LAST_PHASE_INDEX > -999999).
-            SET SHOULD_PHASE_STAGE TO SHOULD_PHASE_STAGE AND (THROTTLE_NOW > MIN_COMMAND_THROTTLE).
-            IF SHOULD_PHASE_STAGE {
-                PRINT "Phase stage at t+" + ROUND(TARGET_ELAPSED_S, 2) + "s phase " + PHASE_INDEX_NOW.
-                STAGE.
-                WAIT 0.2.
+    IF NOT HEADER_READY {
+        PRINT "Trajectory CSV has no header.".
+        RETURN.
+    }.
+    IF FIRST_PLAN_TIME_S < 0 {
+        PRINT "Trajectory CSV has no data rows.".
+        RETURN.
+    }.
+
+    SAS OFF.
+    RCS OFF.
+    SET_UP_ATTITUDE().
+    SET POST2_THROTTLE_CMD TO 0.
+    LOCK STEERING TO HEADING(POST2_HEADING_DEG, POST2_PITCH_DEG).
+    LOCK THROTTLE TO POST2_THROTTLE_CMD.
+
+    LOCAL PLAYBACK_ZERO_PLAN_TIME_S IS FIRST_PLAN_TIME_S.
+    IF FIRST_RELEASE_PLAN_TIME_S >= 0 {
+        SET PLAYBACK_ZERO_PLAN_TIME_S TO FIRST_RELEASE_PLAN_TIME_S.
+    }.
+
+    LOCAL PLAYBACK_START_PLAN_TIME_S IS PLAYBACK_ZERO_PLAN_TIME_S.
+    IF FIRST_POWERED_PLAN_TIME_S >= PLAYBACK_ZERO_PLAN_TIME_S {
+        SET PLAYBACK_START_PLAN_TIME_S TO FIRST_POWERED_PLAN_TIME_S.
+    }.
+
+    LOCAL START_TIME_S IS TIME:SECONDS.
+    LOCAL ROW_COUNT IS 0.
+    LOCAL LAUNCHED IS FALSE.
+    LOCAL LAST_PHASE_INDEX IS -999999.
+
+    PRINT "POST2 open-loop CSV: " + TRAJ_PATH.
+    PRINT "CSV flight t0 plan time: " + ROUND(PLAYBACK_ZERO_PLAN_TIME_S, 3) + "s".
+
+    IF AUTO_LAUNCH AND FIRST_POWERED_PLAN_TIME_S >= 0 {
+        LOCAL LAUNCH_TARGET_ELAPSED_S IS 0.
+        LOCAL PRELAUNCH_COMMAND IS APPLY_ROW_COMMAND(
+            FIRST_POWERED_FIELDS,
+            COL_X, COL_Y, COL_Z,
+            COL_DIR_X, COL_DIR_Y, COL_DIR_Z,
+            COL_THROTTLE).
+        PRINT "Ignition/stage, release in " + ROUND(ENGINE_STARTUP_LEAD_S + LAUNCH_SUPPORT_RELEASE_DELAY, 2) + "s".
+        LOCAL IGNITION_TIME_S IS TIME:SECONDS.
+        STAGE.
+        SET LAUNCHED TO TRUE.
+        WAIT 0.2.
+        LOCAL RELEASE_TIME_S IS IGNITION_TIME_S + MAX(0, ENGINE_STARTUP_LEAD_S + LAUNCH_SUPPORT_RELEASE_DELAY).
+        UNTIL TIME:SECONDS >= RELEASE_TIME_S {
+            WAIT SAMPLE_DT.
+        }.
+        IF RELEASE_NEXT_LAUNCH_SUPPORT_STAGE(LAUNCH_TARGET_ELAPSED_S, FIRST_RELEASE_PLAN_TIME_S >= 0) {
+            SET START_TIME_S TO TIME:SECONDS.
+        } ELSE {
+            SET START_TIME_S TO TIME:SECONDS.
+        }.
+    }.
+
+    LOCAL SECOND_PASS_HEADER_SEEN IS FALSE.
+    FOR RAW_LINE IN TRAJ_CONTENT {
+        LOCAL LINE_TEXT IS RAW_LINE:TRIM().
+        IF LINE_TEXT:LENGTH = 0 {
+            // skip empty lines
+        } ELSE IF NOT SECOND_PASS_HEADER_SEEN {
+            SET SECOND_PASS_HEADER_SEEN TO TRUE.
+            // skip header
+        } ELSE {
+            LOCAL ROW_FIELDS IS LINE_TEXT:SPLIT(",").
+            LOCAL PLAN_TIME_S IS FIELD_NUM(ROW_FIELDS, COL_TIME, 0).
+            IF PLAN_TIME_S < PLAYBACK_START_PLAN_TIME_S - 0.000001 {
+                // prelaunch rows are handled by the ignition/spool-up sequence
+            } ELSE {
+                LOCAL TARGET_ELAPSED_S IS PLAN_TIME_S - PLAYBACK_ZERO_PLAN_TIME_S.
+                UNTIL TIME:SECONDS - START_TIME_S >= TARGET_ELAPSED_S {
+                    WAIT SAMPLE_DT.
+                }.
+
+                LOCAL COMMAND_RESULT IS APPLY_ROW_COMMAND(
+                    ROW_FIELDS,
+                    COL_X, COL_Y, COL_Z,
+                    COL_DIR_X, COL_DIR_Y, COL_DIR_Z,
+                    COL_THROTTLE).
+
+                LOCAL THROTTLE_NOW IS COMMAND_RESULT[2].
+                LOCAL PHASE_INDEX_NOW IS FIELD_NUM(ROW_FIELDS, COL_PHASE_INDEX, LAST_PHASE_INDEX).
+                LOCAL STAGED_THIS_ROW IS FALSE.
+                LOCAL SHOULD_AUTO_LAUNCH IS AUTO_LAUNCH.
+                SET SHOULD_AUTO_LAUNCH TO SHOULD_AUTO_LAUNCH AND (NOT LAUNCHED).
+                SET SHOULD_AUTO_LAUNCH TO SHOULD_AUTO_LAUNCH AND (THROTTLE_NOW > MIN_COMMAND_THROTTLE).
+
+                IF SHOULD_AUTO_LAUNCH {
+                    PRINT "Ignition/stage at t+" + ROUND(TARGET_ELAPSED_S, 2) + "s".
+                    STAGE.
+                    SET LAUNCHED TO TRUE.
+                    SET STAGED_THIS_ROW TO TRUE.
+                    WAIT 0.2.
+                    IF RELEASE_NEXT_LAUNCH_SUPPORT_STAGE(TARGET_ELAPSED_S, FIRST_RELEASE_PLAN_TIME_S >= 0) {
+                        SET STAGED_THIS_ROW TO TRUE.
+                        SET START_TIME_S TO TIME:SECONDS - TARGET_ELAPSED_S.
+                    }.
+                }.
+
+                LOCAL SHOULD_PHASE_STAGE IS AUTO_STAGE_ON_PHASE_CHANGE.
+                SET SHOULD_PHASE_STAGE TO SHOULD_PHASE_STAGE AND LAUNCHED.
+                SET SHOULD_PHASE_STAGE TO SHOULD_PHASE_STAGE AND (NOT STAGED_THIS_ROW).
+                SET SHOULD_PHASE_STAGE TO SHOULD_PHASE_STAGE AND (PHASE_INDEX_NOW <> LAST_PHASE_INDEX).
+                SET SHOULD_PHASE_STAGE TO SHOULD_PHASE_STAGE AND (LAST_PHASE_INDEX > -999999).
+                SET SHOULD_PHASE_STAGE TO SHOULD_PHASE_STAGE AND (THROTTLE_NOW > MIN_COMMAND_THROTTLE).
+                IF SHOULD_PHASE_STAGE {
+                    PRINT "Phase stage at t+" + ROUND(TARGET_ELAPSED_S, 2) + "s phase " + PHASE_INDEX_NOW.
+                    STAGE.
+                    WAIT 0.2.
+                }.
+
+                SET LAST_PHASE_INDEX TO PHASE_INDEX_NOW.
+                SET ROW_COUNT TO ROW_COUNT + 1.
+                WAIT 0.
             }.
-
-            SET LAST_PHASE_INDEX TO PHASE_INDEX_NOW.
-            SET ROW_COUNT TO ROW_COUNT + 1.
-            WAIT 0.
         }.
     }.
 

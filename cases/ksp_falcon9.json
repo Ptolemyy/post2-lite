@@ -1,0 +1,1131 @@
+{
+  "earth_j2": 0.00108262668,
+  "earth_mu_m3s2": 398600435436096,
+  "earth_radius_m": 6371000,
+  "earth_rotation_rad_per_s": 7.292114605661506e-05,
+  "epoch_utc": {
+    "day": 1,
+    "hour": 12,
+    "minute": 0,
+    "month": 1,
+    "second": 0,
+    "year": 2000
+  },
+  "launch_site": {
+    "altitude_m": 144.89578654523939,
+    "latitude_deg": 28.60838508605957,
+    "longitude_deg": -80.599754333496094
+  },
+  "name": "Falcon 9 payload to 200 km LEO",
+  "optimization": {
+    "constraint_tolerance": -1,
+    "continuation": {
+      "direction": "increase",
+      "enabled": true,
+      "multistart_count": 2,
+      "multistart_enabled": true,
+      "steps": 8,
+      "variable_path": "phases[1].duration_s"
+    },
+    "fd_mode": "auto",
+    "feasibility_tolerance": -1,
+    "initial_step_fraction": 0.050000000000000003,
+    "max_iterations": 300,
+    "max_restoration_iterations": 8,
+    "mode": "optimize",
+    "objective": {
+      "direction": "maximize",
+      "enabled": true,
+      "metric": "propellant_remaining_kg",
+      "weight": 1
+    },
+    "optimizer": "sqp",
+    "parallel_fd": true,
+    "qp_solver": "kkt-fallback",
+    "stationarity_tolerance": -1,
+    "targets": [
+      {
+        "max_value": 0,
+        "metric": "phases[6].terminal_altitude_m",
+        "min_value": 0,
+        "mode": "equal",
+        "phase_index": -1,
+        "scope": "terminal",
+        "value": 200000,
+        "weight": 8
+      },
+      {
+        "max_value": 0,
+        "metric": "phases[6].terminal_speed_mps",
+        "min_value": 0,
+        "mode": "equal",
+        "phase_index": -1,
+        "scope": "terminal",
+        "value": 7788.5,
+        "weight": 4
+      },
+      {
+        "max_value": 0,
+        "metric": "phases[6].inclination_deg",
+        "min_value": 0,
+        "mode": "equal",
+        "phase_index": -1,
+        "scope": "terminal",
+        "value": 28.562000000000001,
+        "weight": 1
+      },
+      {
+        "max_value": 230000,
+        "metric": "phases[6].periapsis_altitude_m",
+        "min_value": 180000,
+        "mode": "range",
+        "phase_index": -1,
+        "scope": "terminal",
+        "value": 0,
+        "weight": 2
+      },
+      {
+        "max_value": 230000,
+        "metric": "apoapsis_altitude_m",
+        "min_value": 180000,
+        "mode": "range",
+        "phase_index": -1,
+        "scope": "terminal",
+        "value": 200000,
+        "weight": 1
+      }
+    ],
+    "tolerance": 0.02,
+    "variables": [
+      {
+        "enabled": true,
+        "max_value": 65,
+        "min_value": 30,
+        "path": "phases[1].duration_s"
+      },
+      {
+        "enabled": true,
+        "max_value": 90,
+        "min_value": 80,
+        "path": "phases[1].steering_model.elevation.c0"
+      },
+      {
+        "enabled": true,
+        "max_value": -0.050000000000000003,
+        "min_value": -0.80000000000000004,
+        "path": "phases[1].steering_model.elevation.c1"
+      },
+      {
+        "enabled": true,
+        "max_value": 0.002,
+        "min_value": -0.002,
+        "path": "phases[1].steering_model.elevation.c2"
+      },
+      {
+        "enabled": true,
+        "max_value": 65,
+        "min_value": 30,
+        "path": "phases[2].duration_s"
+      },
+      {
+        "enabled": true,
+        "max_value": 80,
+        "min_value": 45,
+        "path": "phases[2].steering_model.elevation.c0"
+      },
+      {
+        "enabled": true,
+        "max_value": 0.050000000000000003,
+        "min_value": -0.80000000000000004,
+        "path": "phases[2].steering_model.elevation.c1"
+      },
+      {
+        "enabled": true,
+        "max_value": 0.002,
+        "min_value": -0.002,
+        "path": "phases[2].steering_model.elevation.c2"
+      },
+      {
+        "enabled": true,
+        "max_value": 65,
+        "min_value": 30,
+        "path": "phases[3].duration_s"
+      },
+      {
+        "enabled": true,
+        "max_value": 60,
+        "min_value": 5,
+        "path": "phases[3].steering_model.elevation.c0"
+      },
+      {
+        "enabled": true,
+        "max_value": 0.20000000000000001,
+        "min_value": -0.59999999999999998,
+        "path": "phases[3].steering_model.elevation.c1"
+      },
+      {
+        "enabled": true,
+        "max_value": 0.002,
+        "min_value": -0.002,
+        "path": "phases[3].steering_model.elevation.c2"
+      },
+      {
+        "enabled": true,
+        "max_value": 130,
+        "min_value": 70,
+        "path": "phases[4].duration_s"
+      },
+      {
+        "enabled": true,
+        "max_value": 35,
+        "min_value": 5,
+        "path": "phases[4].steering_model.elevation.c0"
+      },
+      {
+        "enabled": true,
+        "max_value": 0.050000000000000003,
+        "min_value": -0.12,
+        "path": "phases[4].steering_model.elevation.c1"
+      },
+      {
+        "enabled": true,
+        "max_value": 0.00050000000000000001,
+        "min_value": -0.00050000000000000001,
+        "path": "phases[4].steering_model.elevation.c2"
+      },
+      {
+        "enabled": true,
+        "max_value": 130,
+        "min_value": 70,
+        "path": "phases[5].duration_s"
+      },
+      {
+        "enabled": true,
+        "max_value": 25,
+        "min_value": 0,
+        "path": "phases[5].steering_model.elevation.c0"
+      },
+      {
+        "enabled": true,
+        "max_value": 0.050000000000000003,
+        "min_value": -0.12,
+        "path": "phases[5].steering_model.elevation.c1"
+      },
+      {
+        "enabled": true,
+        "max_value": 0.00050000000000000001,
+        "min_value": -0.00050000000000000001,
+        "path": "phases[5].steering_model.elevation.c2"
+      },
+      {
+        "enabled": true,
+        "max_value": 150,
+        "min_value": 70,
+        "path": "phases[6].duration_s"
+      },
+      {
+        "enabled": true,
+        "max_value": 20,
+        "min_value": 0,
+        "path": "phases[6].steering_model.elevation.c0"
+      },
+      {
+        "enabled": true,
+        "max_value": 0.050000000000000003,
+        "min_value": -0.10000000000000001,
+        "path": "phases[6].steering_model.elevation.c1"
+      },
+      {
+        "enabled": true,
+        "max_value": 0.00050000000000000001,
+        "min_value": -0.00050000000000000001,
+        "path": "phases[6].steering_model.elevation.c2"
+      },
+      {
+        "enabled": false,
+        "max_value": 30000,
+        "min_value": 1000,
+        "path": "vehicle.stages[2].dry_mass_kg"
+      },
+      {
+        "enabled": true,
+        "max_value": 1,
+        "min_value": 0.69999999999999996,
+        "path": "phases[1].throttle_model.c0"
+      },
+      {
+        "enabled": true,
+        "max_value": 1,
+        "min_value": 0.69999999999999996,
+        "path": "phases[2].throttle_model.c0"
+      },
+      {
+        "enabled": true,
+        "max_value": 1,
+        "min_value": 0.69999999999999996,
+        "path": "phases[3].throttle_model.c0"
+      },
+      {
+        "enabled": true,
+        "max_value": 1,
+        "min_value": 0.59999999999999998,
+        "path": "phases[4].throttle_model.c0"
+      },
+      {
+        "enabled": true,
+        "max_value": 1,
+        "min_value": 0.59999999999999998,
+        "path": "phases[5].throttle_model.c0"
+      },
+      {
+        "enabled": true,
+        "max_value": 1,
+        "min_value": 0.59999999999999998,
+        "path": "phases[6].throttle_model.c0"
+      }
+    ]
+  },
+  "phases": [
+    {
+      "actions": [
+        {
+          "stage_index": -1,
+          "stage_name": "",
+          "time_s": 3,
+          "type": "set_hold_down_clamp_active",
+          "value": false
+        }
+      ],
+      "duration_s": 3,
+      "force_models": {
+        "aero_model": {
+          "type": "none"
+        },
+        "aerodynamic": true,
+        "atmosphere_model": {
+          "type": "exponential"
+        },
+        "gravity": true,
+        "gravity_model": {
+          "degree": 0,
+          "j2": 0.00108262668,
+          "order": 0,
+          "type": "j2"
+        },
+        "normal_force": true,
+        "solar_radiation_pressure": false,
+        "third_body": false,
+        "thrust": false
+      },
+      "hold_down_clamp_initial_active": true,
+      "inherit_initial_state": false,
+      "integrator": "dopri5",
+      "name": "pad hold",
+      "optimize_enabled": false,
+      "steering_model": {
+        "azimuth": {
+          "c0": 90,
+          "c1": 0,
+          "c2": 0
+        },
+        "elevation": {
+          "c0": 90,
+          "c1": 0,
+          "c2": 0
+        },
+        "fixed_direction_eci": [
+          1,
+          0,
+          0
+        ],
+        "pitch": {
+          "c0": 0,
+          "c1": 0,
+          "c2": 0
+        },
+        "points": [],
+        "roll": {
+          "c0": 0,
+          "c1": 0,
+          "c2": 0
+        },
+        "segments": [],
+        "type": "generic_poly",
+        "yaw": {
+          "c0": 0,
+          "c1": 0,
+          "c2": 0
+        }
+      },
+      "throttle_model": {
+        "c0": 0,
+        "c1": 0,
+        "c2": 0,
+        "points": [],
+        "target_t2w": 1,
+        "type": "poly"
+      },
+      "tolerances": {
+        "atol_position_m": 0.001,
+        "atol_tank_mass_kg": 0.001,
+        "atol_velocity_mps": 9.9999999999999995e-07,
+        "rtol": 1e-08
+      }
+    },
+    {
+      "actions": [
+        {
+          "stage_index": -1,
+          "stage_name": "",
+          "time_s": 0,
+          "type": "set_engine_enabled",
+          "value": true
+        }
+      ],
+      "duration_s": 49.051452774674232,
+      "force_models": {
+        "aero_model": {
+          "type": "none"
+        },
+        "aerodynamic": true,
+        "atmosphere_model": {
+          "type": "exponential"
+        },
+        "gravity": true,
+        "gravity_model": {
+          "degree": 0,
+          "j2": 0.00108262668,
+          "order": 0,
+          "type": "j2"
+        },
+        "normal_force": true,
+        "solar_radiation_pressure": false,
+        "third_body": false,
+        "thrust": true
+      },
+      "hold_down_clamp_initial_active": false,
+      "inherit_initial_state": true,
+      "integrator": "dopri5",
+      "name": "booster ascent 1",
+      "optimize_enabled": true,
+      "steering_model": {
+        "azimuth": {
+          "c0": 90,
+          "c1": 0,
+          "c2": 0
+        },
+        "elevation": {
+          "c0": 86.615874369672483,
+          "c1": -0.56085860220846351,
+          "c2": -5.4848597273057104e-05
+        },
+        "fixed_direction_eci": [
+          1,
+          0,
+          0
+        ],
+        "pitch": {
+          "c0": 0,
+          "c1": 0,
+          "c2": 0
+        },
+        "points": [],
+        "roll": {
+          "c0": 0,
+          "c1": 0,
+          "c2": 0
+        },
+        "segments": [],
+        "type": "generic_poly",
+        "yaw": {
+          "c0": 0,
+          "c1": 0,
+          "c2": 0
+        }
+      },
+      "throttle_model": {
+        "c0": 0.99360957693779062,
+        "c1": 0,
+        "c2": 0,
+        "points": [],
+        "target_t2w": 1,
+        "type": "poly"
+      },
+      "tolerances": {
+        "atol_position_m": 0.001,
+        "atol_tank_mass_kg": 0.001,
+        "atol_velocity_mps": 9.9999999999999995e-07,
+        "rtol": 1e-08
+      }
+    },
+    {
+      "actions": [],
+      "duration_s": 48.118432543356207,
+      "force_models": {
+        "aero_model": {
+          "type": "none"
+        },
+        "aerodynamic": true,
+        "atmosphere_model": {
+          "type": "exponential"
+        },
+        "gravity": true,
+        "gravity_model": {
+          "degree": 0,
+          "j2": 0.00108262668,
+          "order": 0,
+          "type": "j2"
+        },
+        "normal_force": true,
+        "solar_radiation_pressure": false,
+        "third_body": false,
+        "thrust": true
+      },
+      "hold_down_clamp_initial_active": false,
+      "inherit_initial_state": true,
+      "integrator": "dopri5",
+      "name": "booster ascent 2",
+      "optimize_enabled": true,
+      "steering_model": {
+        "azimuth": {
+          "c0": 90,
+          "c1": 0,
+          "c2": 0
+        },
+        "elevation": {
+          "c0": 61.6150842579056,
+          "c1": -0.50139517381731269,
+          "c2": 6.0919979443701047e-07
+        },
+        "fixed_direction_eci": [
+          1,
+          0,
+          0
+        ],
+        "pitch": {
+          "c0": 0,
+          "c1": 0,
+          "c2": 0
+        },
+        "points": [],
+        "roll": {
+          "c0": 0,
+          "c1": 0,
+          "c2": 0
+        },
+        "segments": [],
+        "type": "generic_poly",
+        "yaw": {
+          "c0": 0,
+          "c1": 0,
+          "c2": 0
+        }
+      },
+      "throttle_model": {
+        "c0": 0.99390458022981887,
+        "c1": 0,
+        "c2": 0,
+        "points": [],
+        "target_t2w": 1,
+        "type": "poly"
+      },
+      "tolerances": {
+        "atol_position_m": 0.001,
+        "atol_tank_mass_kg": 0.001,
+        "atol_velocity_mps": 9.9999999999999995e-07,
+        "rtol": 1e-08
+      }
+    },
+    {
+      "actions": [],
+      "duration_s": 47.779039240556088,
+      "force_models": {
+        "aero_model": {
+          "type": "none"
+        },
+        "aerodynamic": true,
+        "atmosphere_model": {
+          "type": "exponential"
+        },
+        "gravity": true,
+        "gravity_model": {
+          "degree": 0,
+          "j2": 0.00108262668,
+          "order": 0,
+          "type": "j2"
+        },
+        "normal_force": true,
+        "solar_radiation_pressure": false,
+        "third_body": false,
+        "thrust": true
+      },
+      "hold_down_clamp_initial_active": false,
+      "inherit_initial_state": true,
+      "integrator": "dopri5",
+      "name": "booster ascent 3",
+      "optimize_enabled": true,
+      "steering_model": {
+        "azimuth": {
+          "c0": 90,
+          "c1": 0,
+          "c2": 0
+        },
+        "elevation": {
+          "c0": 45.303601639978659,
+          "c1": -0.4154953756799904,
+          "c2": 7.526622861297582e-05
+        },
+        "fixed_direction_eci": [
+          1,
+          0,
+          0
+        ],
+        "pitch": {
+          "c0": 0,
+          "c1": 0,
+          "c2": 0
+        },
+        "points": [],
+        "roll": {
+          "c0": 0,
+          "c1": 0,
+          "c2": 0
+        },
+        "segments": [],
+        "type": "generic_poly",
+        "yaw": {
+          "c0": 0,
+          "c1": 0,
+          "c2": 0
+        }
+      },
+      "throttle_model": {
+        "c0": 0.99422667248733843,
+        "c1": 0,
+        "c2": 0,
+        "points": [],
+        "target_t2w": 1,
+        "type": "poly"
+      },
+      "tolerances": {
+        "atol_position_m": 0.001,
+        "atol_tank_mass_kg": 0.001,
+        "atol_velocity_mps": 9.9999999999999995e-07,
+        "rtol": 1e-08
+      }
+    },
+    {
+      "actions": [
+        {
+          "stage_index": -1,
+          "stage_name": "",
+          "time_s": 0,
+          "type": "set_engine_enabled",
+          "value": true
+        },
+        {
+          "stage_index": 0,
+          "stage_name": "booster",
+          "time_s": 0,
+          "type": "set_stage_active",
+          "value": false
+        },
+        {
+          "stage_index": 0,
+          "stage_name": "booster",
+          "time_s": 0,
+          "type": "set_stage_attached",
+          "value": false
+        },
+        {
+          "stage_index": 1,
+          "stage_name": "second stage",
+          "time_s": 0,
+          "type": "set_stage_active",
+          "value": true
+        }
+      ],
+      "duration_s": 104.20706660041409,
+      "force_models": {
+        "aero_model": {
+          "type": "none"
+        },
+        "aerodynamic": true,
+        "atmosphere_model": {
+          "type": "exponential"
+        },
+        "gravity": true,
+        "gravity_model": {
+          "degree": 0,
+          "j2": 0.00108262668,
+          "order": 0,
+          "type": "j2"
+        },
+        "normal_force": true,
+        "solar_radiation_pressure": false,
+        "third_body": false,
+        "thrust": true
+      },
+      "hold_down_clamp_initial_active": false,
+      "inherit_initial_state": true,
+      "integrator": "dopri5",
+      "name": "second-stage insertion 1",
+      "optimize_enabled": true,
+      "steering_model": {
+        "azimuth": {
+          "c0": 90,
+          "c1": 0,
+          "c2": 0
+        },
+        "elevation": {
+          "c0": 21.770309211082498,
+          "c1": -0.058101098434418574,
+          "c2": 1.2798933784598644e-05
+        },
+        "fixed_direction_eci": [
+          1,
+          0,
+          0
+        ],
+        "pitch": {
+          "c0": 0,
+          "c1": 0,
+          "c2": 0
+        },
+        "points": [],
+        "roll": {
+          "c0": 0,
+          "c1": 0,
+          "c2": 0
+        },
+        "segments": [],
+        "type": "generic_poly",
+        "yaw": {
+          "c0": 0,
+          "c1": 0,
+          "c2": 0
+        }
+      },
+      "throttle_model": {
+        "c0": 1,
+        "c1": 0,
+        "c2": 0,
+        "points": [],
+        "target_t2w": 1,
+        "type": "poly"
+      },
+      "tolerances": {
+        "atol_position_m": 0.001,
+        "atol_tank_mass_kg": 0.001,
+        "atol_velocity_mps": 9.9999999999999995e-07,
+        "rtol": 1e-08
+      }
+    },
+    {
+      "actions": [],
+      "duration_s": 103.10905276819643,
+      "force_models": {
+        "aero_model": {
+          "type": "none"
+        },
+        "aerodynamic": true,
+        "atmosphere_model": {
+          "type": "exponential"
+        },
+        "gravity": true,
+        "gravity_model": {
+          "degree": 0,
+          "j2": 0.00108262668,
+          "order": 0,
+          "type": "j2"
+        },
+        "normal_force": true,
+        "solar_radiation_pressure": false,
+        "third_body": false,
+        "thrust": true
+      },
+      "hold_down_clamp_initial_active": false,
+      "inherit_initial_state": true,
+      "integrator": "dopri5",
+      "name": "second-stage insertion 2",
+      "optimize_enabled": true,
+      "steering_model": {
+        "azimuth": {
+          "c0": 90,
+          "c1": 0,
+          "c2": 0
+        },
+        "elevation": {
+          "c0": 13.647368343053701,
+          "c1": -0.05938711383242691,
+          "c2": 1.0168261910105543e-05
+        },
+        "fixed_direction_eci": [
+          1,
+          0,
+          0
+        ],
+        "pitch": {
+          "c0": 0,
+          "c1": 0,
+          "c2": 0
+        },
+        "points": [],
+        "roll": {
+          "c0": 0,
+          "c1": 0,
+          "c2": 0
+        },
+        "segments": [],
+        "type": "generic_poly",
+        "yaw": {
+          "c0": 0,
+          "c1": 0,
+          "c2": 0
+        }
+      },
+      "throttle_model": {
+        "c0": 1,
+        "c1": 0,
+        "c2": 0,
+        "points": [],
+        "target_t2w": 1,
+        "type": "poly"
+      },
+      "tolerances": {
+        "atol_position_m": 0.001,
+        "atol_tank_mass_kg": 0.001,
+        "atol_velocity_mps": 9.9999999999999995e-07,
+        "rtol": 1e-08
+      }
+    },
+    {
+      "actions": [],
+      "duration_s": 122.2610055501863,
+      "force_models": {
+        "aero_model": {
+          "type": "none"
+        },
+        "aerodynamic": true,
+        "atmosphere_model": {
+          "type": "exponential"
+        },
+        "gravity": true,
+        "gravity_model": {
+          "degree": 0,
+          "j2": 0.00108262668,
+          "order": 0,
+          "type": "j2"
+        },
+        "normal_force": true,
+        "solar_radiation_pressure": false,
+        "third_body": false,
+        "thrust": true
+      },
+      "hold_down_clamp_initial_active": false,
+      "inherit_initial_state": true,
+      "integrator": "dopri5",
+      "name": "second-stage insertion 3",
+      "optimize_enabled": true,
+      "steering_model": {
+        "azimuth": {
+          "c0": 90,
+          "c1": 0,
+          "c2": 0
+        },
+        "elevation": {
+          "c0": 7.0316411423789518,
+          "c1": -0.057004028492878285,
+          "c2": 2.7848210530730783e-05
+        },
+        "fixed_direction_eci": [
+          1,
+          0,
+          0
+        ],
+        "pitch": {
+          "c0": 0,
+          "c1": 0,
+          "c2": 0
+        },
+        "points": [],
+        "roll": {
+          "c0": 0,
+          "c1": 0,
+          "c2": 0
+        },
+        "segments": [],
+        "type": "generic_poly",
+        "yaw": {
+          "c0": 0,
+          "c1": 0,
+          "c2": 0
+        }
+      },
+      "throttle_model": {
+        "c0": 1,
+        "c1": 0,
+        "c2": 0,
+        "points": [],
+        "target_t2w": 1,
+        "type": "poly"
+      },
+      "tolerances": {
+        "atol_position_m": 0.001,
+        "atol_tank_mass_kg": 0.001,
+        "atol_velocity_mps": 9.9999999999999995e-07,
+        "rtol": 1e-08
+      }
+    },
+    {
+      "actions": [],
+      "duration_s": 2654.8216826489947,
+      "force_models": {
+        "aero_model": {
+          "type": "none"
+        },
+        "aerodynamic": true,
+        "atmosphere_model": {
+          "type": "exponential"
+        },
+        "gravity": true,
+        "gravity_model": {
+          "degree": 0,
+          "j2": 0.00108262668,
+          "order": 0,
+          "type": "j2"
+        },
+        "normal_force": false,
+        "solar_radiation_pressure": false,
+        "third_body": false,
+        "thrust": false
+      },
+      "hold_down_clamp_initial_active": false,
+      "inherit_initial_state": true,
+      "integrator": "dopri5",
+      "name": "orbital coast half orbit",
+      "optimize_enabled": false,
+      "steering_model": {
+        "azimuth": {
+          "c0": 90,
+          "c1": 0,
+          "c2": 0
+        },
+        "elevation": {
+          "c0": 0,
+          "c1": 0,
+          "c2": 0
+        },
+        "fixed_direction_eci": [
+          1,
+          0,
+          0
+        ],
+        "pitch": {
+          "c0": 0,
+          "c1": 0,
+          "c2": 0
+        },
+        "points": [],
+        "roll": {
+          "c0": 0,
+          "c1": 0,
+          "c2": 0
+        },
+        "segments": [],
+        "type": "generic_poly",
+        "yaw": {
+          "c0": 0,
+          "c1": 0,
+          "c2": 0
+        }
+      },
+      "throttle_model": {
+        "c0": 0,
+        "c1": 0,
+        "c2": 0,
+        "points": [],
+        "target_t2w": 1,
+        "type": "poly"
+      },
+      "tolerances": {
+        "atol_position_m": 0.001,
+        "atol_tank_mass_kg": 0.001,
+        "atol_velocity_mps": 9.9999999999999995e-07,
+        "rtol": 1e-08
+      }
+    }
+  ],
+  "step_s": 1,
+  "vehicle": {
+    "aero": {
+      "aero_table_path": "",
+      "cd": 0.5,
+      "cl": 0,
+      "enabled": true,
+      "reference_area_m2": 10.5
+    },
+    "dry_mass_kg": 16226.195623,
+    "engine": {
+      "direction_body": [
+        1,
+        0,
+        0
+      ],
+      "enabled": true,
+      "engine_count": 1,
+      "feed_tanks": [
+        {
+          "stage": "booster",
+          "tank": "main"
+        }
+      ],
+      "gimbal_max_rad": 0,
+      "gimbal_rate_rad_s": 0,
+      "ignition_delay_s": 0,
+      "isp_sl_s": 283.00000317684413,
+      "isp_vac_s": 312.00000508295057,
+      "max_throttle": 1,
+      "min_throttle": 0,
+      "nozzle_exit_area_m2": 0,
+      "shutdown_delay_s": 0,
+      "throttle_curve": [],
+      "thrust_buildup_s": 0,
+      "thrust_sl_n": 7645979.5532226562,
+      "thrust_vac_n": 8429489.8681640625
+    },
+    "name": "PMBT-SpaceX Falcon 9 v1.2 Block-5",
+    "stages": [
+      {
+        "active": true,
+        "attached": true,
+        "dry_mass_kg": 9768.2196627138183,
+        "engine": {
+          "direction_body": [
+            1,
+            0,
+            0
+          ],
+          "enabled": true,
+          "engine_count": 1,
+          "feed_tanks": [
+            {
+              "stage": "booster",
+              "tank": "main"
+            }
+          ],
+          "gimbal_max_rad": 0,
+          "gimbal_rate_rad_s": 0,
+          "ignition_delay_s": 0,
+          "isp_sl_s": 283.00000317684413,
+          "isp_vac_s": 312.00000508295057,
+          "max_throttle": 1,
+          "min_throttle": 0,
+          "nozzle_exit_area_m2": 0,
+          "shutdown_delay_s": 0,
+          "throttle_curve": [],
+          "thrust_buildup_s": 0,
+          "thrust_sl_n": 7645979.5532226562,
+          "thrust_vac_n": 8429489.8681640625
+        },
+        "name": "booster",
+        "tanks": [
+          {
+            "capacity_kg": 407310.22164199484,
+            "initial_kg": 407246.22164361161,
+            "name": "main",
+            "propellant": "KSP resources"
+          }
+        ]
+      },
+      {
+        "active": false,
+        "attached": true,
+        "dry_mass_kg": 5510.3397574275732,
+        "engine": {
+          "direction_body": [
+            1,
+            0,
+            0
+          ],
+          "enabled": true,
+          "engine_count": 1,
+          "feed_tanks": [
+            {
+              "stage": "upper_stack",
+              "tank": "main"
+            }
+          ],
+          "gimbal_max_rad": 0,
+          "gimbal_rate_rad_s": 0,
+          "ignition_delay_s": 0,
+          "isp_sl_s": 250.00000104900954,
+          "isp_vac_s": 348.00001433646514,
+          "max_throttle": 1,
+          "min_throttle": 0,
+          "nozzle_exit_area_m2": 0,
+          "shutdown_delay_s": 0,
+          "throttle_curve": [],
+          "thrust_buildup_s": 0,
+          "thrust_sl_n": 681839.111328125,
+          "thrust_vac_n": 949119.9951171875
+        },
+        "name": "upper_stack",
+        "tanks": [
+          {
+            "capacity_kg": 92668.40254944982,
+            "initial_kg": 92668.40254944982,
+            "name": "main",
+            "propellant": "KSP resources"
+          }
+        ]
+      },
+      {
+        "active": false,
+        "attached": true,
+        "dry_mass_kg": 947.63620300000002,
+        "engine": {
+          "direction_body": [
+            1,
+            0,
+            0
+          ],
+          "enabled": false,
+          "engine_count": 1,
+          "feed_tanks": [],
+          "gimbal_max_rad": 0,
+          "gimbal_rate_rad_s": 0,
+          "ignition_delay_s": 0,
+          "isp_sl_s": 0,
+          "isp_vac_s": 0,
+          "max_throttle": 1,
+          "min_throttle": 0,
+          "nozzle_exit_area_m2": 0,
+          "shutdown_delay_s": 0,
+          "throttle_curve": [],
+          "thrust_buildup_s": 0,
+          "thrust_sl_n": 0,
+          "thrust_vac_n": 0
+        },
+        "name": "payload",
+        "tanks": [
+          {
+            "capacity_kg": 0,
+            "initial_kg": 0,
+            "name": "main",
+            "propellant": "generic"
+          }
+        ]
+      }
+    ],
+    "tank_to_tank_connections": [],
+    "tanks": [
+      {
+        "capacity_kg": 407310.22164199484,
+        "initial_kg": 407246.22164361161,
+        "name": "main",
+        "propellant": "KSP resources"
+      }
+    ]
+  }
+}

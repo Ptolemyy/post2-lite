@@ -12,6 +12,8 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <cstdlib>
+#include <filesystem>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -39,6 +41,8 @@ constexpr int kMenuExportSvg = 1003;
 constexpr int kMenuExit = 1004;
 constexpr int kMenuCaseLoad = 1005;
 constexpr int kMenuCaseSave = 1006;
+constexpr int kMenuCaseSaveAs = 1007;
+constexpr int kMenuExportKosCsv = 1008;
 constexpr int kMenuModeLocal = 1101;
 constexpr int kMenuModeRemote = 1102;
 constexpr int kMenuRemoteEndpoint = 1103;
@@ -177,6 +181,7 @@ SimulationResult g_result;
 std::string g_status;
 std::string g_remote_host = "127.0.0.1";
 int g_remote_port = 5050;
+std::string g_case_path;
 post2::gui::Camera3D g_camera;
 post2::gui::OpenGLSceneRenderer g_scene_renderer;
 HWND g_scene_hwnd = nullptr;
@@ -880,27 +885,26 @@ void populate_charts()
     }
 
     ChartSeries profile_s, q_s, throttle_s, speed_s, mass_s;
-    profile_s.x.reserve(profile_end - profile_start + 1);
-    profile_s.y.reserve(profile_end - profile_start + 1);
-    q_s.x.reserve(entries.size());
-    q_s.y.reserve(entries.size());
-    throttle_s.x.reserve(entries.size());
-    throttle_s.y.reserve(entries.size());
-    speed_s.x.reserve(entries.size());
-    speed_s.y.reserve(entries.size());
-    mass_s.x.reserve(entries.size());
-    mass_s.y.reserve(entries.size());
+    const std::size_t powered_count = profile_end - profile_start + 1;
+    profile_s.x.reserve(powered_count);
+    profile_s.y.reserve(powered_count);
+    q_s.x.reserve(powered_count);
+    q_s.y.reserve(powered_count);
+    throttle_s.x.reserve(powered_count);
+    throttle_s.y.reserve(powered_count);
+    speed_s.x.reserve(powered_count);
+    speed_s.y.reserve(powered_count);
+    mass_s.x.reserve(powered_count);
+    mass_s.y.reserve(powered_count);
 
-    for (std::size_t i = 0; i < entries.size(); ++i) {
+    for (std::size_t i = profile_start; i <= profile_end; ++i) {
         const auto& entry = entries[i];
-        if (i >= profile_start && i <= profile_end) {
-            const post2::core::frames::Geodetic geo =
-                post2::core::frames::ecef_to_geodetic(entry.state.position_m);
-            const double downrange_m = great_circle_arc_m(
-                launch_lat, launch_lon, geo.latitude_rad, geo.longitude_rad);
-            profile_s.x.push_back(downrange_m / 1000.0);
-            profile_s.y.push_back(entry.altitude_m / 1000.0);
-        }
+        const post2::core::frames::Geodetic geo =
+            post2::core::frames::ecef_to_geodetic(entry.state.position_m);
+        const double downrange_m = great_circle_arc_m(
+            launch_lat, launch_lon, geo.latitude_rad, geo.longitude_rad);
+        profile_s.x.push_back(downrange_m / 1000.0);
+        profile_s.y.push_back(entry.altitude_m / 1000.0);
         q_s.x.push_back(entry.time_s);
         q_s.y.push_back(entry.dynamic_pressure_pa / 1000.0);
         throttle_s.x.push_back(entry.time_s);
@@ -2325,6 +2329,7 @@ void load_case_config(HWND hwnd)
     }
 
     g_case = std::move(config);
+    g_case_path = path;
     g_case_initialized = true;
     sync_legacy_from_case();
     refresh_phase_list();
@@ -2333,6 +2338,26 @@ void load_case_config(HWND hwnd)
 }
 
 void save_case_config(HWND hwnd)
+{
+    ensure_case_initialized();
+    std::string path = g_case_path;
+    if (g_case_path.empty()) {
+        if (!choose_case_config_file(hwnd, true, &path)) {
+            return;
+        }
+    }
+
+    std::string error;
+    if (!post2::core::save_case_config_file(path, g_case, &error)) {
+        MessageBoxW(hwnd, widen(error).c_str(), L"Case save failed", MB_ICONERROR);
+        return;
+    }
+
+    g_case_path = path;
+    MessageBoxW(hwnd, widen("Wrote " + path).c_str(), L"POST2 Lite", MB_ICONINFORMATION);
+}
+
+void save_case_config_as(HWND hwnd)
 {
     ensure_case_initialized();
     std::string path;
@@ -2346,6 +2371,7 @@ void save_case_config(HWND hwnd)
         return;
     }
 
+    g_case_path = path;
     MessageBoxW(hwnd, widen("Wrote " + path).c_str(), L"POST2 Lite", MB_ICONINFORMATION);
 }
 
@@ -4564,7 +4590,6 @@ HMENU create_main_menu()
     HMENU mode_menu = CreatePopupMenu();
     HMENU run_menu = CreatePopupMenu();
     HMENU optimize_menu = CreatePopupMenu();
-    HMENU case_menu = CreatePopupMenu();
     HMENU launch_menu = CreatePopupMenu();
     HMENU vehicle_menu = CreatePopupMenu();
 
@@ -4572,8 +4597,10 @@ HMENU create_main_menu()
     AppendMenuW(file_menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(file_menu, MF_STRING, kMenuCaseLoad, L"Load case...");
     AppendMenuW(file_menu, MF_STRING, kMenuCaseSave, L"Save case...");
+    AppendMenuW(file_menu, MF_STRING, kMenuCaseSaveAs, L"Save case as...");
     AppendMenuW(file_menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(file_menu, MF_STRING, kMenuExportCsv, L"Export CSV");
+    AppendMenuW(file_menu, MF_STRING, kMenuExportKosCsv, L"Export kOS trajectory CSV");
     AppendMenuW(file_menu, MF_STRING, kMenuExportSvg, L"Export SVG");
     AppendMenuW(file_menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(file_menu, MF_STRING, kMenuExit, L"Exit");
@@ -4588,8 +4615,6 @@ HMENU create_main_menu()
     AppendMenuW(optimize_menu, MF_STRING, kMenuOptimizationSettings, L"Settings...");
     AppendMenuW(optimize_menu, MF_STRING, kMenuOptimizationExecute, L"Execute optimize");
 
-    AppendMenuW(case_menu, MF_STRING, kMenuCasePhases, L"Phases...");
-
     AppendMenuW(launch_menu, MF_STRING, kMenuLaunchSettings, L"Launch site...");
 
     AppendMenuW(vehicle_menu, MF_STRING, kMenuVehicleEdit, L"Edit vehicle...");
@@ -4599,7 +4624,6 @@ HMENU create_main_menu()
     AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(mode_menu), L"Mode");
     AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(run_menu), L"Run");
     AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(optimize_menu), L"Optimize");
-    AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(case_menu), L"Case");
     AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(launch_menu), L"Launch");
     AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(vehicle_menu), L"Vehicle");
     return menu;
@@ -4624,6 +4648,135 @@ void export_current(HWND hwnd, bool svg)
     }
 
     MessageBoxW(hwnd, widen("Wrote " + path).c_str(), L"POST2 Lite", MB_ICONINFORMATION);
+}
+
+std::filesystem::path default_kos_archive_trajectory_path()
+{
+    const char* env_dir = std::getenv("POST2_KOS_ARCHIVE_DIR");
+    if (env_dir && env_dir[0] != '\0') {
+        return std::filesystem::path(env_dir) / "post2-lite" / "gui_trajectory.csv";
+    }
+
+    const std::filesystem::path steam_x86 =
+        "C:/Program Files (x86)/Steam/steamapps/common/Kerbal Space Program/Ships/Script";
+    if (std::filesystem::exists(steam_x86)) {
+        return steam_x86 / "post2-lite" / "gui_trajectory.csv";
+    }
+
+    const std::filesystem::path steam =
+        "C:/Program Files/Steam/steamapps/common/Kerbal Space Program/Ships/Script";
+    if (std::filesystem::exists(steam)) {
+        return steam / "post2-lite" / "gui_trajectory.csv";
+    }
+
+    return std::filesystem::path("post2-lite") / "gui_trajectory.csv";
+}
+
+std::filesystem::path executable_directory()
+{
+    std::array<wchar_t, MAX_PATH> buffer = {};
+    const DWORD length = GetModuleFileNameW(nullptr, buffer.data(), static_cast<DWORD>(buffer.size()));
+    if (length == 0 || length >= buffer.size()) {
+        return std::filesystem::current_path();
+    }
+    return std::filesystem::path(buffer.data()).parent_path();
+}
+
+std::optional<std::filesystem::path> find_kos_player_script()
+{
+    const std::filesystem::path exe_dir = executable_directory();
+    const std::filesystem::path cwd = std::filesystem::current_path();
+    const std::array<std::filesystem::path, 6> candidates = {
+        cwd / "scripts" / "post2_fly_openloop.ks",
+        cwd.parent_path() / "scripts" / "post2_fly_openloop.ks",
+        cwd.parent_path().parent_path() / "scripts" / "post2_fly_openloop.ks",
+        exe_dir / "scripts" / "post2_fly_openloop.ks",
+        exe_dir.parent_path() / "scripts" / "post2_fly_openloop.ks",
+        exe_dir.parent_path().parent_path() / "scripts" / "post2_fly_openloop.ks",
+    };
+
+    for (const auto& candidate : candidates) {
+        std::error_code error;
+        if (std::filesystem::exists(candidate, error) && !error) {
+            return candidate;
+        }
+    }
+    return std::nullopt;
+}
+
+std::string copy_kos_player_script_to_archive(const std::filesystem::path& trajectory_path)
+{
+    const auto source = find_kos_player_script();
+    if (!source) {
+        return "kOS player script was not found next to the repo/build; CSV only.";
+    }
+
+    std::vector<std::filesystem::path> destinations = {
+        trajectory_path.parent_path() / "post2_fly_openloop.ks",
+    };
+    if (trajectory_path.parent_path().filename() == "post2-lite") {
+        destinations.push_back(trajectory_path.parent_path().parent_path() / "post2_fly_openloop.ks");
+    }
+
+    std::string copied;
+    for (const auto& destination : destinations) {
+        std::error_code error;
+        std::filesystem::create_directories(destination.parent_path(), error);
+        if (error) {
+            return "Failed to create kOS script directory: " + error.message();
+        }
+
+        std::filesystem::copy_file(
+            *source,
+            destination,
+            std::filesystem::copy_options::overwrite_existing,
+            error);
+        if (error) {
+            return "Failed to copy kOS script: " + error.message();
+        }
+
+        copied += "\n" + destination.string();
+    }
+
+    return "Copied kOS player script:" + copied;
+}
+
+void export_kos_trajectory(HWND hwnd)
+{
+    if (!g_result.ok || g_result.state_log.empty()) {
+        MessageBoxW(hwnd, L"No StateLog is available to export.", L"POST2 Lite", MB_ICONWARNING);
+        return;
+    }
+
+    const std::filesystem::path path = default_kos_archive_trajectory_path();
+    std::error_code fs_error;
+    std::filesystem::create_directories(path.parent_path(), fs_error);
+    if (fs_error) {
+        MessageBoxW(
+            hwnd,
+            widen("Failed to create kOS archive directory: " + fs_error.message()).c_str(),
+            L"Export failed",
+            MB_ICONERROR);
+        return;
+    }
+
+    std::string error;
+    const std::string path_text = path.string();
+    if (!post2::core::write_csv_file(path_text, g_result.state_log, &error)) {
+        MessageBoxW(hwnd, widen(error).c_str(), L"Export failed", MB_ICONERROR);
+        return;
+    }
+
+    const std::string script_message = copy_kos_player_script_to_archive(path);
+
+    MessageBoxW(
+        hwnd,
+        widen(
+            "Wrote kOS trajectory CSV:\n" + path_text +
+            "\n\n" + script_message +
+            "\n\nIn kOS, run:\nrunpath(\"archive:/post2-lite/post2_fly_openloop.ks\").").c_str(),
+        L"POST2 Lite",
+        MB_ICONINFORMATION);
 }
 
 LRESULT CALLBACK scene_window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam)
@@ -4874,6 +5027,9 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
             case kMenuExportCsv:
                 export_current(hwnd, false);
                 return 0;
+            case kMenuExportKosCsv:
+                export_kos_trajectory(hwnd);
+                return 0;
             case kMenuExportSvg:
                 export_current(hwnd, true);
                 return 0;
@@ -4916,6 +5072,9 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
         case kMenuExportCsv:
             export_current(hwnd, false);
             return 0;
+        case kMenuExportKosCsv:
+            export_kos_trajectory(hwnd);
+            return 0;
         case kMenuExportSvg:
             export_current(hwnd, true);
             return 0;
@@ -4924,6 +5083,9 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
             return 0;
         case kMenuCaseSave:
             save_case_config(hwnd);
+            return 0;
+        case kMenuCaseSaveAs:
+            save_case_config_as(hwnd);
             return 0;
         case kMenuModeLocal:
             g_mode = CoreMode::Local;
