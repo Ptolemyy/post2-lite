@@ -233,18 +233,26 @@ double objective_value(
     const StateLog& state_log,
     const CaseConfig& config)
 {
-    if (problem.optimization.mode != "optimize" || !problem.objective.enabled) {
+    if (problem.optimization.mode != "optimize" || problem.objectives.empty()) {
         return 0.0;
     }
-    double metric = 0.0;
-    if (!evaluate_trajectory_metric(state_log, config, problem.objective.metric, &metric)) {
-        return 0.0;
+    double total = 0.0;
+    for (const auto& objective : problem.objectives) {
+        if (!objective.enabled || objective.weight <= 0.0) {
+            continue;
+        }
+        double metric = 0.0;
+        if (!evaluate_trajectory_metric(state_log, config, objective.metric, &metric)) {
+            continue;
+        }
+        const double scaled = metric / nlp_default_metric_scale(objective.metric);
+        if (objective.direction == NlpObjectiveDirection::Maximize) {
+            total -= objective.weight * scaled;
+        } else {
+            total += objective.weight * scaled;
+        }
     }
-    const double scaled = metric / nlp_default_metric_scale(problem.objective.metric);
-    if (problem.objective.direction == NlpObjectiveDirection::Maximize) {
-        return -problem.objective.weight * scaled;
-    }
-    return problem.objective.weight * scaled;
+    return total;
 }
 
 void append_constraint_eval(

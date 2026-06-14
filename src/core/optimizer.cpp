@@ -313,9 +313,23 @@ bool resolve_path(CaseConfig* config, const std::string& path, ResolvedPath* tar
     PhaseConfig& phase = config->phases[phase_index];
     target->phase_index = static_cast<int>(phase_index);
 
+    // Legacy alias: old case JSON references "phases[i].duration_s" — now
+    // resolves to termination.value when termination is time-based.
     if (text == "duration_s") {
-        target->value = &phase.duration_s;
+        if (phase.termination.type != "time") {
+            return fail(error, "duration_s variable path requires time-based termination: " + path);
+        }
+        target->value = &phase.termination.value;
         return true;
+    }
+
+    working = text;
+    if (consume_identifier(&working, "termination") && consume_dot(&working)) {
+        if (working == "value") {
+            target->value = &phase.termination.value;
+            return true;
+        }
+        return fail(error, "unsupported termination variable path: " + path);
     }
 
     std::size_t action_index = 0;
@@ -1879,7 +1893,16 @@ bool validate_optimization_config(const OptimizationConfig& optimization, std::s
     if (optimization.mode != "target" && optimization.mode != "optimize") {
         return fail(error, "unsupported optimization mode: " + optimization.mode);
     }
-    if (optimization.targets.empty() && !optimization.objective.enabled) {
+    const auto effective_objectives = optimization.objectives.empty()
+        ? std::vector<OptimizationObjectiveConfig>{optimization.objective}
+        : optimization.objectives;
+    const bool has_enabled_objective = std::any_of(
+        effective_objectives.begin(),
+        effective_objectives.end(),
+        [](const OptimizationObjectiveConfig& objective) {
+            return objective.enabled && objective.weight > 0.0;
+        });
+    if (optimization.targets.empty() && !has_enabled_objective) {
         return fail(error, "optimization requires at least one target or an enabled objective");
     }
     if (optimization.mode == "target" && optimization.targets.empty()) {
@@ -1902,6 +1925,14 @@ bool validate_optimization_config(const OptimizationConfig& optimization, std::s
         }
         if (optimization.targets.empty()) {
             return fail(error, "continuation requires at least one target");
+        }
+    }
+    if (optimization.envelope_search.enabled) {
+        if (optimization.continuation.enabled) {
+            return fail(error, "envelope search cannot be combined with continuation");
+        }
+        if (optimization.envelope_search.sample_count <= 0) {
+            return fail(error, "envelope search sample count must be positive");
         }
     }
     return true;
@@ -1967,6 +1998,29 @@ bool has_enabled_variables(const OptimizationConfig& optimization)
         });
 }
 
+std::vector<double> initial_z_for_problem(
+    const NlpProblem& problem,
+    const OptimizerOptions& options)
+{
+    if (options.initial_z.size() == problem.variables.size()) {
+        std::vector<double> z = options.initial_z;
+        for (double& value : z) {
+            value = clamp(value, -1.0, 1.0);
+        }
+        return z;
+    }
+    return make_initial_nlp_point(problem).z;
+}
+
+std::vector<OptimizationObjectiveConfig> effective_objective_configs(
+    const OptimizationConfig& optimization)
+{
+    if (!optimization.objectives.empty()) {
+        return optimization.objectives;
+    }
+    return {optimization.objective};
+}
+
 OptimizationConfig target_only_continuation_config(
     const OptimizationConfig& optimization,
     const std::string& fixed_variable_path)
@@ -1974,6 +2028,8 @@ OptimizationConfig target_only_continuation_config(
     OptimizationConfig target_only = optimization;
     target_only.mode = "target";
     target_only.objective.enabled = false;
+    target_only.objectives.clear();
+    target_only.envelope_search.enabled = false;
     target_only.continuation.enabled = false;
     target_only.variables.clear();
     for (const auto& variable : optimization.variables) {
@@ -2017,8 +2073,10 @@ void add_requested_metrics(
     for (const auto& target : optimization.targets) {
         add_metric(target.metric);
     }
-    if (optimization.objective.enabled) {
-        add_metric(optimization.objective.metric);
+    for (const auto& objective : effective_objective_configs(optimization)) {
+        if (objective.enabled && objective.weight > 0.0) {
+            add_metric(objective.metric);
+        }
     }
 }
 
@@ -2045,6 +2103,191 @@ void add_variable_changes(
         }
         changes->push_back({variable.path, old_value, new_value});
     }
+}
+
+bool is_prime_int(int value)
+{
+    if (value < 2) {
+        return false;
+    }
+    for (int divisor = 2; divisor * divisor <= value; ++divisor) {
+        if (value % divisor == 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
+int prime_for_dimension(std::size_t dimension)
+{
+    int candidate = 2;
+    std::size_t found = 0;
+    while (true) {
+        if (is_prime_int(candidate)) {
+            if (found == dimension) {
+                return candidate;
+            }
+            ++found;
+        }
+        ++candidate;
+    }
+}
+
+double halton_value(int index, int base)
+{
+    double f = 1.0;
+    double r = 0.0;
+    int i = std::max(1, index);
+    while (i > 0) {
+        f /= static_cast<double>(base);
+        r += f * static_cast<double>(i % base);
+        i /= base;
+    }
+    return r;
+}
+
+bool z_points_equivalent(
+    const std::vector<double>& lhs,
+    const std::vector<double>& rhs)
+{
+    if (lhs.size() != rhs.size()) {
+        return false;
+    }
+    for (std::size_t i = 0; i < lhs.size(); ++i) {
+        if (std::abs(lhs[i] - rhs[i]) > 1.0e-9) {
+            return false;
+        }
+    }
+    return true;
+}
+
+std::vector<std::vector<double>> make_envelope_candidates(
+    const NlpProblem& problem,
+    int sample_count,
+    int seed)
+{
+    const std::size_t n = problem.variables.size();
+    std::vector<std::vector<double>> candidates;
+    if (n == 0 || sample_count <= 0) {
+        return candidates;
+    }
+    candidates.reserve(static_cast<std::size_t>(sample_count));
+
+    auto add_candidate = [&](std::vector<double> z) {
+        if (candidates.size() >= static_cast<std::size_t>(sample_count)) {
+            return;
+        }
+        if (z.size() != n) {
+            return;
+        }
+        for (double& value : z) {
+            value = clamp(value, -1.0, 1.0);
+        }
+        for (const auto& existing : candidates) {
+            if (z_points_equivalent(existing, z)) {
+                return;
+            }
+        }
+        candidates.push_back(std::move(z));
+    };
+
+    add_candidate(make_initial_nlp_point(problem).z);
+    add_candidate(std::vector<double>(n, 0.0));
+    for (std::size_t i = 0; i < n; ++i) {
+        std::vector<double> low(n, 0.0);
+        low[i] = -1.0;
+        add_candidate(std::move(low));
+        std::vector<double> high(n, 0.0);
+        high[i] = 1.0;
+        add_candidate(std::move(high));
+    }
+
+    int halton_index = std::max(1, seed);
+    while (candidates.size() < static_cast<std::size_t>(sample_count)) {
+        std::vector<double> z(n, 0.0);
+        for (std::size_t i = 0; i < n; ++i) {
+            z[i] = 2.0 * halton_value(halton_index, prime_for_dimension(i)) - 1.0;
+        }
+        add_candidate(std::move(z));
+        ++halton_index;
+    }
+    return candidates;
+}
+
+bool envelope_eval_better(
+    const NlpEvalResult& candidate,
+    const NlpEvalResult& best,
+    double feasibility_tolerance)
+{
+    const bool candidate_feasible = candidate.max_violation <= feasibility_tolerance;
+    const bool best_feasible = best.max_violation <= feasibility_tolerance;
+    if (candidate_feasible != best_feasible) {
+        return candidate_feasible;
+    }
+    if (candidate_feasible) {
+        return candidate.objective < best.objective;
+    }
+    if (std::abs(candidate.max_violation - best.max_violation) > 1.0e-12) {
+        return candidate.max_violation < best.max_violation;
+    }
+    if (std::abs(candidate.l1_violation - best.l1_violation) > 1.0e-12) {
+        return candidate.l1_violation < best.l1_violation;
+    }
+    return candidate.objective < best.objective;
+}
+
+bool apply_envelope_initial_z(
+    const NlpProblem& problem,
+    NlpEvaluator& evaluator,
+    OptimizerOptions* options,
+    const OptimizationEnvelopeSearchConfig& envelope,
+    std::vector<std::string>* messages)
+{
+    if (!options || !envelope.enabled || problem.variables.empty()) {
+        return false;
+    }
+    append_limited_message(messages, "envelope: enabled");
+    const std::vector<std::vector<double>> candidates =
+        make_envelope_candidates(problem, envelope.sample_count, envelope.seed);
+    if (candidates.empty()) {
+        append_limited_message(messages, "envelope: no candidates");
+        return false;
+    }
+    {
+        std::ostringstream msg;
+        msg << "envelope: sampled " << candidates.size() << " candidates";
+        append_limited_message(messages, msg.str());
+    }
+
+    const bool parallel = options->finite_difference.parallel;
+    const std::vector<NlpEvalResult> evals =
+        evaluator.evaluate_many(problem, candidates, parallel);
+    int best_index = -1;
+    for (std::size_t i = 0; i < evals.size(); ++i) {
+        if (!evals[i].ok) {
+            continue;
+        }
+        if (best_index < 0 ||
+            envelope_eval_better(
+                evals[i],
+                evals[static_cast<std::size_t>(best_index)],
+                options->constraint_tolerance)) {
+            best_index = static_cast<int>(i);
+        }
+    }
+    if (best_index < 0) {
+        append_limited_message(messages, "envelope: no valid candidate");
+        return false;
+    }
+
+    options->initial_z = candidates[static_cast<std::size_t>(best_index)];
+    const NlpEvalResult& selected = evals[static_cast<std::size_t>(best_index)];
+    std::ostringstream msg;
+    msg << "envelope: selected candidate " << best_index + 1
+        << " objective=" << selected.objective
+        << " max_violation=" << selected.max_violation;
+    append_limited_message(messages, msg.str());
+    return true;
 }
 
 OptimizationResult evaluate_fixed_target_case(
@@ -2475,6 +2718,12 @@ OptimizationResult optimize_case(
     OptimizerOptions optimizer_options =
         optimizer_options_from_config(optimization, options, service);
     NlpEvaluator evaluator(*config, service);
+    apply_envelope_initial_z(
+        problem,
+        evaluator,
+        &optimizer_options,
+        optimization.envelope_search,
+        &result.messages);
     std::unique_ptr<IOptimizer> optimizer = make_optimizer(optimization.optimizer);
     if (!optimizer) {
         result.error = "unsupported optimizer: " + optimization.optimizer;
@@ -2558,8 +2807,7 @@ OptimizerResult AugmentedLagrangianBfgsOptimizer::solve(
     }
 
     const ConstraintSet cs = constraint_set_from_problem(problem);
-    const NlpPoint point = make_initial_nlp_point(problem);
-    const std::vector<double>& z = point.z;
+    const std::vector<double> z = initial_z_for_problem(problem, options);
     const int total_iteration_budget = std::max(1, options.max_iterations);
     const double tol = options.constraint_tolerance > 0.0
         ? options.constraint_tolerance
@@ -2629,10 +2877,10 @@ OptimizerResult DenseSqpOptimizer::solve(
     }
 
     const ConstraintSet cs = constraint_set_from_problem(problem);
-    const NlpPoint point = make_initial_nlp_point(problem);
+    const std::vector<double> z = initial_z_for_problem(problem, options);
     std::unique_ptr<IDenseQpSolver> qp_solver = make_dense_qp_solver(options.qp_solver);
     LocalOptimResult run = run_sqp_nlp(
-        point.z,
+        z,
         problem,
         evaluator,
         cs,

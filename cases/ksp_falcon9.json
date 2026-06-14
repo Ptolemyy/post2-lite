@@ -11,6 +11,40 @@
     "second": 0,
     "year": 2000
   },
+  "events": [
+    {
+      "actions": [
+        {
+          "stage_index": 0,
+          "stage_name": "booster",
+          "time_s": 0,
+          "type": "set_stage_active",
+          "value": false
+        },
+        {
+          "stage_index": 0,
+          "stage_name": "booster",
+          "time_s": 0,
+          "type": "set_stage_attached",
+          "value": false
+        },
+        {
+          "stage_index": 1,
+          "stage_name": "second stage",
+          "time_s": 0,
+          "type": "set_stage_active",
+          "value": true
+        }
+      ],
+      "enabled": true,
+      "name": "booster separation",
+      "trigger": {
+        "comparison": ">=",
+        "type": "time",
+        "value": 134.89699999999999
+      }
+    }
+  ],
   "launch_site": {
     "altitude_m": 144.89578654523939,
     "latitude_deg": 28.60838508605957,
@@ -21,11 +55,16 @@
     "constraint_tolerance": -1,
     "continuation": {
       "direction": "increase",
-      "enabled": true,
+      "enabled": false,
       "multistart_count": 2,
       "multistart_enabled": true,
       "steps": 8,
-      "variable_path": "phases[1].duration_s"
+      "variable_path": "phases[2].termination.value"
+    },
+    "envelope_search": {
+      "enabled": false,
+      "sample_count": 16,
+      "seed": 1
     },
     "fd_mode": "auto",
     "feasibility_tolerance": -1,
@@ -39,6 +78,14 @@
       "metric": "propellant_remaining_kg",
       "weight": 1
     },
+    "objectives": [
+      {
+        "direction": "maximize",
+        "enabled": true,
+        "metric": "propellant_remaining_kg",
+        "weight": 1
+      }
+    ],
     "optimizer": "sqp",
     "parallel_fd": true,
     "qp_solver": "kkt-fallback",
@@ -46,7 +93,7 @@
     "targets": [
       {
         "max_value": 0,
-        "metric": "phases[6].terminal_altitude_m",
+        "metric": "phases[7].terminal_altitude_m",
         "min_value": 0,
         "mode": "equal",
         "phase_index": -1,
@@ -56,7 +103,7 @@
       },
       {
         "max_value": 0,
-        "metric": "phases[6].terminal_speed_mps",
+        "metric": "phases[7].terminal_speed_mps",
         "min_value": 0,
         "mode": "equal",
         "phase_index": -1,
@@ -66,7 +113,7 @@
       },
       {
         "max_value": 0,
-        "metric": "phases[6].inclination_deg",
+        "metric": "phases[7].inclination_deg",
         "min_value": 0,
         "mode": "equal",
         "phase_index": -1,
@@ -76,7 +123,7 @@
       },
       {
         "max_value": 230000,
-        "metric": "phases[6].periapsis_altitude_m",
+        "metric": "phases[7].periapsis_altitude_m",
         "min_value": 180000,
         "mode": "range",
         "phase_index": -1,
@@ -99,43 +146,19 @@
     "variables": [
       {
         "enabled": true,
-        "max_value": 65,
-        "min_value": 30,
-        "path": "phases[1].duration_s"
+        "max_value": 45,
+        "min_value": 28,
+        "path": "phases[2].termination.value"
       },
       {
         "enabled": true,
         "max_value": 90,
         "min_value": 80,
-        "path": "phases[1].steering_model.elevation.c0"
-      },
-      {
-        "enabled": true,
-        "max_value": -0.050000000000000003,
-        "min_value": -0.80000000000000004,
-        "path": "phases[1].steering_model.elevation.c1"
-      },
-      {
-        "enabled": true,
-        "max_value": 0.002,
-        "min_value": -0.002,
-        "path": "phases[1].steering_model.elevation.c2"
-      },
-      {
-        "enabled": true,
-        "max_value": 65,
-        "min_value": 30,
-        "path": "phases[2].duration_s"
-      },
-      {
-        "enabled": true,
-        "max_value": 80,
-        "min_value": 45,
         "path": "phases[2].steering_model.elevation.c0"
       },
       {
         "enabled": true,
-        "max_value": 0.050000000000000003,
+        "max_value": -0.050000000000000003,
         "min_value": -0.80000000000000004,
         "path": "phases[2].steering_model.elevation.c1"
       },
@@ -149,18 +172,18 @@
         "enabled": true,
         "max_value": 65,
         "min_value": 30,
-        "path": "phases[3].duration_s"
+        "path": "phases[3].termination.value"
       },
       {
         "enabled": true,
-        "max_value": 60,
-        "min_value": 5,
+        "max_value": 80,
+        "min_value": 45,
         "path": "phases[3].steering_model.elevation.c0"
       },
       {
         "enabled": true,
-        "max_value": 0.20000000000000001,
-        "min_value": -0.59999999999999998,
+        "max_value": 0.050000000000000003,
+        "min_value": -0.80000000000000004,
         "path": "phases[3].steering_model.elevation.c1"
       },
       {
@@ -171,38 +194,38 @@
       },
       {
         "enabled": true,
-        "max_value": 130,
-        "min_value": 70,
-        "path": "phases[4].duration_s"
+        "max_value": 65,
+        "min_value": 30,
+        "path": "phases[4].termination.value"
       },
       {
         "enabled": true,
-        "max_value": 35,
+        "max_value": 60,
         "min_value": 5,
         "path": "phases[4].steering_model.elevation.c0"
       },
       {
         "enabled": true,
-        "max_value": 0.050000000000000003,
-        "min_value": -0.12,
+        "max_value": 0.20000000000000001,
+        "min_value": -0.59999999999999998,
         "path": "phases[4].steering_model.elevation.c1"
       },
       {
         "enabled": true,
-        "max_value": 0.00050000000000000001,
-        "min_value": -0.00050000000000000001,
+        "max_value": 0.002,
+        "min_value": -0.002,
         "path": "phases[4].steering_model.elevation.c2"
       },
       {
         "enabled": true,
-        "max_value": 130,
-        "min_value": 70,
-        "path": "phases[5].duration_s"
+        "max_value": 115,
+        "min_value": 80,
+        "path": "phases[5].termination.value"
       },
       {
         "enabled": true,
-        "max_value": 25,
-        "min_value": 0,
+        "max_value": 35,
+        "min_value": 5,
         "path": "phases[5].steering_model.elevation.c0"
       },
       {
@@ -219,20 +242,20 @@
       },
       {
         "enabled": true,
-        "max_value": 150,
-        "min_value": 70,
-        "path": "phases[6].duration_s"
+        "max_value": 115,
+        "min_value": 80,
+        "path": "phases[6].termination.value"
       },
       {
         "enabled": true,
-        "max_value": 20,
+        "max_value": 25,
         "min_value": 0,
         "path": "phases[6].steering_model.elevation.c0"
       },
       {
         "enabled": true,
         "max_value": 0.050000000000000003,
-        "min_value": -0.10000000000000001,
+        "min_value": -0.12,
         "path": "phases[6].steering_model.elevation.c1"
       },
       {
@@ -242,16 +265,34 @@
         "path": "phases[6].steering_model.elevation.c2"
       },
       {
+        "enabled": true,
+        "max_value": 115,
+        "min_value": 80,
+        "path": "phases[7].termination.value"
+      },
+      {
+        "enabled": true,
+        "max_value": 20,
+        "min_value": 0,
+        "path": "phases[7].steering_model.elevation.c0"
+      },
+      {
+        "enabled": true,
+        "max_value": 0.050000000000000003,
+        "min_value": -0.10000000000000001,
+        "path": "phases[7].steering_model.elevation.c1"
+      },
+      {
+        "enabled": true,
+        "max_value": 0.00050000000000000001,
+        "min_value": -0.00050000000000000001,
+        "path": "phases[7].steering_model.elevation.c2"
+      },
+      {
         "enabled": false,
         "max_value": 30000,
         "min_value": 1000,
         "path": "vehicle.stages[2].dry_mass_kg"
-      },
-      {
-        "enabled": true,
-        "max_value": 1,
-        "min_value": 0.69999999999999996,
-        "path": "phases[1].throttle_model.c0"
       },
       {
         "enabled": true,
@@ -268,7 +309,7 @@
       {
         "enabled": true,
         "max_value": 1,
-        "min_value": 0.59999999999999998,
+        "min_value": 0.69999999999999996,
         "path": "phases[4].throttle_model.c0"
       },
       {
@@ -282,6 +323,12 @@
         "max_value": 1,
         "min_value": 0.59999999999999998,
         "path": "phases[6].throttle_model.c0"
+      },
+      {
+        "enabled": true,
+        "max_value": 1,
+        "min_value": 0.59999999999999998,
+        "path": "phases[7].throttle_model.c0"
       }
     ]
   },
@@ -296,7 +343,6 @@
           "value": false
         }
       ],
-      "duration_s": 3,
       "force_models": {
         "aero_model": {
           "type": "none"
@@ -357,6 +403,11 @@
           "c2": 0
         }
       },
+      "termination": {
+        "comparison": ">=",
+        "type": "time",
+        "value": 3
+      },
       "throttle_model": {
         "c0": 0,
         "c1": 0,
@@ -382,7 +433,96 @@
           "value": true
         }
       ],
-      "duration_s": 49.051452774674232,
+      "force_models": {
+        "aero_model": {
+          "type": "none"
+        },
+        "aerodynamic": true,
+        "atmosphere_model": {
+          "type": "exponential"
+        },
+        "gravity": true,
+        "gravity_model": {
+          "degree": 0,
+          "j2": 0.00108262668,
+          "order": 0,
+          "type": "j2"
+        },
+        "normal_force": true,
+        "solar_radiation_pressure": false,
+        "third_body": false,
+        "thrust": true
+      },
+      "hold_down_clamp_initial_active": false,
+      "inherit_initial_state": true,
+      "integrator": "dopri5",
+      "name": "tower clearance vertical ascent",
+      "optimize_enabled": false,
+      "steering_model": {
+        "azimuth": {
+          "c0": 90,
+          "c1": 0,
+          "c2": 0
+        },
+        "elevation": {
+          "c0": 90,
+          "c1": 0,
+          "c2": 0
+        },
+        "fixed_direction_eci": [
+          1,
+          0,
+          0
+        ],
+        "pitch": {
+          "c0": 0,
+          "c1": 0,
+          "c2": 0
+        },
+        "points": [],
+        "roll": {
+          "c0": 0,
+          "c1": 0,
+          "c2": 0
+        },
+        "segments": [],
+        "type": "generic_poly",
+        "yaw": {
+          "c0": 0,
+          "c1": 0,
+          "c2": 0
+        }
+      },
+      "termination": {
+        "comparison": ">=",
+        "type": "altitude_m",
+        "value": 194.89599999999999
+      },
+      "throttle_model": {
+        "c0": 0.99360957693779062,
+        "c1": 0,
+        "c2": 0,
+        "points": [],
+        "target_t2w": 1,
+        "type": "poly"
+      },
+      "tolerances": {
+        "atol_position_m": 0.001,
+        "atol_tank_mass_kg": 0.001,
+        "atol_velocity_mps": 9.9999999999999995e-07,
+        "rtol": 1e-08
+      }
+    },
+    {
+      "actions": [
+        {
+          "stage_index": -1,
+          "stage_name": "",
+          "time_s": 0,
+          "type": "set_engine_enabled",
+          "value": true
+        }
+      ],
       "force_models": {
         "aero_model": {
           "type": "none"
@@ -443,6 +583,11 @@
           "c2": 0
         }
       },
+      "termination": {
+        "comparison": ">=",
+        "type": "time",
+        "value": 31
+      },
       "throttle_model": {
         "c0": 0.99360957693779062,
         "c1": 0,
@@ -460,7 +605,6 @@
     },
     {
       "actions": [],
-      "duration_s": 48.118432543356207,
       "force_models": {
         "aero_model": {
           "type": "none"
@@ -521,6 +665,11 @@
           "c2": 0
         }
       },
+      "termination": {
+        "comparison": ">=",
+        "type": "time",
+        "value": 48.118432543356207
+      },
       "throttle_model": {
         "c0": 0.99390458022981887,
         "c1": 0,
@@ -538,7 +687,6 @@
     },
     {
       "actions": [],
-      "duration_s": 47.779039240556088,
       "force_models": {
         "aero_model": {
           "type": "none"
@@ -599,6 +747,11 @@
           "c2": 0
         }
       },
+      "termination": {
+        "comparison": ">=",
+        "type": "time",
+        "value": 47.779039240556088
+      },
       "throttle_model": {
         "c0": 0.99422667248733843,
         "c1": 0,
@@ -622,30 +775,8 @@
           "time_s": 0,
           "type": "set_engine_enabled",
           "value": true
-        },
-        {
-          "stage_index": 0,
-          "stage_name": "booster",
-          "time_s": 0,
-          "type": "set_stage_active",
-          "value": false
-        },
-        {
-          "stage_index": 0,
-          "stage_name": "booster",
-          "time_s": 0,
-          "type": "set_stage_attached",
-          "value": false
-        },
-        {
-          "stage_index": 1,
-          "stage_name": "second stage",
-          "time_s": 0,
-          "type": "set_stage_active",
-          "value": true
         }
       ],
-      "duration_s": 104.20706660041409,
       "force_models": {
         "aero_model": {
           "type": "none"
@@ -678,7 +809,7 @@
           "c2": 0
         },
         "elevation": {
-          "c0": 21.770309211082498,
+          "c0": 8,
           "c1": -0.058101098434418574,
           "c2": 1.2798933784598644e-05
         },
@@ -706,6 +837,11 @@
           "c2": 0
         }
       },
+      "termination": {
+        "comparison": ">=",
+        "type": "time",
+        "value": 92
+      },
       "throttle_model": {
         "c0": 1,
         "c1": 0,
@@ -723,7 +859,6 @@
     },
     {
       "actions": [],
-      "duration_s": 103.10905276819643,
       "force_models": {
         "aero_model": {
           "type": "none"
@@ -756,7 +891,7 @@
           "c2": 0
         },
         "elevation": {
-          "c0": 13.647368343053701,
+          "c0": 4,
           "c1": -0.05938711383242691,
           "c2": 1.0168261910105543e-05
         },
@@ -784,6 +919,11 @@
           "c2": 0
         }
       },
+      "termination": {
+        "comparison": ">=",
+        "type": "time",
+        "value": 92
+      },
       "throttle_model": {
         "c0": 1,
         "c1": 0,
@@ -801,7 +941,6 @@
     },
     {
       "actions": [],
-      "duration_s": 122.2610055501863,
       "force_models": {
         "aero_model": {
           "type": "none"
@@ -834,7 +973,7 @@
           "c2": 0
         },
         "elevation": {
-          "c0": 7.0316411423789518,
+          "c0": 6,
           "c1": -0.057004028492878285,
           "c2": 2.7848210530730783e-05
         },
@@ -862,6 +1001,11 @@
           "c2": 0
         }
       },
+      "termination": {
+        "comparison": ">=",
+        "type": "time",
+        "value": 92
+      },
       "throttle_model": {
         "c0": 1,
         "c1": 0,
@@ -879,7 +1023,6 @@
     },
     {
       "actions": [],
-      "duration_s": 2654.8216826489947,
       "force_models": {
         "aero_model": {
           "type": "none"
@@ -939,6 +1082,11 @@
           "c1": 0,
           "c2": 0
         }
+      },
+      "termination": {
+        "comparison": ">=",
+        "type": "time",
+        "value": 2654.8216826489947
       },
       "throttle_model": {
         "c0": 0,

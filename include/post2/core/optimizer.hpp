@@ -19,6 +19,7 @@ struct OptimizerOptions {
     int max_restoration_iterations = 8;
     std::string qp_solver = "kkt-fallback";
     FiniteDifferenceOptions finite_difference;
+    std::vector<double> initial_z;
 };
 
 struct OptimizerResult {

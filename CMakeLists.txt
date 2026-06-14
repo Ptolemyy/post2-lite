@@ -110,6 +110,13 @@ if(BUILD_TESTING)
     target_link_libraries(post2_optimization_components_test PRIVATE post2_core)
     add_test(NAME post2_optimization_components_test COMMAND post2_optimization_components_test)
 
+    add_executable(post2_phase_termination_and_events_test
+        tests/phase_termination_and_events_test.cpp
+    )
+    target_link_libraries(post2_phase_termination_and_events_test PRIVATE post2_core)
+    add_test(NAME post2_phase_termination_and_events_test
+        COMMAND post2_phase_termination_and_events_test)
+
     add_executable(post2_ksp_vehicle_site_import_test
         tests/ksp_vehicle_site_import_test.cpp
     )

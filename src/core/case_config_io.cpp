@@ -289,22 +289,51 @@ JsonValue steering_to_json(const SteeringModelConfig& steering)
     });
 }
 
+JsonValue phase_action_to_json(const PhaseAction& action)
+{
+    return JsonValue::object({
+        {"time_s", number(action.time_s)},
+        {"type", string(action.type)},
+        {"value", boolean(action.value)},
+        {"stage_index", number(action.stage_index)},
+        {"stage_name", string(action.stage_name)},
+    });
+}
+
+JsonValue trigger_to_json(const TriggerCondition& trigger)
+{
+    return JsonValue::object({
+        {"type", string(trigger.type)},
+        {"comparison", string(trigger.comparison)},
+        {"value", number(trigger.value)},
+    });
+}
+
+JsonValue event_to_json(const EventConfig& event)
+{
+    JsonValue::Array actions;
+    actions.reserve(event.actions.size());
+    for (const auto& action : event.actions) {
+        actions.push_back(phase_action_to_json(action));
+    }
+    return JsonValue::object({
+        {"name", string(event.name)},
+        {"enabled", boolean(event.enabled)},
+        {"trigger", trigger_to_json(event.trigger)},
+        {"actions", JsonValue::array(std::move(actions))},
+    });
+}
+
 JsonValue phase_to_json(const PhaseConfig& phase)
 {
     JsonValue::Array actions;
     for (const auto& action : phase.actions) {
-        actions.push_back(JsonValue::object({
-            {"time_s", number(action.time_s)},
-            {"type", string(action.type)},
-            {"value", boolean(action.value)},
-            {"stage_index", number(action.stage_index)},
-            {"stage_name", string(action.stage_name)},
-        }));
+        actions.push_back(phase_action_to_json(action));
     }
 
     JsonValue::Object object{
         {"name", string(phase.name)},
-        {"duration_s", number(phase.duration_s)},
+        {"termination", trigger_to_json(phase.termination)},
         {"optimize_enabled", boolean(phase.optimize_enabled)},
         {"inherit_initial_state", boolean(phase.inherit_initial_state)},
         {"hold_down_clamp_initial_active", boolean(phase.hold_down_clamp_initial_active)},
@@ -324,6 +353,25 @@ JsonValue phase_to_json(const PhaseConfig& phase)
         object["initial_state_eci"] = state_to_json(*phase.initial_state_eci);
     }
     return JsonValue::object(std::move(object));
+}
+
+JsonValue objective_to_json(const OptimizationObjectiveConfig& objective)
+{
+    return JsonValue::object({
+        {"enabled", boolean(objective.enabled)},
+        {"metric", string(objective.metric)},
+        {"direction", string(objective.direction)},
+        {"weight", number(objective.weight)},
+    });
+}
+
+std::vector<OptimizationObjectiveConfig> effective_objective_configs(
+    const OptimizationConfig& optimization)
+{
+    if (!optimization.objectives.empty()) {
+        return optimization.objectives;
+    }
+    return {optimization.objective};
 }
 
 JsonValue optimization_to_json(const OptimizationConfig& optimization)
@@ -352,6 +400,18 @@ JsonValue optimization_to_json(const OptimizationConfig& optimization)
         }));
     }
 
+    const std::vector<OptimizationObjectiveConfig> effective_objectives =
+        effective_objective_configs(optimization);
+    JsonValue::Array objectives;
+    objectives.reserve(effective_objectives.size());
+    for (const auto& objective : effective_objectives) {
+        objectives.push_back(objective_to_json(objective));
+    }
+    const OptimizationObjectiveConfig legacy_objective =
+        effective_objectives.empty()
+            ? OptimizationObjectiveConfig{}
+            : effective_objectives.front();
+
     return JsonValue::object({
         {"mode", string(optimization.mode)},
         {"optimizer", string(optimization.optimizer)},
@@ -367,11 +427,12 @@ JsonValue optimization_to_json(const OptimizationConfig& optimization)
         {"max_restoration_iterations", number(optimization.max_restoration_iterations)},
         {"variables", JsonValue::array(std::move(variables))},
         {"targets", JsonValue::array(std::move(targets))},
-        {"objective", JsonValue::object({
-            {"enabled", boolean(optimization.objective.enabled)},
-            {"metric", string(optimization.objective.metric)},
-            {"direction", string(optimization.objective.direction)},
-            {"weight", number(optimization.objective.weight)},
+        {"objectives", JsonValue::array(std::move(objectives))},
+        {"objective", objective_to_json(legacy_objective)},
+        {"envelope_search", JsonValue::object({
+            {"enabled", boolean(optimization.envelope_search.enabled)},
+            {"sample_count", number(static_cast<double>(optimization.envelope_search.sample_count))},
+            {"seed", number(static_cast<double>(optimization.envelope_search.seed))},
         })},
         {"continuation", JsonValue::object({
             {"enabled", boolean(optimization.continuation.enabled)},
@@ -389,6 +450,12 @@ JsonValue case_to_json_value(const CaseConfig& config)
     JsonValue::Array phases;
     for (const auto& phase : config.phases) {
         phases.push_back(phase_to_json(phase));
+    }
+
+    JsonValue::Array events;
+    events.reserve(config.events.size());
+    for (const auto& event : config.events) {
+        events.push_back(event_to_json(event));
     }
 
     return JsonValue::object({
@@ -413,6 +480,7 @@ JsonValue case_to_json_value(const CaseConfig& config)
         })},
         {"vehicle", vehicle_to_json(config.vehicle)},
         {"phases", JsonValue::array(std::move(phases))},
+        {"events", JsonValue::array(std::move(events))},
         {"optimization", optimization_to_json(config.optimization)},
     });
 }
@@ -1041,16 +1109,63 @@ bool parse_optimization(const JsonValue& value, OptimizationConfig* target, std:
         }
     }
 
+    auto parse_objective_value =
+        [&](const JsonValue& objective_value,
+            OptimizationObjectiveConfig* objective_config,
+            const char* context) -> bool {
+            if (!objective_value.is_object()) {
+                return fail(error, std::string(context) + " must be an object");
+            }
+            return read_bool(objective_value, "enabled", &objective_config->enabled, error) &&
+                read_string(objective_value, "metric", &objective_config->metric, error) &&
+                read_string(objective_value, "direction", &objective_config->direction, error) &&
+                read_number(objective_value, "weight", &objective_config->weight, error);
+        };
+
+    bool parsed_legacy_objective = false;
     if (const JsonValue* objective = find_member(value, "objective")) {
-        if (!objective->is_object()) {
-            return fail(error, "optimization.objective must be an object");
-        }
-        if (!read_bool(*objective, "enabled", &parsed.objective.enabled, error) ||
-            !read_string(*objective, "metric", &parsed.objective.metric, error) ||
-            !read_string(*objective, "direction", &parsed.objective.direction, error) ||
-            !read_number(*objective, "weight", &parsed.objective.weight, error)) {
+        if (!parse_objective_value(*objective, &parsed.objective, "optimization.objective")) {
             return false;
         }
+        parsed_legacy_objective = true;
+    }
+
+    if (const JsonValue* objectives = find_member(value, "objectives")) {
+        if (!objectives->is_array()) {
+            return fail(error, "optimization.objectives must be an array");
+        }
+        parsed.objectives.clear();
+        for (const auto& objective_value : objectives->array_value) {
+            OptimizationObjectiveConfig objective_config;
+            if (!parse_objective_value(
+                    objective_value,
+                    &objective_config,
+                    "optimization objective")) {
+                return false;
+            }
+            parsed.objectives.push_back(std::move(objective_config));
+        }
+        if (!parsed.objectives.empty()) {
+            parsed.objective = parsed.objectives.front();
+        }
+    } else if (parsed_legacy_objective) {
+        parsed.objectives.clear();
+        parsed.objectives.push_back(parsed.objective);
+    }
+
+    if (const JsonValue* envelope = find_member(value, "envelope_search")) {
+        if (!envelope->is_object()) {
+            return fail(error, "optimization.envelope_search must be an object");
+        }
+        double sample_count = static_cast<double>(parsed.envelope_search.sample_count);
+        double seed = static_cast<double>(parsed.envelope_search.seed);
+        if (!read_bool(*envelope, "enabled", &parsed.envelope_search.enabled, error) ||
+            !read_number(*envelope, "sample_count", &sample_count, error) ||
+            !read_number(*envelope, "seed", &seed, error)) {
+            return false;
+        }
+        parsed.envelope_search.sample_count = static_cast<int>(sample_count);
+        parsed.envelope_search.seed = static_cast<int>(seed);
     }
 
     if (const JsonValue* continuation = find_member(value, "continuation")) {
@@ -1075,6 +1190,84 @@ bool parse_optimization(const JsonValue& value, OptimizationConfig* target, std:
     return true;
 }
 
+bool parse_phase_action(const JsonValue& value, PhaseAction* target, std::string* error)
+{
+    if (!value.is_object()) {
+        return fail(error, "action must be an object");
+    }
+    PhaseAction action;
+    if (!read_number(value, "time_s", &action.time_s, error) ||
+        !read_string(value, "type", &action.type, error) ||
+        !read_bool(value, "value", &action.value, error)) {
+        return false;
+    }
+    double stage_index = static_cast<double>(action.stage_index);
+    if (!read_number(value, "stage_index", &stage_index, error) ||
+        !read_string(value, "stage_name", &action.stage_name, error)) {
+        return false;
+    }
+    action.stage_index = static_cast<int>(stage_index);
+    *target = std::move(action);
+    return true;
+}
+
+bool parse_trigger_condition(const JsonValue& value, TriggerCondition* target, std::string* error)
+{
+    if (!value.is_object()) {
+        return fail(error, "trigger must be an object");
+    }
+    TriggerCondition parsed = *target;
+    if (!read_string(value, "type", &parsed.type, error) ||
+        !read_string(value, "comparison", &parsed.comparison, error) ||
+        !read_number(value, "value", &parsed.value, error)) {
+        return false;
+    }
+    if (parsed.type != "time" &&
+        parsed.type != "altitude_m" &&
+        parsed.type != "velocity_mps" &&
+        parsed.type != "total_mass_kg" &&
+        parsed.type != "propellant_mass_kg") {
+        return fail(error, "trigger.type unrecognised: " + parsed.type);
+    }
+    if (parsed.comparison != ">=" && parsed.comparison != "<=") {
+        return fail(error, "trigger.comparison must be \">=\" or \"<=\"");
+    }
+    *target = std::move(parsed);
+    return true;
+}
+
+bool parse_event(const JsonValue& value, EventConfig* target, std::string* error)
+{
+    if (!value.is_object()) {
+        return fail(error, "event must be an object");
+    }
+    EventConfig parsed = *target;
+    if (!read_string(value, "name", &parsed.name, error) ||
+        !read_bool(value, "enabled", &parsed.enabled, error)) {
+        return false;
+    }
+    if (const JsonValue* trigger = find_member(value, "trigger")) {
+        if (!parse_trigger_condition(*trigger, &parsed.trigger, error)) {
+            return false;
+        }
+    }
+    parsed.actions.clear();
+    if (const JsonValue* actions = find_member(value, "actions")) {
+        if (!actions->is_array()) {
+            return fail(error, "event.actions must be an array");
+        }
+        for (const auto& action_value : actions->array_value) {
+            PhaseAction action;
+            if (!parse_phase_action(action_value, &action, error)) {
+                return false;
+            }
+            parsed.actions.push_back(std::move(action));
+        }
+    }
+    *target = std::move(parsed);
+    return true;
+}
+
 bool parse_phase(const JsonValue& value, PhaseConfig* target, std::string* error)
 {
     if (!value.is_object()) {
@@ -1082,12 +1275,24 @@ bool parse_phase(const JsonValue& value, PhaseConfig* target, std::string* error
     }
     PhaseConfig parsed = *target;
     if (!read_string(value, "name", &parsed.name, error) ||
-        !read_number(value, "duration_s", &parsed.duration_s, error) ||
         !read_bool(value, "optimize_enabled", &parsed.optimize_enabled, error) ||
         !read_bool(value, "inherit_initial_state", &parsed.inherit_initial_state, error) ||
         !read_bool(value, "hold_down_clamp_initial_active", &parsed.hold_down_clamp_initial_active, error) ||
         !read_string(value, "integrator", &parsed.integrator, error)) {
         return false;
+    }
+
+    // Termination: prefer an explicit block. Old JSON files that only carry
+    // duration_s are migrated by synthesising a {time, >=, duration_s} block.
+    if (const JsonValue* termination = find_member(value, "termination")) {
+        if (!parse_trigger_condition(*termination, &parsed.termination, error)) {
+            return false;
+        }
+    } else if (const JsonValue* legacy_duration = find_member(value, "duration_s")) {
+        if (!legacy_duration->is_number()) {
+            return fail(error, "duration_s must be a number");
+        }
+        parsed.termination = TriggerCondition{"time", ">=", legacy_duration->number_value};
     }
 
     if (const JsonValue* initial_state = find_member(value, "initial_state_eci")) {
@@ -1153,21 +1358,10 @@ bool parse_phase(const JsonValue& value, PhaseConfig* target, std::string* error
         }
         parsed.actions.clear();
         for (const auto& action_value : actions->array_value) {
-            if (!action_value.is_object()) {
-                return fail(error, "action must be an object");
-            }
             PhaseAction action;
-            if (!read_number(action_value, "time_s", &action.time_s, error) ||
-                !read_string(action_value, "type", &action.type, error) ||
-                !read_bool(action_value, "value", &action.value, error)) {
+            if (!parse_phase_action(action_value, &action, error)) {
                 return false;
             }
-            double stage_index = static_cast<double>(action.stage_index);
-            if (!read_number(action_value, "stage_index", &stage_index, error) ||
-                !read_string(action_value, "stage_name", &action.stage_name, error)) {
-                return false;
-            }
-            action.stage_index = static_cast<int>(stage_index);
             parsed.actions.push_back(std::move(action));
         }
     }
@@ -1200,7 +1394,7 @@ CaseConfig case_from_simulation_config(const SimulationConfig& config)
 
     PhaseConfig phase;
     phase.name = "default";
-    phase.duration_s = config.duration_s;
+    phase.termination = {"time", ">=", config.duration_s};
     phase.inherit_initial_state = false;
     phase.hold_down_clamp_initial_active =
         config.hold_down_clamp.enabled && config.hold_down_clamp.release_time_s > 0.0;
@@ -1240,7 +1434,12 @@ SimulationConfig simulation_config_from_case(const CaseConfig& config)
 
     if (!config.phases.empty()) {
         const PhaseConfig& phase = config.phases.front();
-        simulation.duration_s = phase.duration_s;
+        // Non-time terminations don't have a fixed duration; fall back to a
+        // generous upper bound here (24 h). The simulation_driver actually
+        // honours the trigger event regardless of this value.
+        simulation.duration_s = (phase.termination.type == "time")
+            ? phase.termination.value
+            : 86400.0;
         simulation.hold_down_clamp.enabled = phase.hold_down_clamp_initial_active;
         simulation.normal_force.enabled = phase.force_models.normal_force;
         simulation.gravity_model = phase.force_models.gravity_model;
@@ -1347,6 +1546,20 @@ bool case_config_from_json(const std::string& text, CaseConfig* config, std::str
     }
     if (!find_member(root, "earth_j2") && !parsed.phases.empty()) {
         parsed.earth_j2 = parsed.phases.front().force_models.gravity_model.j2;
+    }
+
+    parsed.events.clear();
+    if (const JsonValue* events = find_member(root, "events")) {
+        if (!events->is_array()) {
+            return fail(error, "events must be an array");
+        }
+        for (const auto& event_value : events->array_value) {
+            EventConfig event;
+            if (!parse_event(event_value, &event, error)) {
+                return false;
+            }
+            parsed.events.push_back(std::move(event));
+        }
     }
 
     if (const JsonValue* optimization = find_member(root, "optimization")) {

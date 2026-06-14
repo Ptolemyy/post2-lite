@@ -47,6 +47,129 @@ int max_phase_integration_steps(double duration_s, double nominal_step_s)
     return static_cast<int>(std::clamp(budget, 1000.0, 100000.0));
 }
 
+// Upper-bound time horizon for non-time terminations (24h). Phases whose
+// termination event has not fired by then are stopped by the budget guard.
+constexpr double kMaxPhaseTimeS = 86400.0;
+
+// Returns true iff the trigger condition's quantity is one that depends only
+// on integrator-state (i.e. can be evaluated by an EventFunction).
+bool trigger_uses_event_path(const TriggerCondition& trigger)
+{
+    return trigger.type == "altitude_m" ||
+        trigger.type == "velocity_mps" ||
+        trigger.type == "total_mass_kg" ||
+        trigger.type == "propellant_mass_kg" ||
+        trigger.type == "time";
+}
+
+// Builds an EventFunction whose g changes sign at the trigger's rising edge
+// (relative to the comparison direction). For mass-related triggers,
+// `runtime_snapshot` captures the attached / active stage set at the moment
+// the event is registered; re-register fresh after any staging change.
+//
+// `time_base_s` is subtracted from t for type=="time" triggers — pass the
+// phase start time for phase-relative semantics or 0 for mission-absolute.
+post2::integrators::EventFunction make_trigger_event(
+    const TriggerCondition& trigger,
+    const post2::vehicle::VehicleRuntimeState& runtime_snapshot,
+    double time_base_s,
+    bool terminating,
+    const std::string& name)
+{
+    const bool comparison_ge = trigger.comparison == ">=";
+    const double threshold = trigger.value;
+    auto wrap = [comparison_ge, threshold](double quantity) {
+        return comparison_ge ? (quantity - threshold) : (threshold - quantity);
+    };
+
+    post2::integrators::EventFunction ev;
+    ev.name = name;
+    ev.terminating = terminating;
+
+    if (trigger.type == "time") {
+        ev.g = [wrap, time_base_s](double t, const post2::integrators::ExtendedState&) {
+            return wrap(t - time_base_s);
+        };
+        return ev;
+    }
+    if (trigger.type == "altitude_m") {
+        ev.g = [wrap](double, const post2::integrators::ExtendedState& s) {
+            return wrap(post2::core::frames::ecef_to_geodetic(s.motion.position_m).altitude_m);
+        };
+        return ev;
+    }
+    if (trigger.type == "velocity_mps") {
+        ev.g = [wrap](double, const post2::integrators::ExtendedState& s) {
+            return wrap(post2::vehicle::norm(s.motion.velocity_mps));
+        };
+        return ev;
+    }
+    if (trigger.type == "total_mass_kg") {
+        double dry_mass_attached_kg = 0.0;
+        std::vector<std::size_t> attached_tank_flat_indices;
+        for (std::size_t i = 0; i < runtime_snapshot.stages.size(); ++i) {
+            if (!runtime_snapshot.stages[i].attached) {
+                continue;
+            }
+            dry_mass_attached_kg += runtime_snapshot.stages[i].dry_mass_kg;
+            for (std::size_t j = 0; j < runtime_snapshot.stages[i].tanks.size(); ++j) {
+                attached_tank_flat_indices.push_back(
+                    post2::vehicle::flat_tank_index(runtime_snapshot, i, j));
+            }
+        }
+        ev.g = [wrap, dry_mass_attached_kg, idx = std::move(attached_tank_flat_indices)](
+                   double, const post2::integrators::ExtendedState& s) {
+            double total = dry_mass_attached_kg;
+            for (std::size_t i : idx) {
+                if (i < s.tank_masses_kg.size()) {
+                    total += std::max(0.0, s.tank_masses_kg[i]);
+                }
+            }
+            return wrap(total);
+        };
+        return ev;
+    }
+    if (trigger.type == "propellant_mass_kg") {
+        std::vector<std::size_t> indices;
+        for (std::size_t i = 0; i < runtime_snapshot.stages.size(); ++i) {
+            if (!runtime_snapshot.stages[i].attached || !runtime_snapshot.stages[i].active) {
+                continue;
+            }
+            for (std::size_t j = 0; j < runtime_snapshot.stages[i].tanks.size(); ++j) {
+                indices.push_back(post2::vehicle::flat_tank_index(runtime_snapshot, i, j));
+            }
+        }
+        ev.g = [wrap, idx = std::move(indices)](
+                   double, const post2::integrators::ExtendedState& s) {
+            double total = 0.0;
+            for (std::size_t i : idx) {
+                if (i < s.tank_masses_kg.size()) {
+                    total += std::max(0.0, s.tank_masses_kg[i]);
+                }
+            }
+            return wrap(total);
+        };
+        return ev;
+    }
+
+    // Unknown type: degenerate to a never-firing event so callers don't crash.
+    ev.g = [](double, const post2::integrators::ExtendedState&) { return -1.0; };
+    return ev;
+}
+
+// Per-mission-event runtime tracking. prev_g_sign is the sign of g at the
+// previous step boundary (post-action). Initialised to a negative baseline
+// so a trigger that is already satisfied at t=0 does not spuriously refire
+// on its first evaluation.
+struct MissionEventRuntime {
+    double prev_g = -1.0;
+    int fired_count = 0;
+};
+
+struct MissionEventsState {
+    std::vector<MissionEventRuntime> runtimes;
+};
+
 Vec3 cross_product(const Vec3& lhs, const Vec3& rhs)
 {
     return {
@@ -334,8 +457,8 @@ bool validate_case_config(const CaseConfig& config, std::string* error)
 
     for (std::size_t i = 0; i < config.phases.size(); ++i) {
         const PhaseConfig& phase = config.phases[i];
-        if (phase.duration_s <= 0.0) {
-            *error = "phase " + std::to_string(i) + " duration_s must be positive";
+        if (phase.termination.type == "time" && phase.termination.value <= 0.0) {
+            *error = "phase " + std::to_string(i) + " termination.value must be positive for time-based termination";
             return false;
         }
         if (phase.integrator != "ode" &&
@@ -350,6 +473,16 @@ bool validate_case_config(const CaseConfig& config, std::string* error)
             phase.tolerances.atol_velocity_mps <= 0.0 ||
             phase.tolerances.atol_tank_mass_kg <= 0.0) {
             *error = "phase " + std::to_string(i) + " tolerances must be positive";
+            return false;
+        }
+        if (!trigger_uses_event_path(phase.termination)) {
+            *error = "phase " + std::to_string(i) +
+                " termination.type unrecognised: " + phase.termination.type;
+            return false;
+        }
+        if (phase.termination.comparison != ">=" && phase.termination.comparison != "<=") {
+            *error = "phase " + std::to_string(i) +
+                " termination.comparison must be \">=\" or \"<=\"";
             return false;
         }
         if (!validate_gravity_model_config(
@@ -368,13 +501,43 @@ bool validate_case_config(const CaseConfig& config, std::string* error)
             *error = "phase " + std::to_string(i) + " needs inherit_initial_state or initial_state_eci";
             return false;
         }
+        const bool time_terminated = phase.termination.type == "time";
         for (const auto& action : phase.actions) {
-            if (action.time_s < 0.0 || action.time_s > phase.duration_s) {
+            if (action.time_s < 0.0) {
+                *error = "phase " + std::to_string(i) + " action time_s must be non-negative";
+                return false;
+            }
+            if (time_terminated && action.time_s > phase.termination.value) {
                 *error = "phase " + std::to_string(i) + " action time_s is outside phase duration";
                 return false;
             }
             if (!action_type_is_supported(action.type)) {
                 *error = "unsupported phase action: " + action.type;
+                return false;
+            }
+            if ((action.type == "set_stage_active" || action.type == "set_stage_attached") &&
+                action.stage_index < 0 &&
+                action.stage_name.empty()) {
+                *error = action.type + " action needs stage_index or stage_name";
+                return false;
+            }
+        }
+    }
+    for (std::size_t i = 0; i < config.events.size(); ++i) {
+        const EventConfig& event = config.events[i];
+        if (!trigger_uses_event_path(event.trigger)) {
+            *error = "event " + std::to_string(i) +
+                " trigger.type unrecognised: " + event.trigger.type;
+            return false;
+        }
+        if (event.trigger.comparison != ">=" && event.trigger.comparison != "<=") {
+            *error = "event " + std::to_string(i) +
+                " trigger.comparison must be \">=\" or \"<=\"";
+            return false;
+        }
+        for (const auto& action : event.actions) {
+            if (!action_type_is_supported(action.type)) {
+                *error = "unsupported event action: " + action.type;
                 return false;
             }
             if ((action.type == "set_stage_active" || action.type == "set_stage_attached") &&
@@ -432,6 +595,44 @@ std::vector<TimedAction> sorted_actions(const PhaseConfig& phase)
     return actions;
 }
 
+void apply_single_action(
+    const PhaseAction& action,
+    const SimulationConfig& simulation_config,
+    RuntimeControl* control,
+    post2::vehicle::VehicleRuntimeState* runtime)
+{
+    if (action.type == "set_engine_enabled") {
+        control->engine_enabled = action.value;
+        runtime->engine.enabled = action.value;
+    } else if (action.type == "set_hold_down_clamp_active") {
+        control->hold_down_clamp_active = action.value;
+        set_hold_down_clamp_state(runtime, simulation_config, action.value);
+    } else if (action.type == "set_stage_active" || action.type == "set_stage_attached") {
+        std::size_t stage_index = 0;
+        bool found_stage = false;
+        if (action.stage_index >= 0 &&
+            static_cast<std::size_t>(action.stage_index) < runtime->stages.size()) {
+            stage_index = static_cast<std::size_t>(action.stage_index);
+            found_stage = true;
+        } else if (!action.stage_name.empty()) {
+            for (std::size_t i = 0; i < runtime->stages.size(); ++i) {
+                if (runtime->stages[i].name == action.stage_name) {
+                    stage_index = i;
+                    found_stage = true;
+                    break;
+                }
+            }
+        }
+        if (found_stage) {
+            if (action.type == "set_stage_attached") {
+                post2::vehicle::set_stage_attached(runtime, stage_index, action.value);
+            } else {
+                post2::vehicle::set_stage_active(runtime, stage_index, action.value);
+            }
+        }
+    }
+}
+
 void apply_due_actions(
     const std::vector<TimedAction>& actions,
     double phase_time_s,
@@ -442,37 +643,11 @@ void apply_due_actions(
     constexpr double epsilon_s = 1.0e-9;
     while (control->next_action_index < actions.size() &&
            actions[control->next_action_index].action.time_s <= phase_time_s + epsilon_s) {
-        const PhaseAction& action = actions[control->next_action_index].action;
-        if (action.type == "set_engine_enabled") {
-            control->engine_enabled = action.value;
-            runtime->engine.enabled = action.value;
-        } else if (action.type == "set_hold_down_clamp_active") {
-            control->hold_down_clamp_active = action.value;
-            set_hold_down_clamp_state(runtime, simulation_config, action.value);
-        } else if (action.type == "set_stage_active" || action.type == "set_stage_attached") {
-            std::size_t stage_index = 0;
-            bool found_stage = false;
-            if (action.stage_index >= 0 &&
-                static_cast<std::size_t>(action.stage_index) < runtime->stages.size()) {
-                stage_index = static_cast<std::size_t>(action.stage_index);
-                found_stage = true;
-            } else if (!action.stage_name.empty()) {
-                for (std::size_t i = 0; i < runtime->stages.size(); ++i) {
-                    if (runtime->stages[i].name == action.stage_name) {
-                        stage_index = i;
-                        found_stage = true;
-                        break;
-                    }
-                }
-            }
-            if (found_stage) {
-                if (action.type == "set_stage_attached") {
-                    post2::vehicle::set_stage_attached(runtime, stage_index, action.value);
-                } else {
-                    post2::vehicle::set_stage_active(runtime, stage_index, action.value);
-                }
-            }
-        }
+        apply_single_action(
+            actions[control->next_action_index].action,
+            simulation_config,
+            control,
+            runtime);
         ++control->next_action_index;
     }
 }
@@ -525,9 +700,12 @@ StateLog propagate_phase(
     const PhaseConfig& phase,
     std::size_t phase_index,
     double phase_start_time_s,
-    const post2::vehicle::VehicleRuntimeState& initial_runtime)
+    const post2::vehicle::VehicleRuntimeState& initial_runtime,
+    MissionEventsState* mission_events)
 {
-    const double phase_end_time_s = phase_start_time_s + phase.duration_s;
+    const bool time_terminated = phase.termination.type == "time";
+    const double phase_horizon_s = time_terminated ? phase.termination.value : kMaxPhaseTimeS;
+    const double phase_end_time_s = phase_start_time_s + phase_horizon_s;
     const SimulationConfig simulation_config =
         make_phase_simulation_config(case_config, phase, phase_end_time_s);
     post2::propagation::VehicleConsumptionPropagator vehicle_propagator(case_config.vehicle);
@@ -561,7 +739,7 @@ StateLog propagate_phase(
     const bool use_adaptive_step_suggestions = phase.integrator == "dopri5";
     const double min_effective_step_s = minimum_effective_step_s(case_config.step_s);
     const int max_step_count =
-        max_phase_integration_steps(phase.duration_s, case_config.step_s);
+        max_phase_integration_steps(phase_horizon_s, case_config.step_s);
     int step_count = 0;
     double time_s = phase_start_time_s;
     double suggested_step_s = case_config.step_s;
@@ -615,6 +793,8 @@ StateLog propagate_phase(
         Vec3 last_acceleration_eci_mps2{0.0, 0.0, 0.0};
         post2::integrators::ExtendedState integrated;
         bool altitude_zero_event_hit = false;
+        bool phase_terminated_by_event = false;
+        std::size_t fired_mission_event_index = std::numeric_limits<std::size_t>::max();
         if (control.hold_down_clamp_active) {
             // Engine still burns while clamped: integrate tank masses with
             // forward Euler (motion pinned to launch site rotates with Earth
@@ -659,6 +839,45 @@ StateLog propagate_phase(
                 make_environment_state(simulation_config, phase, time_s, current_state);
             if (!phase.force_models.normal_force && env_for_events.altitude_m > 1.0) {
                 events.push_back(post2::propagation::altitude_zero_event(true));
+            }
+
+            // Phase termination event (non-time terminations only — time
+            // termination is handled by the outer while-loop guard).
+            const std::size_t termination_event_index =
+                time_terminated ? std::numeric_limits<std::size_t>::max() : events.size();
+            if (!time_terminated) {
+                events.push_back(make_trigger_event(
+                    phase.termination,
+                    runtime,
+                    phase_start_time_s,
+                    /*terminating=*/true,
+                    "phase_termination"));
+            }
+
+            // Mission events. Re-registered fresh each step (so the
+            // mass-trigger snapshots reflect the current attached/active
+            // stage set). Only events whose previous-g is non-positive are
+            // armed — others are waiting for the next rising edge.
+            const std::size_t mission_event_base = events.size();
+            std::vector<std::size_t> mission_event_armed_indices;
+            if (mission_events) {
+                for (std::size_t k = 0; k < case_config.events.size(); ++k) {
+                    if (!case_config.events[k].enabled) {
+                        continue;
+                    }
+                    const MissionEventRuntime& rt = mission_events->runtimes[k];
+                    if (rt.prev_g > 0.0) {
+                        // Already past the rising edge; not armed.
+                        continue;
+                    }
+                    events.push_back(make_trigger_event(
+                        case_config.events[k].trigger,
+                        runtime,
+                        /*time_base_s=*/0.0,
+                        /*terminating=*/true,
+                        "mission_event_" + std::to_string(k)));
+                    mission_event_armed_indices.push_back(k);
+                }
             }
 
             const post2::integrators::StepResult step_result = integrator->step(
@@ -724,16 +943,24 @@ StateLog propagate_phase(
                  step_result.h_next_suggested > 1.0e-12)
                     ? step_result.h_next_suggested
                     : case_config.step_s;
-            // If a tank-empty event fired, clamp that tank to exactly zero
-            // so the next step's gating logic sees it as drained.
+            // Dispatch by event class. tank_empty: clamp that tank to zero.
+            // altitude_zero: break the outer loop. phase_termination: break.
+            // mission_event_K: applied later, after vehicle_propagator.commit.
             if (step_result.event.has_value()) {
-                altitude_zero_event_hit = step_result.event->name == "altitude_zero";
                 const std::size_t event_idx = step_result.event->event_index;
+                altitude_zero_event_hit = step_result.event->name == "altitude_zero";
                 if (event_idx < event_tank_indices.size()) {
+                    // tank_empty_K
                     const std::size_t tank_idx = event_tank_indices[event_idx];
                     if (tank_idx < integrated.tank_masses_kg.size()) {
                         integrated.tank_masses_kg[tank_idx] = 0.0;
                     }
+                } else if (!time_terminated && event_idx == termination_event_index) {
+                    phase_terminated_by_event = true;
+                } else if (event_idx >= mission_event_base &&
+                           (event_idx - mission_event_base) < mission_event_armed_indices.size()) {
+                    fired_mission_event_index =
+                        mission_event_armed_indices[event_idx - mission_event_base];
                 }
             }
             if (phase.force_models.normal_force) {
@@ -746,6 +973,39 @@ StateLog propagate_phase(
         runtime = vehicle_propagator.commit(runtime, integrated, next_time_s, last_eval, command);
         set_hold_down_clamp_state(&runtime, simulation_config, control.hold_down_clamp_active);
         apply_due_actions(actions, next_time_s - phase_start_time_s, simulation_config, &control, &runtime);
+
+        // Mission events: apply the fired event's actions atomically, then
+        // re-evaluate prev_g for every enabled event so the next step arms
+        // correctly. Evaluating against runtime *after* actions means a
+        // trigger that the action invalidates (e.g. detached stage drops
+        // total mass below threshold) does not immediately refire.
+        if (fired_mission_event_index != std::numeric_limits<std::size_t>::max() &&
+            mission_events &&
+            fired_mission_event_index < case_config.events.size()) {
+            const EventConfig& fired_event = case_config.events[fired_mission_event_index];
+            for (const auto& action : fired_event.actions) {
+                apply_single_action(action, simulation_config, &control, &runtime);
+            }
+            mission_events->runtimes[fired_mission_event_index].fired_count++;
+        }
+        if (mission_events) {
+            const post2::integrators::ExtendedState eval_state{
+                runtime.vehicle.motion,
+                post2::vehicle::read_tank_masses_flat(runtime),
+            };
+            for (std::size_t k = 0; k < case_config.events.size(); ++k) {
+                if (!case_config.events[k].enabled) {
+                    continue;
+                }
+                post2::integrators::EventFunction probe = make_trigger_event(
+                    case_config.events[k].trigger,
+                    runtime,
+                    /*time_base_s=*/0.0,
+                    /*terminating=*/false,
+                    "mission_event_probe");
+                mission_events->runtimes[k].prev_g = probe.g(next_time_s, eval_state);
+            }
+        }
         {
             const auto env_after_step = make_environment_state(
                 simulation_config, phase, next_time_s, runtime.vehicle.motion);
@@ -757,7 +1017,7 @@ StateLog propagate_phase(
                 last_acceleration_eci_mps2);
         }
         time_s = next_time_s;
-        if (altitude_zero_event_hit) {
+        if (altitude_zero_event_hit || phase_terminated_by_event) {
             break;
         }
     }
@@ -936,11 +1196,20 @@ SimulationResult SimulationDriver::run(const CaseConfig& config) const
         StateLog state_log(config.earth_radius_m, config.vehicle);
         post2::propagation::VehicleConsumptionPropagator vehicle_propagator(config.vehicle);
 
+        // Mission events state lives across all phases. prev_g is initialised
+        // to a small negative value so a trigger already satisfied at t=0
+        // does not spuriously refire on its first evaluation.
+        MissionEventsState mission_events;
+        mission_events.runtimes.assign(config.events.size(), MissionEventRuntime{});
+
         double phase_start_time_s = 0.0;
         for (std::size_t phase_index = 0; phase_index < config.phases.size(); ++phase_index) {
             const PhaseConfig& phase = config.phases[phase_index];
+            const double phase_horizon_for_sim_config =
+                (phase.termination.type == "time") ? phase.termination.value : kMaxPhaseTimeS;
             const SimulationConfig simulation_config =
-                make_phase_simulation_config(config, phase, phase_start_time_s + phase.duration_s);
+                make_phase_simulation_config(
+                    config, phase, phase_start_time_s + phase_horizon_for_sim_config);
 
             post2::vehicle::VehicleRuntimeState initial_runtime;
             if (phase.inherit_initial_state && !state_log.empty()) {
@@ -956,13 +1225,20 @@ SimulationResult SimulationDriver::run(const CaseConfig& config) const
                 return {false, "phase " + std::to_string(phase_index) + " has no initial state", state_log};
             }
 
-            const StateLog phase_log =
-                propagate_phase(config, phase, phase_index, phase_start_time_s, initial_runtime);
+            const StateLog phase_log = propagate_phase(
+                config, phase, phase_index, phase_start_time_s, initial_runtime, &mission_events);
             merge_phase_log(&state_log, phase_log);
             if (case_vehicle_impacted_earth(state_log, config)) {
                 return {false, "vehicle impacted Earth during propagation", state_log};
             }
-            phase_start_time_s += phase.duration_s;
+            // The phase may have terminated by event before exhausting its
+            // time horizon; advance the mission clock to wherever the phase
+            // actually ended.
+            if (!phase_log.empty()) {
+                phase_start_time_s = phase_log.back().time_s;
+            } else if (phase.termination.type == "time") {
+                phase_start_time_s += phase.termination.value;
+            }
         }
 
         if (case_vehicle_impacted_earth(state_log, config)) {

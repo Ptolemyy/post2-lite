@@ -3,6 +3,7 @@
 #include "post2/core/projection.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <fstream>
 #include <iomanip>
@@ -13,6 +14,13 @@
 namespace post2::core {
 
 namespace {
+
+constexpr const char* kTrajectoryCsvHeader =
+    "time_s,x_m,y_m,z_m,vx_mps,vy_mps,vz_mps,altitude_m,speed_mps,"
+    "total_mass_kg,propellant_mass_kg,engine_thrust_n,engine_mass_flow_kgps,"
+    "throttle,engine_direction_eci_x,engine_direction_eci_y,engine_direction_eci_z,"
+    "ambient_pressure_pa,atmosphere_density_kgpm3,dynamic_pressure_pa,mach_number,"
+    "hold_down_clamp_active,phase_index,phase_name";
 
 bool parse_double(const std::string& text, double* value)
 {
@@ -40,6 +48,132 @@ std::vector<std::string> split_csv_line(const std::string& line)
     return parts;
 }
 
+std::string lowercase(std::string text)
+{
+    std::transform(text.begin(), text.end(), text.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
+    return text;
+}
+
+void write_trajectory_csv_row(std::ostream& output, const LaunchVehicleStateLogEntry& point)
+{
+    output
+        << point.time_s << ','
+        << point.state.position_m.x << ','
+        << point.state.position_m.y << ','
+        << point.state.position_m.z << ','
+        << point.state.velocity_mps.x << ','
+        << point.state.velocity_mps.y << ','
+        << point.state.velocity_mps.z << ','
+        << point.altitude_m << ','
+        << point.speed_mps << ','
+        << point.total_mass_kg << ','
+        << point.propellant_mass_kg << ','
+        << point.engine_thrust_n << ','
+        << point.engine_mass_flow_kgps << ','
+        << point.throttle << ','
+        << point.engine_direction_eci.x << ','
+        << point.engine_direction_eci.y << ','
+        << point.engine_direction_eci.z << ','
+        << point.ambient_pressure_pa << ','
+        << point.atmosphere_density_kgpm3 << ','
+        << point.dynamic_pressure_pa << ','
+        << point.mach_number << ','
+        << (point.hold_down_clamp_active ? 1 : 0) << ','
+        << point.phase_index << ','
+        << point.phase_name;
+}
+
+std::vector<double> configured_phase_start_times(const CaseConfig& case_config)
+{
+    std::vector<double> starts;
+    starts.reserve(case_config.phases.size());
+    double time_s = 0.0;
+    for (const auto& phase : case_config.phases) {
+        starts.push_back(time_s);
+        // Non-time terminations do not contribute a known duration here;
+        // callers fall back to the state-log time for actual phase boundaries.
+        if (phase.termination.type == "time") {
+            time_s += phase.termination.value;
+        }
+    }
+    return starts;
+}
+
+double phase_start_time_s(
+    const LaunchVehicleStateLogEntry& point,
+    const std::vector<double>& phase_starts)
+{
+    if (point.phase_index >= 0 &&
+        static_cast<std::size_t>(point.phase_index) < phase_starts.size()) {
+        return phase_starts[static_cast<std::size_t>(point.phase_index)];
+    }
+    return point.time_s;
+}
+
+const PhaseConfig* phase_for_point(
+    const LaunchVehicleStateLogEntry& point,
+    const CaseConfig& case_config)
+{
+    if (point.phase_index < 0 ||
+        static_cast<std::size_t>(point.phase_index) >= case_config.phases.size()) {
+        return nullptr;
+    }
+    return &case_config.phases[static_cast<std::size_t>(point.phase_index)];
+}
+
+bool is_generic_poly_steering(const PhaseConfig& phase)
+{
+    return lowercase(phase.steering_model.type) == "generic_poly";
+}
+
+bool is_poly_throttle(const PhaseConfig& phase)
+{
+    return lowercase(phase.throttle_model.type) == "poly";
+}
+
+bool detached_stage_since(
+    const LaunchVehicleStateLogEntry& previous,
+    const LaunchVehicleStateLogEntry& current)
+{
+    const std::size_t count = std::min(previous.runtime.stages.size(), current.runtime.stages.size());
+    for (std::size_t i = 0; i < count; ++i) {
+        if (previous.runtime.stages[i].attached && !current.runtime.stages[i].attached) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool deactivated_stage_since(
+    const LaunchVehicleStateLogEntry& previous,
+    const LaunchVehicleStateLogEntry& current)
+{
+    const std::size_t count = std::min(previous.runtime.stages.size(), current.runtime.stages.size());
+    for (std::size_t i = 0; i < count; ++i) {
+        if (previous.runtime.stages[i].active && !current.runtime.stages[i].active) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool activated_stage_since(
+    const LaunchVehicleStateLogEntry& previous,
+    const LaunchVehicleStateLogEntry& current)
+{
+    const std::size_t count = std::min(previous.runtime.stages.size(), current.runtime.stages.size());
+    for (std::size_t i = 0; i < count; ++i) {
+        if (!previous.runtime.stages[i].active &&
+            current.runtime.stages[i].active &&
+            current.runtime.stages[i].attached) {
+            return true;
+        }
+    }
+    return false;
+}
+
 double sx(double x_m, double scale, double center_x)
 {
     return center_x + x_m * scale;
@@ -56,37 +190,88 @@ std::string trajectory_to_csv(const StateLog& state_log)
 {
     std::ostringstream output;
     output << std::setprecision(17);
-    output << "time_s,x_m,y_m,z_m,vx_mps,vy_mps,vz_mps,altitude_m,speed_mps,"
-              "total_mass_kg,propellant_mass_kg,engine_thrust_n,engine_mass_flow_kgps,"
-              "throttle,engine_direction_eci_x,engine_direction_eci_y,engine_direction_eci_z,"
-              "ambient_pressure_pa,atmosphere_density_kgpm3,dynamic_pressure_pa,mach_number,"
-              "hold_down_clamp_active,phase_index,phase_name\n";
+    output << kTrajectoryCsvHeader << '\n';
     for (const auto& point : state_log.entries()) {
+        write_trajectory_csv_row(output, point);
+        output << '\n';
+    }
+    return output.str();
+}
+
+std::string kos_trajectory_to_csv(const StateLog& state_log, const CaseConfig& case_config)
+{
+    std::ostringstream output;
+    output << std::setprecision(17);
+    output << kTrajectoryCsvHeader
+           << ",kos_phase_start_time_s,kos_phase_time_s,"
+              "kos_steering_poly_available,"
+              "kos_azimuth_c0,kos_azimuth_c1,kos_azimuth_c2,"
+              "kos_elevation_c0,kos_elevation_c1,kos_elevation_c2,"
+              "kos_roll_available,kos_roll_c0,kos_roll_c1,kos_roll_c2,"
+              "kos_throttle_poly_available,"
+              "kos_throttle_c0,kos_throttle_c1,kos_throttle_c2,"
+              "kos_stage_command,kos_stage_plan_time_s,"
+              "kos_stage_pulse_count,kos_shutdown_before_stage\n";
+
+    const std::vector<double> phase_starts = configured_phase_start_times(case_config);
+    const LaunchVehicleStateLogEntry* previous = nullptr;
+    for (const auto& point : state_log.entries()) {
+        const double phase_start_s = phase_start_time_s(point, phase_starts);
+        const double phase_time_s = point.time_s - phase_start_s;
+        const PhaseConfig* phase = phase_for_point(point, case_config);
+
+        const bool steering_poly_available = phase && is_generic_poly_steering(*phase);
+        const Poly2Config azimuth = steering_poly_available ? phase->steering_model.azimuth_deg : Poly2Config{};
+        const Poly2Config elevation = steering_poly_available ? phase->steering_model.elevation_deg : Poly2Config{};
+        const Poly2Config roll = steering_poly_available ? phase->steering_model.roll_deg : Poly2Config{};
+
+        const bool throttle_poly_available = phase && is_poly_throttle(*phase);
+        double throttle_c0 = 0.0;
+        double throttle_c1 = 0.0;
+        double throttle_c2 = 0.0;
+        if (throttle_poly_available) {
+            throttle_c0 = phase->throttle_model.c0;
+            throttle_c1 = phase->throttle_model.c1;
+            throttle_c2 = phase->throttle_model.c2;
+        }
+
+        const bool stage_command = previous && detached_stage_since(*previous, point);
+        const bool shutdown_before_stage = previous && stage_command && deactivated_stage_since(*previous, point);
+        const bool ignition_after_separation = previous && stage_command && activated_stage_since(*previous, point);
+        const int stage_pulse_count = stage_command
+            ? (ignition_after_separation ? 2 : 1)
+            : 0;
+        double stage_plan_time_s = stage_command ? point.time_s : 0.0;
+        if (stage_command && previous->phase_index != point.phase_index) {
+            stage_plan_time_s = phase_start_s;
+        }
+
+        write_trajectory_csv_row(output, point);
         output
-            << point.time_s << ','
-            << point.state.position_m.x << ','
-            << point.state.position_m.y << ','
-            << point.state.position_m.z << ','
-            << point.state.velocity_mps.x << ','
-            << point.state.velocity_mps.y << ','
-            << point.state.velocity_mps.z << ','
-            << point.altitude_m << ','
-            << point.speed_mps << ','
-            << point.total_mass_kg << ','
-            << point.propellant_mass_kg << ','
-            << point.engine_thrust_n << ','
-            << point.engine_mass_flow_kgps << ','
-            << point.throttle << ','
-            << point.engine_direction_eci.x << ','
-            << point.engine_direction_eci.y << ','
-            << point.engine_direction_eci.z << ','
-            << point.ambient_pressure_pa << ','
-            << point.atmosphere_density_kgpm3 << ','
-            << point.dynamic_pressure_pa << ','
-            << point.mach_number << ','
-            << (point.hold_down_clamp_active ? 1 : 0) << ','
-            << point.phase_index << ','
-            << point.phase_name << '\n';
+            << ',' << phase_start_s
+            << ',' << phase_time_s
+            << ',' << (steering_poly_available ? 1 : 0)
+            << ',' << azimuth.c0
+            << ',' << azimuth.c1
+            << ',' << azimuth.c2
+            << ',' << elevation.c0
+            << ',' << elevation.c1
+            << ',' << elevation.c2
+            << ',' << (steering_poly_available ? 1 : 0)
+            << ',' << roll.c0
+            << ',' << roll.c1
+            << ',' << roll.c2
+            << ',' << (throttle_poly_available ? 1 : 0)
+            << ',' << throttle_c0
+            << ',' << throttle_c1
+            << ',' << throttle_c2
+            << ',' << (stage_command ? 1 : 0)
+            << ',' << stage_plan_time_s
+            << ',' << stage_pulse_count
+            << ',' << (shutdown_before_stage ? 1 : 0)
+            << '\n';
+
+        previous = &point;
     }
     return output.str();
 }
@@ -202,6 +387,24 @@ bool write_csv_file(const std::string& path, const StateLog& state_log, std::str
     }
 
     output << trajectory_to_csv(state_log);
+    return true;
+}
+
+bool write_kos_csv_file(
+    const std::string& path,
+    const StateLog& state_log,
+    const CaseConfig& case_config,
+    std::string* error)
+{
+    std::ofstream output(path, std::ios::binary);
+    if (!output) {
+        if (error) {
+            *error = "failed to open kOS CSV file: " + path;
+        }
+        return false;
+    }
+
+    output << kos_trajectory_to_csv(state_log, case_config);
     return true;
 }
 

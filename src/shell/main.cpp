@@ -645,7 +645,8 @@ void sync_loaded_case_from_legacy_surface(Options* options)
     options->case_config.launch_site = options->config.launch_site;
     options->case_config.step_s = options->config.step_s;
     if (!options->case_config.phases.empty()) {
-        options->case_config.phases.front().duration_s = options->config.duration_s;
+        options->case_config.phases.front().termination =
+            {"time", ">=", options->config.duration_s};
         options->case_config.phases.front().force_models.normal_force = options->config.normal_force.enabled;
         options->case_config.phases.front().force_models.aerodynamic =
             options->config.vehicle.aero.enabled;
@@ -709,6 +710,8 @@ bool prepare_optimization_case(Options* options)
     }
     if (options->objective_set) {
         optimization.objective = options->optimization_overrides.objective;
+        optimization.objectives.clear();
+        optimization.objectives.push_back(options->optimization_overrides.objective);
         optimization.mode = "optimize";
     }
 

@@ -142,7 +142,39 @@ constexpr int kOptContinuationVariableCombo = 2120;
 constexpr int kOptContinuationDirectionCombo = 2121;
 constexpr int kOptContinuationStepsEdit = 2122;
 constexpr int kOptContinuationStartsEdit = 2123;
+constexpr int kOptObjectiveList = 2126;
+constexpr int kOptObjectiveAdd = 2127;
+constexpr int kOptObjectiveEdit = 2128;
+constexpr int kOptObjectiveDelete = 2129;
+constexpr int kOptEnvelopeSamplesEdit = 2130;
 constexpr UINT kOptimizationFinishedMessage = WM_APP + 1;
+
+// Sub-dialog control IDs for the phase-action / trigger-condition / event
+// modal editors. They live in their own range to avoid colliding with the
+// inline phase-action controls (1922-1928 above) which still exist while we
+// migrate callers to the modal pattern.
+constexpr int kPhaseActionEditTime = 2401;
+constexpr int kPhaseActionEditType = 2402;
+constexpr int kPhaseActionEditValue = 2403;
+constexpr int kPhaseActionEditStage = 2404;
+constexpr int kTriggerEditType = 2410;
+constexpr int kTriggerEditComparison = 2411;
+constexpr int kTriggerEditValue = 2412;
+constexpr int kEventEditName = 2420;
+constexpr int kEventEditEnabled = 2421;
+constexpr int kEventEditTriggerButton = 2422;
+constexpr int kEventEditActionList = 2423;
+constexpr int kEventEditActionAdd = 2424;
+constexpr int kEventEditActionEdit = 2425;
+constexpr int kEventEditActionDelete = 2426;
+// Top-level case-events pane controls.
+constexpr int kCaseEventsList = 2430;
+constexpr int kCaseEventsAdd = 2431;
+constexpr int kCaseEventsEdit = 2432;
+constexpr int kCaseEventsDelete = 2433;
+// Phase termination Edit button.
+constexpr int kPhaseTerminationEditButton = 2440;
+constexpr int kPhaseActionEdit = 2441;
 constexpr const wchar_t* kSceneWindowClassName = L"Post2LiteOpenGLScene";
 
 // Middle column holding pre-takeoff and final vehicle stats.
@@ -213,7 +245,7 @@ HWND g_phase_list = nullptr;
 HWND g_phase_add_button = nullptr;
 HWND g_phase_delete_button = nullptr;
 HWND g_phase_name_edit = nullptr;
-HWND g_phase_duration_edit = nullptr;
+HWND g_phase_termination_label = nullptr;
 HWND g_phase_inherit_initial = nullptr;
 HWND g_phase_hold_down_initial = nullptr;
 HWND g_phase_optimize_enabled = nullptr;
@@ -266,6 +298,11 @@ HWND create_edit(HWND parent, int id, int x, int y, int width, const std::wstrin
 HWND create_button(HWND parent, int id, int x, int y, int width, int height, const wchar_t* text, HFONT font);
 HWND create_checkbox(HWND parent, int id, int x, int y, int width, const wchar_t* text, HFONT font);
 HWND create_combo(HWND parent, int id, int x, int y, int width, HFONT font);
+std::string action_label(const post2::core::PhaseAction& action);
+std::string action_type_display_label(const std::string& type);
+std::string action_type_from_display_label(const std::string& label);
+std::string action_state_display_label(const std::string& type, bool value);
+bool action_state_from_display_label(const std::string& type, const std::string& label);
 void add_combo_item(HWND combo, const wchar_t* text);
 void select_combo_text(HWND combo, const std::string& text);
 std::string get_combo_text(HWND combo);
@@ -280,7 +317,7 @@ bool window_is_live(HWND hwnd)
 void clear_phase_editor_handles()
 {
     g_phase_name_edit = nullptr;
-    g_phase_duration_edit = nullptr;
+    g_phase_termination_label = nullptr;
     g_phase_inherit_initial = nullptr;
     g_phase_hold_down_initial = nullptr;
     g_phase_optimize_enabled = nullptr;
@@ -372,17 +409,22 @@ struct OptimizationSettingsDialogState {
     HWND tolerance_edit = nullptr;
     HWND step_fraction_edit = nullptr;
     HWND target_list = nullptr;
-    HWND objective_enabled = nullptr;
-    HWND objective_metric_combo = nullptr;
-    HWND objective_direction_combo = nullptr;
-    HWND objective_weight_edit = nullptr;
+    HWND target_add_button = nullptr;
+    HWND target_edit_button = nullptr;
+    HWND target_delete_button = nullptr;
+    HWND objective_list = nullptr;
+    HWND objective_add_button = nullptr;
+    HWND objective_edit_button = nullptr;
+    HWND objective_delete_button = nullptr;
     HWND continuation_strategy_combo = nullptr;
     HWND continuation_variable_combo = nullptr;
     HWND continuation_direction_combo = nullptr;
     HWND continuation_steps_edit = nullptr;
     HWND continuation_starts_edit = nullptr;
+    HWND envelope_samples_edit = nullptr;
     post2::core::OptimizationConfig config;
     int selected_target_index = 0;
+    int selected_objective_index = 0;
     bool accepted = false;
 };
 
@@ -395,6 +437,72 @@ struct OptimizationTargetEditorDialogState {
     HWND max_edit = nullptr;
     HWND weight_edit = nullptr;
     post2::core::OptimizationTargetConfig target;
+    bool accepted = false;
+};
+
+struct PhaseActionEditorDialogState {
+    HWND hwnd = nullptr;
+    HWND time_edit = nullptr;
+    HWND type_combo = nullptr;
+    HWND value_combo = nullptr;
+    HWND stage_combo = nullptr;
+    post2::core::PhaseAction action;
+    const post2::vehicle::VehicleConfig* vehicle = nullptr;
+    bool accepted = false;
+};
+
+struct TriggerConditionEditorDialogState {
+    HWND hwnd = nullptr;
+    HWND type_combo = nullptr;
+    HWND comparison_combo = nullptr;
+    HWND value_edit = nullptr;
+    HWND opt_check = nullptr;
+    HWND min_edit = nullptr;
+    HWND max_edit = nullptr;
+    post2::core::TriggerCondition trigger;
+    // When non-null + non-empty variable_path, the editor exposes an Opt /
+    // Min / Max row that registers the trigger value as an optimization
+    // variable in *optimization. nullptr/empty disables the Opt row.
+    post2::core::OptimizationConfig* optimization = nullptr;
+    std::string variable_path;
+    bool accepted = false;
+};
+
+struct EventEditorDialogState {
+    HWND hwnd = nullptr;
+    HWND name_edit = nullptr;
+    HWND enabled_check = nullptr;
+    HWND trigger_summary_label = nullptr;
+    HWND trigger_edit_button = nullptr;
+    HWND action_list = nullptr;
+    HWND action_add_button = nullptr;
+    HWND action_edit_button = nullptr;
+    HWND action_delete_button = nullptr;
+    post2::core::EventConfig event;
+    const post2::vehicle::VehicleConfig* vehicle = nullptr;
+    int selected_action_index = -1;
+    bool accepted = false;
+};
+
+struct CaseEventsManagerDialogState {
+    HWND hwnd = nullptr;
+    HWND event_list = nullptr;
+    HWND add_button = nullptr;
+    HWND edit_button = nullptr;
+    HWND delete_button = nullptr;
+    std::vector<post2::core::EventConfig> events;
+    const post2::vehicle::VehicleConfig* vehicle = nullptr;
+    int selected_index = -1;
+    bool accepted = false;
+};
+
+struct OptimizationObjectiveEditorDialogState {
+    HWND hwnd = nullptr;
+    HWND enabled_check = nullptr;
+    HWND metric_combo = nullptr;
+    HWND direction_combo = nullptr;
+    HWND weight_edit = nullptr;
+    post2::core::OptimizationObjectiveConfig objective;
     bool accepted = false;
 };
 
@@ -488,7 +596,9 @@ void sync_case_surface_from_legacy()
     g_case.step_s = g_config.step_s;
     if (!g_case.phases.empty()) {
         auto& phase = g_case.phases.front();
-        phase.duration_s = g_config.duration_s;
+        if (phase.termination.type == "time") {
+            phase.termination.value = g_config.duration_s;
+        }
         phase.force_models.normal_force = g_config.normal_force.enabled;
         phase.hold_down_clamp_initial_active =
             g_config.hold_down_clamp.enabled && g_config.hold_down_clamp.release_time_s > 0.0;
@@ -2692,12 +2802,14 @@ void sync_optimization_continuation_controls(OptimizationSettingsDialogState* st
         return;
     }
     const std::string strategy = get_combo_text(state->continuation_strategy_combo);
-    const bool enabled = strategy != "single";
+    const bool enabled = strategy == "continuation" || strategy == "continuation+multistart";
     const bool multistart = strategy == "continuation+multistart";
+    const bool envelope = strategy == "envelope";
     EnableWindow(state->continuation_variable_combo, enabled);
     EnableWindow(state->continuation_direction_combo, enabled);
     EnableWindow(state->continuation_steps_edit, enabled);
     EnableWindow(state->continuation_starts_edit, enabled && multistart);
+    EnableWindow(state->envelope_samples_edit, envelope);
 }
 
 void refresh_optimization_target_list(OptimizationSettingsDialogState* state)
@@ -2969,6 +3081,1105 @@ bool show_optimization_target_editor_dialog(
     return state.accepted;
 }
 
+// ============================================================================
+// Phase action editor (modal). Replaces the inline edit row that silently
+// dropped time_s edits.
+// ============================================================================
+
+void populate_action_value_combo_for_hwnd(HWND combo, const std::string& type, bool value)
+{
+    SendMessageW(combo, CB_RESETCONTENT, 0, 0);
+    if (type == "set_engine_enabled") {
+        add_combo_item(combo, L"enabled");
+        add_combo_item(combo, L"disabled");
+    } else {
+        add_combo_item(combo, L"active");
+        add_combo_item(combo, L"inactive");
+    }
+    select_combo_text(combo, action_state_display_label(type, value));
+}
+
+void populate_action_stage_combo_for_hwnd(
+    HWND combo, const post2::vehicle::VehicleConfig& vehicle, int selected_index)
+{
+    SendMessageW(combo, CB_RESETCONTENT, 0, 0);
+    const auto stages = post2::vehicle::effective_stage_configs(vehicle);
+    for (std::size_t i = 0; i < stages.size(); ++i) {
+        const std::wstring label = widen(std::to_string(i + 1) + ": " + stages[i].name);
+        SendMessageW(combo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label.c_str()));
+    }
+    const int clamped = selected_index >= 0 && static_cast<std::size_t>(selected_index) < stages.size()
+        ? selected_index : 0;
+    SendMessageW(combo, CB_SETCURSEL, static_cast<WPARAM>(clamped), 0);
+}
+
+void sync_phase_action_editor_stage_enabled(PhaseActionEditorDialogState* state)
+{
+    if (!state) return;
+    const std::string type = action_type_from_display_label(get_combo_text(state->type_combo));
+    EnableWindow(state->stage_combo,
+        (type == "set_stage_active" || type == "set_stage_attached") ? TRUE : FALSE);
+}
+
+void create_phase_action_editor_controls(PhaseActionEditorDialogState* state)
+{
+    HFONT font = static_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
+
+    create_label(state->hwnd, 18, 22, 70, L"Time (s)", font);
+    state->time_edit = create_edit(
+        state->hwnd, kPhaseActionEditTime, 104, 18, 130, format_double(state->action.time_s), font);
+
+    create_label(state->hwnd, 18, 62, 70, L"Action", font);
+    state->type_combo = create_combo(state->hwnd, kPhaseActionEditType, 104, 58, 250, font);
+    add_combo_item(state->type_combo, L"Engine enabled");
+    add_combo_item(state->type_combo, L"Hold-down clamp active");
+    add_combo_item(state->type_combo, L"Stage active");
+    add_combo_item(state->type_combo, L"Stage attached");
+    select_combo_text(state->type_combo, action_type_display_label(state->action.type));
+
+    create_label(state->hwnd, 18, 102, 70, L"State", font);
+    state->value_combo = create_combo(state->hwnd, kPhaseActionEditValue, 104, 98, 130, font);
+    populate_action_value_combo_for_hwnd(state->value_combo, state->action.type, state->action.value);
+
+    create_label(state->hwnd, 18, 142, 70, L"Stage", font);
+    state->stage_combo = create_combo(state->hwnd, kPhaseActionEditStage, 104, 138, 250, font);
+    if (state->vehicle) {
+        populate_action_stage_combo_for_hwnd(state->stage_combo, *state->vehicle, state->action.stage_index);
+    }
+    sync_phase_action_editor_stage_enabled(state);
+
+    HWND ok = create_button(state->hwnd, IDOK, 270, 200, 76, 28, L"OK", font);
+    SendMessageW(ok, BM_SETSTYLE, BS_DEFPUSHBUTTON, TRUE);
+    create_button(state->hwnd, IDCANCEL, 360, 200, 76, 28, L"Cancel", font);
+}
+
+bool accept_phase_action_editor_dialog(PhaseActionEditorDialogState* state)
+{
+    post2::core::PhaseAction action = state->action;
+    if (!read_double_field(state->hwnd, state->time_edit, L"time_s", L"Phase action", &action.time_s)) {
+        return false;
+    }
+    if (action.time_s < 0.0) {
+        MessageBoxW(state->hwnd, L"time_s must be non-negative.", L"Phase action", MB_ICONWARNING);
+        SetFocus(state->time_edit);
+        return false;
+    }
+    action.type = action_type_from_display_label(get_combo_text(state->type_combo));
+    action.value = action_state_from_display_label(action.type, get_combo_text(state->value_combo));
+    action.stage_index = -1;
+    action.stage_name.clear();
+    if (action.type == "set_stage_active" || action.type == "set_stage_attached") {
+        const LRESULT sel = SendMessageW(state->stage_combo, CB_GETCURSEL, 0, 0);
+        if (sel == CB_ERR) {
+            MessageBoxW(state->hwnd, L"Select a target stage.", L"Phase action", MB_ICONWARNING);
+            SetFocus(state->stage_combo);
+            return false;
+        }
+        action.stage_index = static_cast<int>(sel);
+        if (state->vehicle) {
+            const auto stages = post2::vehicle::effective_stage_configs(*state->vehicle);
+            if (static_cast<std::size_t>(action.stage_index) < stages.size()) {
+                action.stage_name = stages[static_cast<std::size_t>(action.stage_index)].name;
+            }
+        }
+    }
+    state->action = std::move(action);
+    state->accepted = true;
+    DestroyWindow(state->hwnd);
+    return true;
+}
+
+LRESULT CALLBACK phase_action_editor_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam)
+{
+    auto* state = reinterpret_cast<PhaseActionEditorDialogState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    switch (message) {
+    case WM_NCCREATE: {
+        auto* create = reinterpret_cast<CREATESTRUCTW*>(lparam);
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(create->lpCreateParams));
+        return TRUE;
+    }
+    case WM_CREATE:
+        state = reinterpret_cast<PhaseActionEditorDialogState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+        state->hwnd = hwnd;
+        create_phase_action_editor_controls(state);
+        return 0;
+    case WM_COMMAND:
+        switch (LOWORD(wparam)) {
+        case IDOK:
+            accept_phase_action_editor_dialog(state);
+            return 0;
+        case IDCANCEL:
+            DestroyWindow(hwnd);
+            return 0;
+        case kPhaseActionEditType:
+            if (HIWORD(wparam) == CBN_SELCHANGE) {
+                const std::string type =
+                    action_type_from_display_label(get_combo_text(state->type_combo));
+                const bool current_value = action_state_from_display_label(
+                    type, get_combo_text(state->value_combo));
+                populate_action_value_combo_for_hwnd(state->value_combo, type, current_value);
+                sync_phase_action_editor_stage_enabled(state);
+                return 0;
+            }
+            break;
+        }
+        break;
+    case WM_CLOSE:
+        DestroyWindow(hwnd);
+        return 0;
+    }
+    return DefWindowProcW(hwnd, message, wparam, lparam);
+}
+
+void register_phase_action_editor_class()
+{
+    static bool registered = false;
+    if (registered) return;
+    WNDCLASSW wc = {};
+    wc.lpfnWndProc = phase_action_editor_proc;
+    wc.hInstance = g_instance;
+    wc.lpszClassName = L"Post2PhaseActionEditorWindow";
+    wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+    wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+    RegisterClassW(&wc);
+    registered = true;
+}
+
+bool show_phase_action_editor_dialog(
+    HWND parent,
+    post2::core::PhaseAction* action,
+    const post2::vehicle::VehicleConfig& vehicle,
+    const wchar_t* title)
+{
+    register_phase_action_editor_class();
+    PhaseActionEditorDialogState state;
+    state.action = *action;
+    state.vehicle = &vehicle;
+    RECT parent_rect;
+    GetWindowRect(parent, &parent_rect);
+    constexpr int dialog_width = 480;
+    constexpr int dialog_height = 280;
+    const int x = parent_rect.left + ((parent_rect.right - parent_rect.left) - dialog_width) / 2;
+    const int y = parent_rect.top + ((parent_rect.bottom - parent_rect.top) - dialog_height) / 2;
+    HWND dialog = CreateWindowExW(
+        WS_EX_DLGMODALFRAME | WS_EX_WINDOWEDGE,
+        L"Post2PhaseActionEditorWindow",
+        title,
+        WS_CAPTION | WS_SYSMENU | WS_POPUP,
+        x, y, dialog_width, dialog_height,
+        parent, nullptr, g_instance, &state);
+    if (!dialog) {
+        MessageBoxW(parent, L"Failed to create phase action editor.", L"POST2 Lite", MB_ICONERROR);
+        return false;
+    }
+    EnableWindow(parent, FALSE);
+    ShowWindow(dialog, SW_SHOW);
+    SetFocus(state.time_edit);
+    MSG msg;
+    while (IsWindow(dialog) && GetMessageW(&msg, nullptr, 0, 0) > 0) {
+        if (!IsDialogMessageW(dialog, &msg)) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+    }
+    EnableWindow(parent, TRUE);
+    SetForegroundWindow(parent);
+    if (state.accepted) {
+        *action = std::move(state.action);
+    }
+    return state.accepted;
+}
+
+// ============================================================================
+// Trigger condition editor (modal). Shared by phase termination and event
+// triggers.
+// ============================================================================
+
+std::string trigger_type_display_label(const std::string& type)
+{
+    if (type == "time") return "Time (s)";
+    if (type == "altitude_m") return "Altitude (m, geodetic)";
+    if (type == "velocity_mps") return "Velocity magnitude (m/s)";
+    if (type == "total_mass_kg") return "Total vehicle mass (kg)";
+    if (type == "propellant_mass_kg") return "Propellant mass (kg, active stage)";
+    return type;
+}
+
+std::string trigger_type_from_display_label(const std::string& label)
+{
+    if (label.rfind("Time", 0) == 0) return "time";
+    if (label.rfind("Altitude", 0) == 0) return "altitude_m";
+    if (label.rfind("Velocity", 0) == 0) return "velocity_mps";
+    if (label.rfind("Total vehicle mass", 0) == 0) return "total_mass_kg";
+    if (label.rfind("Propellant mass", 0) == 0) return "propellant_mass_kg";
+    return label;
+}
+
+std::wstring trigger_summary(const post2::core::TriggerCondition& trigger)
+{
+    std::wstring summary = widen(trigger_type_display_label(trigger.type));
+    summary += L" ";
+    summary += widen(trigger.comparison);
+    summary += L" ";
+    summary += format_double(trigger.value);
+    return summary;
+}
+
+void create_trigger_editor_controls(TriggerConditionEditorDialogState* state)
+{
+    HFONT font = static_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
+
+    create_label(state->hwnd, 18, 22, 80, L"Quantity", font);
+    state->type_combo = create_combo(state->hwnd, kTriggerEditType, 118, 18, 290, font);
+    add_combo_item(state->type_combo, L"Time (s)");
+    add_combo_item(state->type_combo, L"Altitude (m, geodetic)");
+    add_combo_item(state->type_combo, L"Velocity magnitude (m/s)");
+    add_combo_item(state->type_combo, L"Total vehicle mass (kg)");
+    add_combo_item(state->type_combo, L"Propellant mass (kg, active stage)");
+    select_combo_text(state->type_combo, trigger_type_display_label(state->trigger.type));
+
+    create_label(state->hwnd, 18, 62, 80, L"Comparison", font);
+    state->comparison_combo = create_combo(state->hwnd, kTriggerEditComparison, 118, 58, 90, font);
+    add_combo_item(state->comparison_combo, L">=");
+    add_combo_item(state->comparison_combo, L"<=");
+    select_combo_text(state->comparison_combo, state->trigger.comparison);
+
+    create_label(state->hwnd, 18, 102, 80, L"Value", font);
+    state->value_edit = create_edit(
+        state->hwnd, kTriggerEditValue, 118, 98, 200, format_double(state->trigger.value), font);
+
+    int dialog_h = 240;
+    if (state->optimization && !state->variable_path.empty()) {
+        // Look up an existing optimization variable for this path; if found,
+        // pre-fill Opt / Min / Max from it.
+        bool opt_enabled = false;
+        double min_value = 0.0;
+        double max_value = 0.0;
+        if (const auto* variable = find_optimization_variable(*state->optimization, state->variable_path)) {
+            opt_enabled = variable->enabled;
+            min_value = variable->min_value;
+            max_value = variable->max_value;
+        }
+        create_label(state->hwnd, 18, 142, 100, L"Optimize", font);
+        state->opt_check = CreateWindowExW(
+            0, L"BUTTON", L"Opt",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
+            118, 140, 56, 24,
+            state->hwnd, nullptr, g_instance, nullptr);
+        set_child_font(state->opt_check, font);
+        Button_SetCheck(state->opt_check, opt_enabled ? BST_CHECKED : BST_UNCHECKED);
+
+        create_label(state->hwnd, 180, 142, 36, L"Min", font);
+        state->min_edit = create_edit(
+            state->hwnd, 0, 218, 138, 90,
+            (opt_enabled || min_value != 0.0 || max_value != 0.0) ? format_double(min_value) : L"",
+            font);
+        create_label(state->hwnd, 314, 142, 36, L"Max", font);
+        state->max_edit = create_edit(
+            state->hwnd, 0, 352, 138, 90,
+            (opt_enabled || min_value != 0.0 || max_value != 0.0) ? format_double(max_value) : L"",
+            font);
+        dialog_h = 280;
+    }
+
+    HWND ok = create_button(state->hwnd, IDOK, 250, dialog_h - 80, 76, 28, L"OK", font);
+    SendMessageW(ok, BM_SETSTYLE, BS_DEFPUSHBUTTON, TRUE);
+    create_button(state->hwnd, IDCANCEL, 340, dialog_h - 80, 76, 28, L"Cancel", font);
+}
+
+bool accept_trigger_editor_dialog(TriggerConditionEditorDialogState* state)
+{
+    post2::core::TriggerCondition trigger;
+    trigger.type = trigger_type_from_display_label(get_combo_text(state->type_combo));
+    trigger.comparison = get_combo_text(state->comparison_combo);
+    if (trigger.comparison != ">=" && trigger.comparison != "<=") {
+        MessageBoxW(state->hwnd, L"Comparison must be >= or <=.", L"Trigger", MB_ICONWARNING);
+        return false;
+    }
+    if (!read_double_field(state->hwnd, state->value_edit, L"value", L"Trigger", &trigger.value)) {
+        return false;
+    }
+
+    // Optimization binding. Same semantics as apply_numeric_variable_controls
+    // but reading the controls embedded in this dialog.
+    if (state->optimization && !state->variable_path.empty() &&
+        window_is_live(state->opt_check)) {
+        const bool opt_enabled = Button_GetCheck(state->opt_check) == BST_CHECKED;
+        auto* existing = find_optimization_variable(state->optimization, state->variable_path);
+
+        double min_value = 0.0;
+        double max_value = 0.0;
+        const std::wstring min_text = get_window_text(state->min_edit);
+        const std::wstring max_text = get_window_text(state->max_edit);
+        const bool has_minmax = !min_text.empty() || !max_text.empty();
+        if (opt_enabled || has_minmax || existing) {
+            if (!parse_double_text(min_text, &min_value)) {
+                MessageBoxW(state->hwnd, L"Min must be a number.", L"Trigger", MB_ICONWARNING);
+                SetFocus(state->min_edit);
+                return false;
+            }
+            if (!parse_double_text(max_text, &max_value)) {
+                MessageBoxW(state->hwnd, L"Max must be a number.", L"Trigger", MB_ICONWARNING);
+                SetFocus(state->max_edit);
+                return false;
+            }
+            if (min_value > max_value) {
+                MessageBoxW(state->hwnd, L"Min cannot exceed Max.", L"Trigger", MB_ICONWARNING);
+                SetFocus(state->min_edit);
+                return false;
+            }
+            if (opt_enabled && (trigger.value < min_value || trigger.value > max_value)) {
+                MessageBoxW(state->hwnd, L"Value must be inside Min/Max.", L"Trigger", MB_ICONWARNING);
+                SetFocus(state->value_edit);
+                return false;
+            }
+        }
+        if (opt_enabled || existing) {
+            if (!existing) {
+                state->optimization->variables.push_back(
+                    {state->variable_path, opt_enabled, min_value, max_value});
+            } else {
+                existing->enabled = opt_enabled;
+                existing->min_value = min_value;
+                existing->max_value = max_value;
+            }
+        }
+    }
+
+    state->trigger = std::move(trigger);
+    state->accepted = true;
+    DestroyWindow(state->hwnd);
+    return true;
+}
+
+LRESULT CALLBACK trigger_editor_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam)
+{
+    auto* state = reinterpret_cast<TriggerConditionEditorDialogState*>(
+        GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    switch (message) {
+    case WM_NCCREATE: {
+        auto* create = reinterpret_cast<CREATESTRUCTW*>(lparam);
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(create->lpCreateParams));
+        return TRUE;
+    }
+    case WM_CREATE:
+        state = reinterpret_cast<TriggerConditionEditorDialogState*>(
+            GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+        state->hwnd = hwnd;
+        create_trigger_editor_controls(state);
+        return 0;
+    case WM_COMMAND:
+        switch (LOWORD(wparam)) {
+        case IDOK:
+            accept_trigger_editor_dialog(state);
+            return 0;
+        case IDCANCEL:
+            DestroyWindow(hwnd);
+            return 0;
+        }
+        break;
+    case WM_CLOSE:
+        DestroyWindow(hwnd);
+        return 0;
+    }
+    return DefWindowProcW(hwnd, message, wparam, lparam);
+}
+
+void register_trigger_editor_class()
+{
+    static bool registered = false;
+    if (registered) return;
+    WNDCLASSW wc = {};
+    wc.lpfnWndProc = trigger_editor_proc;
+    wc.hInstance = g_instance;
+    wc.lpszClassName = L"Post2TriggerEditorWindow";
+    wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+    wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+    RegisterClassW(&wc);
+    registered = true;
+}
+
+bool show_trigger_condition_editor_dialog(
+    HWND parent,
+    post2::core::TriggerCondition* trigger,
+    post2::core::OptimizationConfig* optimization,
+    const std::string& variable_path,
+    const wchar_t* title)
+{
+    register_trigger_editor_class();
+    TriggerConditionEditorDialogState state;
+    state.trigger = *trigger;
+    state.optimization = optimization;
+    state.variable_path = variable_path;
+    RECT parent_rect;
+    GetWindowRect(parent, &parent_rect);
+    constexpr int dialog_width = 460;
+    const int dialog_height =
+        (optimization && !variable_path.empty()) ? 280 : 240;
+    const int x = parent_rect.left + ((parent_rect.right - parent_rect.left) - dialog_width) / 2;
+    const int y = parent_rect.top + ((parent_rect.bottom - parent_rect.top) - dialog_height) / 2;
+    HWND dialog = CreateWindowExW(
+        WS_EX_DLGMODALFRAME | WS_EX_WINDOWEDGE,
+        L"Post2TriggerEditorWindow",
+        title,
+        WS_CAPTION | WS_SYSMENU | WS_POPUP,
+        x, y, dialog_width, dialog_height,
+        parent, nullptr, g_instance, &state);
+    if (!dialog) return false;
+    EnableWindow(parent, FALSE);
+    ShowWindow(dialog, SW_SHOW);
+    SetFocus(state.type_combo);
+    MSG msg;
+    while (IsWindow(dialog) && GetMessageW(&msg, nullptr, 0, 0) > 0) {
+        if (!IsDialogMessageW(dialog, &msg)) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+    }
+    EnableWindow(parent, TRUE);
+    SetForegroundWindow(parent);
+    if (state.accepted) {
+        *trigger = std::move(state.trigger);
+    }
+    return state.accepted;
+}
+
+// ============================================================================
+// Event editor (modal). A name + enabled + trigger + inner action list.
+// ============================================================================
+
+void refresh_event_action_list(EventEditorDialogState* state)
+{
+    SendMessageW(state->action_list, LB_RESETCONTENT, 0, 0);
+    for (const auto& action : state->event.actions) {
+        SendMessageW(
+            state->action_list, LB_ADDSTRING, 0,
+            reinterpret_cast<LPARAM>(widen(action_label(action)).c_str()));
+    }
+    if (state->event.actions.empty()) {
+        state->selected_action_index = -1;
+    } else {
+        if (state->selected_action_index < 0 ||
+            static_cast<std::size_t>(state->selected_action_index) >= state->event.actions.size()) {
+            state->selected_action_index = 0;
+        }
+        SendMessageW(
+            state->action_list, LB_SETCURSEL,
+            static_cast<WPARAM>(state->selected_action_index), 0);
+    }
+    EnableWindow(state->action_edit_button, state->selected_action_index >= 0);
+    EnableWindow(state->action_delete_button, state->selected_action_index >= 0);
+}
+
+void refresh_event_trigger_summary(EventEditorDialogState* state)
+{
+    SetWindowTextW(state->trigger_summary_label, trigger_summary(state->event.trigger).c_str());
+}
+
+void create_event_editor_controls(EventEditorDialogState* state)
+{
+    HFONT font = static_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
+
+    create_label(state->hwnd, 18, 22, 70, L"Name", font);
+    state->name_edit = create_edit(
+        state->hwnd, kEventEditName, 104, 18, 320, widen(state->event.name), font);
+
+    state->enabled_check = create_checkbox(state->hwnd, kEventEditEnabled, 440, 20, 70, L"Enabled", font);
+    Button_SetCheck(state->enabled_check, state->event.enabled ? BST_CHECKED : BST_UNCHECKED);
+
+    create_label(state->hwnd, 18, 62, 70, L"Trigger", font);
+    state->trigger_summary_label = CreateWindowExW(
+        0, L"STATIC", L"", WS_CHILD | WS_VISIBLE,
+        104, 64, 380, 20, state->hwnd, nullptr, g_instance, nullptr);
+    set_child_font(state->trigger_summary_label, font);
+    state->trigger_edit_button = create_button(
+        state->hwnd, kEventEditTriggerButton, 488, 58, 76, 24, L"Edit...", font);
+    refresh_event_trigger_summary(state);
+
+    create_label(state->hwnd, 18, 102, 70, L"Actions", font);
+    state->action_list = CreateWindowExW(
+        WS_EX_CLIENTEDGE, L"LISTBOX", L"",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | LBS_NOTIFY | WS_VSCROLL,
+        18, 122, 546, 140,
+        state->hwnd,
+        reinterpret_cast<HMENU>(static_cast<LONG_PTR>(kEventEditActionList)),
+        g_instance, nullptr);
+    set_child_font(state->action_list, font);
+
+    state->action_add_button = create_button(state->hwnd, kEventEditActionAdd, 18, 268, 76, 26, L"Add", font);
+    state->action_edit_button = create_button(state->hwnd, kEventEditActionEdit, 102, 268, 76, 26, L"Edit", font);
+    state->action_delete_button = create_button(state->hwnd, kEventEditActionDelete, 186, 268, 76, 26, L"Delete", font);
+
+    HWND ok = create_button(state->hwnd, IDOK, 412, 320, 76, 28, L"OK", font);
+    SendMessageW(ok, BM_SETSTYLE, BS_DEFPUSHBUTTON, TRUE);
+    create_button(state->hwnd, IDCANCEL, 498, 320, 76, 28, L"Cancel", font);
+
+    refresh_event_action_list(state);
+}
+
+bool accept_event_editor_dialog(EventEditorDialogState* state)
+{
+    state->event.name = narrow(get_window_text(state->name_edit));
+    state->event.enabled = Button_GetCheck(state->enabled_check) == BST_CHECKED;
+    state->accepted = true;
+    DestroyWindow(state->hwnd);
+    return true;
+}
+
+LRESULT CALLBACK event_editor_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam)
+{
+    auto* state = reinterpret_cast<EventEditorDialogState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    switch (message) {
+    case WM_NCCREATE: {
+        auto* create = reinterpret_cast<CREATESTRUCTW*>(lparam);
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(create->lpCreateParams));
+        return TRUE;
+    }
+    case WM_CREATE:
+        state = reinterpret_cast<EventEditorDialogState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+        state->hwnd = hwnd;
+        create_event_editor_controls(state);
+        return 0;
+    case WM_COMMAND:
+        switch (LOWORD(wparam)) {
+        case IDOK:
+            accept_event_editor_dialog(state);
+            return 0;
+        case IDCANCEL:
+            DestroyWindow(hwnd);
+            return 0;
+        case kEventEditTriggerButton:
+            if (show_trigger_condition_editor_dialog(
+                    state->hwnd, &state->event.trigger, nullptr, std::string(), L"Edit Trigger")) {
+                refresh_event_trigger_summary(state);
+            }
+            return 0;
+        case kEventEditActionList:
+            if (HIWORD(wparam) == LBN_SELCHANGE) {
+                const LRESULT sel = SendMessageW(state->action_list, LB_GETCURSEL, 0, 0);
+                if (sel != LB_ERR) {
+                    state->selected_action_index = static_cast<int>(sel);
+                    EnableWindow(state->action_edit_button, TRUE);
+                    EnableWindow(state->action_delete_button, TRUE);
+                }
+                return 0;
+            }
+            if (HIWORD(wparam) == LBN_DBLCLK && state->selected_action_index >= 0 &&
+                state->vehicle) {
+                auto action = state->event.actions[static_cast<std::size_t>(state->selected_action_index)];
+                if (show_phase_action_editor_dialog(state->hwnd, &action, *state->vehicle, L"Edit Action")) {
+                    state->event.actions[static_cast<std::size_t>(state->selected_action_index)] = std::move(action);
+                    refresh_event_action_list(state);
+                }
+                return 0;
+            }
+            break;
+        case kEventEditActionAdd:
+            if (state->vehicle) {
+                post2::core::PhaseAction action;
+                action.type = "set_stage_active";
+                action.value = true;
+                action.stage_index = 0;
+                const auto stages = post2::vehicle::effective_stage_configs(*state->vehicle);
+                if (!stages.empty()) action.stage_name = stages.front().name;
+                if (show_phase_action_editor_dialog(state->hwnd, &action, *state->vehicle, L"Add Action")) {
+                    state->event.actions.push_back(std::move(action));
+                    state->selected_action_index = static_cast<int>(state->event.actions.size() - 1);
+                    refresh_event_action_list(state);
+                }
+            }
+            return 0;
+        case kEventEditActionEdit:
+            if (state->selected_action_index >= 0 &&
+                static_cast<std::size_t>(state->selected_action_index) < state->event.actions.size() &&
+                state->vehicle) {
+                auto action = state->event.actions[static_cast<std::size_t>(state->selected_action_index)];
+                if (show_phase_action_editor_dialog(state->hwnd, &action, *state->vehicle, L"Edit Action")) {
+                    state->event.actions[static_cast<std::size_t>(state->selected_action_index)] = std::move(action);
+                    refresh_event_action_list(state);
+                }
+            }
+            return 0;
+        case kEventEditActionDelete:
+            if (state->selected_action_index >= 0 &&
+                static_cast<std::size_t>(state->selected_action_index) < state->event.actions.size()) {
+                state->event.actions.erase(
+                    state->event.actions.begin() + state->selected_action_index);
+                if (static_cast<std::size_t>(state->selected_action_index) >= state->event.actions.size()) {
+                    state->selected_action_index = static_cast<int>(state->event.actions.size()) - 1;
+                }
+                refresh_event_action_list(state);
+            }
+            return 0;
+        }
+        break;
+    case WM_CLOSE:
+        DestroyWindow(hwnd);
+        return 0;
+    }
+    return DefWindowProcW(hwnd, message, wparam, lparam);
+}
+
+void register_event_editor_class()
+{
+    static bool registered = false;
+    if (registered) return;
+    WNDCLASSW wc = {};
+    wc.lpfnWndProc = event_editor_proc;
+    wc.hInstance = g_instance;
+    wc.lpszClassName = L"Post2EventEditorWindow";
+    wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+    wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+    RegisterClassW(&wc);
+    registered = true;
+}
+
+bool show_event_editor_dialog(
+    HWND parent,
+    post2::core::EventConfig* event,
+    const post2::vehicle::VehicleConfig& vehicle,
+    const wchar_t* title)
+{
+    register_event_editor_class();
+    EventEditorDialogState state;
+    state.event = *event;
+    state.vehicle = &vehicle;
+    RECT parent_rect;
+    GetWindowRect(parent, &parent_rect);
+    constexpr int dialog_width = 620;
+    constexpr int dialog_height = 400;
+    const int x = parent_rect.left + ((parent_rect.right - parent_rect.left) - dialog_width) / 2;
+    const int y = parent_rect.top + ((parent_rect.bottom - parent_rect.top) - dialog_height) / 2;
+    HWND dialog = CreateWindowExW(
+        WS_EX_DLGMODALFRAME | WS_EX_WINDOWEDGE,
+        L"Post2EventEditorWindow",
+        title,
+        WS_CAPTION | WS_SYSMENU | WS_POPUP,
+        x, y, dialog_width, dialog_height,
+        parent, nullptr, g_instance, &state);
+    if (!dialog) return false;
+    EnableWindow(parent, FALSE);
+    ShowWindow(dialog, SW_SHOW);
+    SetFocus(state.name_edit);
+    MSG msg;
+    while (IsWindow(dialog) && GetMessageW(&msg, nullptr, 0, 0) > 0) {
+        if (!IsDialogMessageW(dialog, &msg)) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+    }
+    EnableWindow(parent, TRUE);
+    SetForegroundWindow(parent);
+    if (state.accepted) {
+        *event = std::move(state.event);
+    }
+    return state.accepted;
+}
+
+// ============================================================================
+// Case events manager (modal). List + Add / Edit / Delete + OK / Cancel.
+// ============================================================================
+
+std::wstring event_summary_label(const post2::core::EventConfig& event)
+{
+    std::wstring text = event.enabled ? L"[on] " : L"[off] ";
+    text += widen(event.name.empty() ? std::string("(unnamed)") : event.name);
+    text += L"  |  ";
+    text += trigger_summary(event.trigger);
+    text += L"  |  ";
+    text += widen(std::to_string(event.actions.size()) + " action(s)");
+    return text;
+}
+
+void refresh_case_events_list(CaseEventsManagerDialogState* state)
+{
+    SendMessageW(state->event_list, LB_RESETCONTENT, 0, 0);
+    for (const auto& event : state->events) {
+        SendMessageW(state->event_list, LB_ADDSTRING, 0,
+            reinterpret_cast<LPARAM>(event_summary_label(event).c_str()));
+    }
+    if (state->events.empty()) {
+        state->selected_index = -1;
+    } else {
+        if (state->selected_index < 0 ||
+            static_cast<std::size_t>(state->selected_index) >= state->events.size()) {
+            state->selected_index = 0;
+        }
+        SendMessageW(state->event_list, LB_SETCURSEL,
+            static_cast<WPARAM>(state->selected_index), 0);
+    }
+    EnableWindow(state->edit_button, state->selected_index >= 0);
+    EnableWindow(state->delete_button, state->selected_index >= 0);
+}
+
+void create_case_events_manager_controls(CaseEventsManagerDialogState* state)
+{
+    HFONT font = static_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
+
+    create_label(state->hwnd, 18, 18, 200, L"Non-sequential events", font);
+    state->event_list = CreateWindowExW(
+        WS_EX_CLIENTEDGE, L"LISTBOX", L"",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | LBS_NOTIFY | WS_VSCROLL,
+        18, 44, 614, 240,
+        state->hwnd,
+        reinterpret_cast<HMENU>(static_cast<LONG_PTR>(kCaseEventsList)),
+        g_instance, nullptr);
+    set_child_font(state->event_list, font);
+
+    state->add_button = create_button(state->hwnd, kCaseEventsAdd, 18, 296, 76, 26, L"Add", font);
+    state->edit_button = create_button(state->hwnd, kCaseEventsEdit, 102, 296, 76, 26, L"Edit", font);
+    state->delete_button = create_button(state->hwnd, kCaseEventsDelete, 186, 296, 76, 26, L"Delete", font);
+
+    HWND ok = create_button(state->hwnd, IDOK, 478, 350, 76, 28, L"OK", font);
+    SendMessageW(ok, BM_SETSTYLE, BS_DEFPUSHBUTTON, TRUE);
+    create_button(state->hwnd, IDCANCEL, 564, 350, 76, 28, L"Cancel", font);
+
+    refresh_case_events_list(state);
+}
+
+LRESULT CALLBACK case_events_manager_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam)
+{
+    auto* state = reinterpret_cast<CaseEventsManagerDialogState*>(
+        GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    switch (message) {
+    case WM_NCCREATE: {
+        auto* create = reinterpret_cast<CREATESTRUCTW*>(lparam);
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(create->lpCreateParams));
+        return TRUE;
+    }
+    case WM_CREATE:
+        state = reinterpret_cast<CaseEventsManagerDialogState*>(
+            GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+        state->hwnd = hwnd;
+        create_case_events_manager_controls(state);
+        return 0;
+    case WM_COMMAND:
+        switch (LOWORD(wparam)) {
+        case IDOK:
+            state->accepted = true;
+            DestroyWindow(hwnd);
+            return 0;
+        case IDCANCEL:
+            DestroyWindow(hwnd);
+            return 0;
+        case kCaseEventsList:
+            if (HIWORD(wparam) == LBN_SELCHANGE) {
+                const LRESULT sel = SendMessageW(state->event_list, LB_GETCURSEL, 0, 0);
+                if (sel != LB_ERR) {
+                    state->selected_index = static_cast<int>(sel);
+                    EnableWindow(state->edit_button, TRUE);
+                    EnableWindow(state->delete_button, TRUE);
+                }
+                return 0;
+            }
+            if (HIWORD(wparam) == LBN_DBLCLK && state->selected_index >= 0 && state->vehicle) {
+                auto event = state->events[static_cast<std::size_t>(state->selected_index)];
+                if (show_event_editor_dialog(state->hwnd, &event, *state->vehicle, L"Edit Event")) {
+                    state->events[static_cast<std::size_t>(state->selected_index)] = std::move(event);
+                    refresh_case_events_list(state);
+                }
+                return 0;
+            }
+            break;
+        case kCaseEventsAdd:
+            if (state->vehicle) {
+                post2::core::EventConfig event;
+                event.name = "event";
+                event.enabled = true;
+                event.trigger = {"time", ">=", 0.0};
+                if (show_event_editor_dialog(state->hwnd, &event, *state->vehicle, L"Add Event")) {
+                    state->events.push_back(std::move(event));
+                    state->selected_index = static_cast<int>(state->events.size() - 1);
+                    refresh_case_events_list(state);
+                }
+            }
+            return 0;
+        case kCaseEventsEdit:
+            if (state->selected_index >= 0 &&
+                static_cast<std::size_t>(state->selected_index) < state->events.size() &&
+                state->vehicle) {
+                auto event = state->events[static_cast<std::size_t>(state->selected_index)];
+                if (show_event_editor_dialog(state->hwnd, &event, *state->vehicle, L"Edit Event")) {
+                    state->events[static_cast<std::size_t>(state->selected_index)] = std::move(event);
+                    refresh_case_events_list(state);
+                }
+            }
+            return 0;
+        case kCaseEventsDelete:
+            if (state->selected_index >= 0 &&
+                static_cast<std::size_t>(state->selected_index) < state->events.size()) {
+                state->events.erase(state->events.begin() + state->selected_index);
+                if (static_cast<std::size_t>(state->selected_index) >= state->events.size()) {
+                    state->selected_index = static_cast<int>(state->events.size()) - 1;
+                }
+                refresh_case_events_list(state);
+            }
+            return 0;
+        }
+        break;
+    case WM_CLOSE:
+        DestroyWindow(hwnd);
+        return 0;
+    }
+    return DefWindowProcW(hwnd, message, wparam, lparam);
+}
+
+void register_case_events_manager_class()
+{
+    static bool registered = false;
+    if (registered) return;
+    WNDCLASSW wc = {};
+    wc.lpfnWndProc = case_events_manager_proc;
+    wc.hInstance = g_instance;
+    wc.lpszClassName = L"Post2CaseEventsManagerWindow";
+    wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+    wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+    RegisterClassW(&wc);
+    registered = true;
+}
+
+bool show_case_events_manager_dialog(
+    HWND parent,
+    std::vector<post2::core::EventConfig>* events,
+    const post2::vehicle::VehicleConfig& vehicle)
+{
+    register_case_events_manager_class();
+    CaseEventsManagerDialogState state;
+    state.events = *events;
+    state.vehicle = &vehicle;
+    RECT parent_rect;
+    GetWindowRect(parent, &parent_rect);
+    constexpr int dialog_width = 680;
+    constexpr int dialog_height = 430;
+    const int x = parent_rect.left + ((parent_rect.right - parent_rect.left) - dialog_width) / 2;
+    const int y = parent_rect.top + ((parent_rect.bottom - parent_rect.top) - dialog_height) / 2;
+    HWND dialog = CreateWindowExW(
+        WS_EX_DLGMODALFRAME | WS_EX_WINDOWEDGE,
+        L"Post2CaseEventsManagerWindow",
+        L"Case Events",
+        WS_CAPTION | WS_SYSMENU | WS_POPUP,
+        x, y, dialog_width, dialog_height,
+        parent, nullptr, g_instance, &state);
+    if (!dialog) return false;
+    EnableWindow(parent, FALSE);
+    ShowWindow(dialog, SW_SHOW);
+    SetFocus(state.event_list);
+    MSG msg;
+    while (IsWindow(dialog) && GetMessageW(&msg, nullptr, 0, 0) > 0) {
+        if (!IsDialogMessageW(dialog, &msg)) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+    }
+    EnableWindow(parent, TRUE);
+    SetForegroundWindow(parent);
+    if (state.accepted) {
+        *events = std::move(state.events);
+    }
+    return state.accepted;
+}
+
+void normalize_optimization_objectives_for_ui(post2::core::OptimizationConfig* config)
+{
+    if (!config || !config->objectives.empty()) {
+        return;
+    }
+    if (config->objective.enabled) {
+        config->objectives.push_back(config->objective);
+    }
+}
+
+post2::core::OptimizationObjectiveConfig default_optimization_objective_config()
+{
+    post2::core::OptimizationObjectiveConfig objective;
+    objective.enabled = true;
+    objective.metric = "payload_mass_kg";
+    objective.direction = "maximize";
+    objective.weight = 1.0;
+    return objective;
+}
+
+void refresh_optimization_objective_list(OptimizationSettingsDialogState* state)
+{
+    SendMessageW(state->objective_list, LB_RESETCONTENT, 0, 0);
+    for (std::size_t i = 0; i < state->config.objectives.size(); ++i) {
+        const auto& objective = state->config.objectives[i];
+        std::ostringstream label;
+        label << i + 1 << ": " << (objective.enabled ? "on " : "off ")
+              << objective.direction << ' ' << objective.metric
+              << " | w " << objective.weight;
+        SendMessageW(state->objective_list, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(widen(label.str()).c_str()));
+    }
+    if (state->config.objectives.empty()) {
+        state->selected_objective_index = -1;
+    } else {
+        if (state->selected_objective_index < 0 ||
+            static_cast<std::size_t>(state->selected_objective_index) >= state->config.objectives.size()) {
+            state->selected_objective_index = 0;
+        }
+        SendMessageW(state->objective_list, LB_SETCURSEL, static_cast<WPARAM>(state->selected_objective_index), 0);
+    }
+}
+
+void create_optimization_objective_editor_controls(OptimizationObjectiveEditorDialogState* state)
+{
+    HFONT font = static_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
+
+    state->enabled_check = create_checkbox(state->hwnd, kOptObjectiveEnabled, 18, 20, 92, L"Enabled", font);
+    Button_SetCheck(state->enabled_check, state->objective.enabled ? BST_CHECKED : BST_UNCHECKED);
+
+    create_label(state->hwnd, 18, 62, 70, L"Metric", font);
+    state->metric_combo = create_combo(state->hwnd, kOptObjectiveMetricCombo, 104, 58, 290, font);
+    add_metric_items(state->metric_combo);
+    select_combo_text(state->metric_combo, state->objective.metric);
+
+    create_label(state->hwnd, 18, 102, 70, L"Direction", font);
+    state->direction_combo = create_combo(state->hwnd, kOptObjectiveDirectionCombo, 104, 98, 150, font);
+    add_combo_item(state->direction_combo, L"minimize");
+    add_combo_item(state->direction_combo, L"maximize");
+    select_combo_text(state->direction_combo, state->objective.direction);
+
+    create_label(state->hwnd, 18, 142, 70, L"Weight", font);
+    state->weight_edit = create_edit(
+        state->hwnd, kOptObjectiveWeightEdit, 104, 138, 130, format_double(state->objective.weight), font);
+
+    HWND ok_button = create_button(state->hwnd, IDOK, 270, 180, 76, 28, L"OK", font);
+    SendMessageW(ok_button, BM_SETSTYLE, BS_DEFPUSHBUTTON, TRUE);
+    create_button(state->hwnd, IDCANCEL, 360, 180, 76, 28, L"Cancel", font);
+}
+
+bool accept_optimization_objective_editor_dialog(OptimizationObjectiveEditorDialogState* state)
+{
+    auto objective = state->objective;
+    objective.enabled = Button_GetCheck(state->enabled_check) == BST_CHECKED;
+    objective.metric = get_combo_text(state->metric_combo);
+    objective.direction = get_combo_text(state->direction_combo);
+    if (!read_double_field(state->hwnd, state->weight_edit, L"Objective weight", L"Objective", &objective.weight)) {
+        return false;
+    }
+    if (objective.direction != "minimize" && objective.direction != "maximize") {
+        MessageBoxW(state->hwnd, L"Unsupported objective direction.", L"Objective", MB_ICONWARNING);
+        SetFocus(state->direction_combo);
+        return false;
+    }
+    state->objective = std::move(objective);
+    state->accepted = true;
+    DestroyWindow(state->hwnd);
+    return true;
+}
+
+LRESULT CALLBACK optimization_objective_editor_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam)
+{
+    auto* state = reinterpret_cast<OptimizationObjectiveEditorDialogState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+
+    switch (message) {
+    case WM_NCCREATE: {
+        auto* create = reinterpret_cast<CREATESTRUCTW*>(lparam);
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(create->lpCreateParams));
+        return TRUE;
+    }
+    case WM_CREATE:
+        state = reinterpret_cast<OptimizationObjectiveEditorDialogState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+        state->hwnd = hwnd;
+        create_optimization_objective_editor_controls(state);
+        return 0;
+    case WM_COMMAND:
+        switch (LOWORD(wparam)) {
+        case IDOK:
+            accept_optimization_objective_editor_dialog(state);
+            return 0;
+        case IDCANCEL:
+            DestroyWindow(hwnd);
+            return 0;
+        default:
+            break;
+        }
+        break;
+    case WM_CLOSE:
+        DestroyWindow(hwnd);
+        return 0;
+    default:
+        break;
+    }
+
+    return DefWindowProcW(hwnd, message, wparam, lparam);
+}
+
+void register_optimization_objective_editor_class()
+{
+    static bool registered = false;
+    if (registered) {
+        return;
+    }
+
+    WNDCLASSW wc = {};
+    wc.lpfnWndProc = optimization_objective_editor_proc;
+    wc.hInstance = g_instance;
+    wc.lpszClassName = L"Post2OptimizationObjectiveEditorWindow";
+    wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+    wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+    RegisterClassW(&wc);
+    registered = true;
+}
+
+bool show_optimization_objective_editor_dialog(
+    HWND parent,
+    post2::core::OptimizationObjectiveConfig* objective,
+    const wchar_t* title)
+{
+    register_optimization_objective_editor_class();
+
+    OptimizationObjectiveEditorDialogState state;
+    state.objective = *objective;
+
+    RECT parent_rect;
+    GetWindowRect(parent, &parent_rect);
+    constexpr int dialog_width = 480;
+    constexpr int dialog_height = 260;
+    const int x = parent_rect.left + ((parent_rect.right - parent_rect.left) - dialog_width) / 2;
+    const int y = parent_rect.top + ((parent_rect.bottom - parent_rect.top) - dialog_height) / 2;
+
+    HWND dialog = CreateWindowExW(
+        WS_EX_DLGMODALFRAME | WS_EX_WINDOWEDGE,
+        L"Post2OptimizationObjectiveEditorWindow",
+        title,
+        WS_CAPTION | WS_SYSMENU | WS_POPUP,
+        x,
+        y,
+        dialog_width,
+        dialog_height,
+        parent,
+        nullptr,
+        g_instance,
+        &state);
+
+    if (!dialog) {
+        MessageBoxW(parent, L"Failed to create objective editor.", L"POST2 Lite", MB_ICONERROR);
+        return false;
+    }
+
+    EnableWindow(parent, FALSE);
+    ShowWindow(dialog, SW_SHOW);
+    SetFocus(state.metric_combo);
+
+    MSG msg;
+    while (IsWindow(dialog) && GetMessageW(&msg, nullptr, 0, 0) > 0) {
+        if (!IsDialogMessageW(dialog, &msg)) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+    }
+
+    EnableWindow(parent, TRUE);
+    SetForegroundWindow(parent);
+
+    if (state.accepted) {
+        *objective = std::move(state.objective);
+    }
+
+    return state.accepted;
+}
+
 void create_optimization_settings_controls(OptimizationSettingsDialogState* state)
 {
     HFONT font = static_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
@@ -2995,39 +4206,45 @@ void create_optimization_settings_controls(OptimizationSettingsDialogState* stat
     state->step_fraction_edit = create_edit(
         state->hwnd, kOptStepFractionEdit, 526, 54, 92, format_double(state->config.initial_step_fraction), font);
 
-    create_label(state->hwnd, 18, 102, 80, L"Targets", font);
+    normalize_optimization_objectives_for_ui(&state->config);
+
+    create_label(state->hwnd, 18, 102, 90, L"Targets", font);
     state->target_list = CreateWindowExW(
         WS_EX_CLIENTEDGE,
         L"LISTBOX",
         L"",
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | LBS_NOTIFY | WS_VSCROLL,
         18,
-        128,
-        676,
-        210,
+        132,
+        324,
+        196,
         state->hwnd,
         control_id(kOptTargetList),
         g_instance,
         nullptr);
     set_child_font(state->target_list, font);
-    create_button(state->hwnd, kOptTargetAdd, 18, 350, 70, 26, L"Add", font);
-    create_button(state->hwnd, kOptTargetEdit, 102, 350, 70, 26, L"Edit", font);
-    create_button(state->hwnd, kOptTargetDelete, 186, 350, 70, 26, L"Delete", font);
+    state->target_add_button = create_button(state->hwnd, kOptTargetAdd, 18, 340, 70, 26, L"Add", font);
+    state->target_edit_button = create_button(state->hwnd, kOptTargetEdit, 102, 340, 70, 26, L"Edit", font);
+    state->target_delete_button = create_button(state->hwnd, kOptTargetDelete, 186, 340, 70, 26, L"Delete", font);
 
-    state->objective_enabled = create_checkbox(state->hwnd, kOptObjectiveEnabled, 18, 400, 120, L"Objective", font);
-    Button_SetCheck(state->objective_enabled, state->config.objective.enabled ? BST_CHECKED : BST_UNCHECKED);
-    create_label(state->hwnd, 158, 402, 54, L"Metric", font);
-    state->objective_metric_combo = create_combo(state->hwnd, kOptObjectiveMetricCombo, 218, 398, 190, font);
-    add_metric_items(state->objective_metric_combo);
-    select_combo_text(state->objective_metric_combo, state->config.objective.metric);
-    create_label(state->hwnd, 430, 402, 70, L"Direction", font);
-    state->objective_direction_combo = create_combo(state->hwnd, kOptObjectiveDirectionCombo, 506, 398, 120, font);
-    add_combo_item(state->objective_direction_combo, L"minimize");
-    add_combo_item(state->objective_direction_combo, L"maximize");
-    select_combo_text(state->objective_direction_combo, state->config.objective.direction);
-    create_label(state->hwnd, 18, 442, 54, L"Weight", font);
-    state->objective_weight_edit = create_edit(
-        state->hwnd, kOptObjectiveWeightEdit, 82, 438, 120, format_double(state->config.objective.weight), font);
+    create_label(state->hwnd, 370, 102, 110, L"Objectives", font);
+    state->objective_list = CreateWindowExW(
+        WS_EX_CLIENTEDGE,
+        L"LISTBOX",
+        L"",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | LBS_NOTIFY | WS_VSCROLL,
+        370,
+        132,
+        324,
+        196,
+        state->hwnd,
+        control_id(kOptObjectiveList),
+        g_instance,
+        nullptr);
+    set_child_font(state->objective_list, font);
+    state->objective_add_button = create_button(state->hwnd, kOptObjectiveAdd, 370, 340, 70, 26, L"Add", font);
+    state->objective_edit_button = create_button(state->hwnd, kOptObjectiveEdit, 454, 340, 70, 26, L"Edit", font);
+    state->objective_delete_button = create_button(state->hwnd, kOptObjectiveDelete, 538, 340, 70, 26, L"Delete", font);
 
     create_label(state->hwnd, 18, 482, 60, L"Strategy", font);
     state->continuation_strategy_combo =
@@ -3035,15 +4252,18 @@ void create_optimization_settings_controls(OptimizationSettingsDialogState* stat
     add_combo_item(state->continuation_strategy_combo, L"single");
     add_combo_item(state->continuation_strategy_combo, L"continuation");
     add_combo_item(state->continuation_strategy_combo, L"continuation+multistart");
+    add_combo_item(state->continuation_strategy_combo, L"envelope");
     select_combo_text(
         state->continuation_strategy_combo,
-        state->config.continuation.enabled
+        state->config.envelope_search.enabled
+            ? "envelope"
+            : (state->config.continuation.enabled
             ? (state->config.continuation.multistart_enabled
                 ? "continuation+multistart"
                 : "continuation")
-            : "single");
+            : "single"));
 
-    create_label(state->hwnd, 270, 482, 58, L"Variable", font);
+    create_label(state->hwnd, 270, 482, 58, L"Cont var", font);
     state->continuation_variable_combo =
         create_combo(state->hwnd, kOptContinuationVariableCombo, 334, 478, 360, font);
     add_continuation_variable_items(state->continuation_variable_combo, state->config);
@@ -3078,12 +4298,22 @@ void create_optimization_settings_controls(OptimizationSettingsDialogState* stat
         70,
         widen(std::to_string(state->config.continuation.multistart_count)),
         font);
+    create_label(state->hwnd, 540, 522, 58, L"Samples", font);
+    state->envelope_samples_edit = create_edit(
+        state->hwnd,
+        kOptEnvelopeSamplesEdit,
+        604,
+        518,
+        70,
+        widen(std::to_string(state->config.envelope_search.sample_count)),
+        font);
 
     HWND ok_button = create_button(state->hwnd, IDOK, 542, 560, 76, 28, L"OK", font);
     SendMessageW(ok_button, BM_SETSTYLE, BS_DEFPUSHBUTTON, TRUE);
     create_button(state->hwnd, IDCANCEL, 632, 560, 76, 28, L"Cancel", font);
 
     refresh_optimization_target_list(state);
+    refresh_optimization_objective_list(state);
     sync_optimization_continuation_controls(state);
 }
 
@@ -3106,27 +4336,30 @@ bool accept_optimization_settings_dialog(OptimizationSettingsDialogState* state)
             L"Continuation starts",
             L"Optimize",
             &state->config.continuation.multistart_count) ||
+        !read_int_field(
+            state->hwnd,
+            state->envelope_samples_edit,
+            L"Envelope samples",
+            L"Optimize",
+            &state->config.envelope_search.sample_count) ||
         !read_double_field(state->hwnd, state->tolerance_edit, L"Tolerance", L"Optimize", &state->config.tolerance) ||
         !read_double_field(
             state->hwnd,
             state->step_fraction_edit,
             L"Initial step fraction",
             L"Optimize",
-            &state->config.initial_step_fraction) ||
-        !read_double_field(
-            state->hwnd,
-            state->objective_weight_edit,
-            L"Objective weight",
-            L"Optimize",
-            &state->config.objective.weight)) {
+            &state->config.initial_step_fraction)) {
         return false;
     }
-    state->config.objective.enabled = Button_GetCheck(state->objective_enabled) == BST_CHECKED;
-    state->config.objective.metric = get_combo_text(state->objective_metric_combo);
-    state->config.objective.direction = get_combo_text(state->objective_direction_combo);
-    state->config.continuation.enabled = continuation_strategy != "single";
+    state->config.objective = state->config.objectives.empty()
+        ? post2::core::OptimizationObjectiveConfig{}
+        : state->config.objectives.front();
+    state->config.continuation.enabled =
+        continuation_strategy == "continuation" ||
+        continuation_strategy == "continuation+multistart";
     state->config.continuation.multistart_enabled =
         continuation_strategy == "continuation+multistart";
+    state->config.envelope_search.enabled = continuation_strategy == "envelope";
     state->config.continuation.variable_path =
         get_combo_text(state->continuation_variable_combo);
     state->config.continuation.direction =
@@ -3138,6 +4371,10 @@ bool accept_optimization_settings_dialog(OptimizationSettingsDialogState* state)
     if (state->config.continuation.steps <= 0 ||
         state->config.continuation.multistart_count <= 0) {
         MessageBoxW(state->hwnd, L"Continuation steps and starts must be positive.", L"Optimize", MB_ICONWARNING);
+        return false;
+    }
+    if (state->config.envelope_search.sample_count <= 0) {
+        MessageBoxW(state->hwnd, L"Envelope samples must be positive.", L"Optimize", MB_ICONWARNING);
         return false;
     }
     if (state->config.tolerance <= 0.0 || state->config.initial_step_fraction <= 0.0) {
@@ -3230,6 +4467,57 @@ LRESULT CALLBACK optimization_settings_proc(HWND hwnd, UINT message, WPARAM wpar
                     state->selected_target_index = static_cast<int>(state->config.targets.size()) - 1;
                 }
                 refresh_optimization_target_list(state);
+            }
+            return 0;
+        case kOptObjectiveList:
+            if (HIWORD(wparam) == LBN_SELCHANGE) {
+                const LRESULT selected = SendMessageW(state->objective_list, LB_GETCURSEL, 0, 0);
+                if (selected != LB_ERR) {
+                    state->selected_objective_index = static_cast<int>(selected);
+                }
+                return 0;
+            }
+            if (HIWORD(wparam) == LBN_DBLCLK) {
+                const LRESULT selected = SendMessageW(state->objective_list, LB_GETCURSEL, 0, 0);
+                if (selected != LB_ERR) {
+                    state->selected_objective_index = static_cast<int>(selected);
+                    auto objective = state->config.objectives[static_cast<std::size_t>(state->selected_objective_index)];
+                    if (show_optimization_objective_editor_dialog(state->hwnd, &objective, L"Edit Objective")) {
+                        state->config.objectives[static_cast<std::size_t>(state->selected_objective_index)] = std::move(objective);
+                        refresh_optimization_objective_list(state);
+                    }
+                }
+                return 0;
+            }
+            break;
+        case kOptObjectiveAdd:
+        {
+            auto objective = default_optimization_objective_config();
+            if (show_optimization_objective_editor_dialog(state->hwnd, &objective, L"Add Objective")) {
+                state->config.objectives.push_back(std::move(objective));
+                state->selected_objective_index = static_cast<int>(state->config.objectives.size() - 1);
+                refresh_optimization_objective_list(state);
+            }
+            return 0;
+        }
+        case kOptObjectiveEdit:
+            if (state->selected_objective_index >= 0 &&
+                static_cast<std::size_t>(state->selected_objective_index) < state->config.objectives.size()) {
+                auto objective = state->config.objectives[static_cast<std::size_t>(state->selected_objective_index)];
+                if (show_optimization_objective_editor_dialog(state->hwnd, &objective, L"Edit Objective")) {
+                    state->config.objectives[static_cast<std::size_t>(state->selected_objective_index)] = std::move(objective);
+                    refresh_optimization_objective_list(state);
+                }
+            }
+            return 0;
+        case kOptObjectiveDelete:
+            if (state->selected_objective_index >= 0 &&
+                static_cast<std::size_t>(state->selected_objective_index) < state->config.objectives.size()) {
+                state->config.objectives.erase(state->config.objectives.begin() + state->selected_objective_index);
+                if (static_cast<std::size_t>(state->selected_objective_index) >= state->config.objectives.size()) {
+                    state->selected_objective_index = static_cast<int>(state->config.objectives.size()) - 1;
+                }
+                refresh_optimization_objective_list(state);
             }
             return 0;
         case kOptContinuationStrategyCombo:
@@ -3383,11 +4671,11 @@ HWND create_combo(HWND parent, int id, int x, int y, int width, HFONT font)
         0,
         L"COMBOBOX",
         L"",
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST,
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL | CBS_DROPDOWNLIST,
         x,
         y,
         width,
-        160,
+        260,
         parent,
         control_id(id),
         g_instance,
@@ -3643,9 +4931,6 @@ bool update_selected_action_from_controls(HWND hwnd, post2::core::PhaseConfig* p
 bool add_action_from_sidebar(HWND hwnd)
 {
     auto* phase = selected_phase();
-    if (!update_selected_action_from_controls(hwnd, phase)) {
-        return false;
-    }
 
     post2::core::PhaseAction action;
     action.time_s = 0.0;
@@ -3656,8 +4941,28 @@ bool add_action_from_sidebar(HWND hwnd)
     if (!stages.empty()) {
         action.stage_name = stages.front().name;
     }
+    if (!show_phase_action_editor_dialog(hwnd, &action, g_case.vehicle, L"Add Action")) {
+        return true;
+    }
     phase->actions.push_back(std::move(action));
     g_selected_action_index = static_cast<int>(phase->actions.size() - 1);
+    refresh_action_list();
+    load_selected_action_controls();
+    return true;
+}
+
+bool edit_action_from_sidebar(HWND hwnd)
+{
+    auto* phase = selected_phase();
+    if (g_selected_action_index < 0 ||
+        static_cast<std::size_t>(g_selected_action_index) >= phase->actions.size()) {
+        return true;
+    }
+    auto action = phase->actions[static_cast<std::size_t>(g_selected_action_index)];
+    if (!show_phase_action_editor_dialog(hwnd, &action, g_case.vehicle, L"Edit Action")) {
+        return true;
+    }
+    phase->actions[static_cast<std::size_t>(g_selected_action_index)] = std::move(action);
     refresh_action_list();
     load_selected_action_controls();
     return true;
@@ -3735,6 +5040,16 @@ void scroll_phase_pane_to(int new_pos)
 
 LRESULT CALLBACK phase_scroll_pane_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam)
 {
+    // Forward control notifications to the dialog window so the editor's
+    // WM_COMMAND switch (Add/Edit/Delete action buttons, Edit termination,
+    // etc.) sees them. lparam != 0 distinguishes control notifications from
+    // menu/accelerator commands; we only forward the former.
+    if (message == WM_COMMAND && lparam != 0) {
+        HWND parent = GetParent(hwnd);
+        if (parent) {
+            return SendMessageW(parent, message, wparam, lparam);
+        }
+    }
     switch (message) {
     case WM_VSCROLL: {
         SCROLLINFO info = {};
@@ -4022,15 +5337,17 @@ bool apply_phase_controls(HWND hwnd)
     }
 
     const auto& final_phase = candidate.phases[static_cast<std::size_t>(g_selected_phase_index)];
-    if (final_phase.duration_s <= 0.0) {
-        MessageBoxW(hwnd, L"Duration must be positive.", L"Phase", MB_ICONWARNING);
-        SetFocus(g_phase_duration_edit);
+    if (final_phase.termination.type == "time" && final_phase.termination.value <= 0.0) {
+        MessageBoxW(hwnd, L"Termination value must be positive for time-based termination.",
+            L"Phase", MB_ICONWARNING);
         return false;
     }
-    for (const auto& action : final_phase.actions) {
-        if (action.time_s < 0.0 || action.time_s > final_phase.duration_s) {
-            MessageBoxW(hwnd, L"Action time must be inside the phase duration.", L"Phase", MB_ICONWARNING);
-            return false;
+    if (final_phase.termination.type == "time") {
+        for (const auto& action : final_phase.actions) {
+            if (action.time_s < 0.0 || action.time_s > final_phase.termination.value) {
+                MessageBoxW(hwnd, L"Action time must be inside the phase duration.", L"Phase", MB_ICONWARNING);
+                return false;
+            }
         }
     }
 
@@ -4046,7 +5363,8 @@ void add_phase_from_sidebar()
     ensure_case_initialized();
     post2::core::PhaseConfig phase;
     phase.name = "phase " + std::to_string(g_case.phases.size() + 1);
-    phase.duration_s = g_case.phases.empty() ? g_config.duration_s : 60.0;
+    const double default_duration_s = g_case.phases.empty() ? g_config.duration_s : 60.0;
+    phase.termination = {"time", ">=", default_duration_s};
     phase.inherit_initial_state = !g_case.phases.empty();
     g_case.phases.push_back(std::move(phase));
     g_selected_phase_index = static_cast<int>(g_case.phases.size() - 1);
@@ -4120,10 +5438,18 @@ void create_phase_editor_controls(HWND hwnd)
     add_combo_item(g_phase_atmosphere_type, L"none");
     y += 40;
 
-    create_phase_numeric_headers(g_phase_scroll_pane, y - 18, font);
-    NumericBindingRow duration_row =
-        add_phase_numeric_row(g_phase_scroll_pane, &y, "Duration", prefix + ".duration_s", phase->duration_s, font);
-    g_phase_duration_edit = duration_row.value_edit;
+    // Phase termination — summary + Edit... opens TriggerCondition editor.
+    // The editor handles the optimisation Opt/Min/Max bounds inline.
+    create_label(g_phase_scroll_pane, 18, y + 4, 86, L"Termination", font);
+    HWND termination_label = CreateWindowExW(
+        0, L"STATIC", trigger_summary(phase->termination).c_str(),
+        WS_CHILD | WS_VISIBLE,
+        118, y + 4, 380, 20,
+        g_phase_scroll_pane, nullptr, g_instance, nullptr);
+    set_child_font(termination_label, font);
+    g_phase_termination_label = termination_label;
+    create_button(g_phase_scroll_pane, kPhaseTerminationEditButton, 504, y, 76, 26, L"Edit...", font);
+    y += 38;
 
     create_phase_section(g_phase_scroll_pane, &y, L"Throttle", font);
     create_label(g_phase_scroll_pane, 18, y + 4, 86, L"Type", font);
@@ -4163,7 +5489,8 @@ void create_phase_editor_controls(HWND hwnd)
     y += 128;
 
     g_phase_action_add_button = create_button(g_phase_scroll_pane, kPhaseActionAdd, 18, y, 62, 26, L"Add", font);
-    g_phase_action_delete_button = create_button(g_phase_scroll_pane, kPhaseActionDelete, 88, y, 62, 26, L"Delete", font);
+    create_button(g_phase_scroll_pane, kPhaseActionEdit, 88, y, 62, 26, L"Edit", font);
+    g_phase_action_delete_button = create_button(g_phase_scroll_pane, kPhaseActionDelete, 158, y, 62, 26, L"Delete", font);
     y += 38;
 
     create_label(g_phase_scroll_pane, 18, y + 4, 70, L"Action", font);
@@ -4222,6 +5549,7 @@ void create_phase_sidebar_controls(HWND hwnd)
     g_phase_delete_button = create_button(hwnd, kPhaseDelete, 88, 412, 62, 26, L"Delete", font);
     g_phase_apply_button = create_button(hwnd, kPhaseApply, 168, 412, 62, 26, L"Edit", font);
     g_phase_json_button = create_button(hwnd, kPhaseJson, 238, 412, 70, 26, L"JSON", font);
+    create_button(hwnd, kCaseEventsList, 18, 440, 290, 26, L"Events...", font);
 
     create_label(hwnd, 18, 460, 70, L"Outputs", font);
     g_outputs_edit = CreateWindowExW(
@@ -4271,27 +5599,41 @@ LRESULT CALLBACK phase_editor_proc(HWND hwnd, UINT message, WPARAM wparam, LPARA
             return 0;
         case kPhaseActionList:
             if (HIWORD(wparam) == LBN_SELCHANGE) {
-                const int previous = g_selected_action_index;
                 const LRESULT selected = SendMessageW(g_phase_action_list, LB_GETCURSEL, 0, 0);
                 if (selected != LB_ERR) {
-                    if (!update_selected_action_from_controls(hwnd, selected_phase())) {
-                        SendMessageW(g_phase_action_list, LB_SETCURSEL, static_cast<WPARAM>(previous), 0);
-                        return 0;
-                    }
-                    refresh_action_list();
                     g_selected_action_index = static_cast<int>(selected);
-                    SendMessageW(g_phase_action_list, LB_SETCURSEL, static_cast<WPARAM>(g_selected_action_index), 0);
                     load_selected_action_controls();
                 }
+                return 0;
+            }
+            if (HIWORD(wparam) == LBN_DBLCLK) {
+                edit_action_from_sidebar(hwnd);
                 return 0;
             }
             break;
         case kPhaseActionAdd:
             add_action_from_sidebar(hwnd);
             return 0;
+        case kPhaseActionEdit:
+            edit_action_from_sidebar(hwnd);
+            return 0;
         case kPhaseActionDelete:
             delete_action_from_sidebar(hwnd);
             return 0;
+        case kPhaseTerminationEditButton: {
+            auto* phase = selected_phase();
+            const std::string variable_path =
+                "phases[" + std::to_string(g_selected_phase_index) + "].termination.value";
+            if (show_trigger_condition_editor_dialog(
+                    hwnd, &phase->termination, &g_case.optimization,
+                    variable_path, L"Edit Termination")) {
+                if (window_is_live(g_phase_termination_label)) {
+                    SetWindowTextW(g_phase_termination_label,
+                        trigger_summary(phase->termination).c_str());
+                }
+            }
+            return 0;
+        }
         case kPhaseActionType:
             if (HIWORD(wparam) == CBN_SELCHANGE) {
                 const std::string type = action_type_from_display_label(get_combo_text(g_phase_action_type));
@@ -4762,7 +6104,7 @@ void export_kos_trajectory(HWND hwnd)
 
     std::string error;
     const std::string path_text = path.string();
-    if (!post2::core::write_csv_file(path_text, g_result.state_log, &error)) {
+    if (!post2::core::write_kos_csv_file(path_text, g_result.state_log, g_case, &error)) {
         MessageBoxW(hwnd, widen(error).c_str(), L"Export failed", MB_ICONERROR);
         return;
     }
@@ -5141,6 +6483,12 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
             if (show_case_phases_dialog(hwnd)) {
                 refresh_phase_list();
                 load_selected_phase_controls();
+                run_simulation(hwnd);
+            }
+            return 0;
+        case kCaseEventsList:
+            ensure_case_initialized();
+            if (show_case_events_manager_dialog(hwnd, &g_case.events, g_case.vehicle)) {
                 run_simulation(hwnd);
             }
             return 0;

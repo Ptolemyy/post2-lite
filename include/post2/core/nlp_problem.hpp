@@ -76,6 +76,7 @@ struct NlpProblem {
     OptimizationConfig optimization;
     std::vector<NlpVariable> variables;
     std::vector<NlpConstraint> constraints;
+    std::vector<NlpObjective> objectives;
     NlpObjective objective;
 };
 

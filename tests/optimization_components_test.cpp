@@ -38,7 +38,7 @@ post2::core::CaseConfig make_drop_case()
     config.vehicle.dry_mass_kg = 1000.0;
     post2::core::PhaseConfig phase;
     phase.name = "drop";
-    phase.duration_s = 1.0;
+    phase.termination.value = 1.0;
     phase.inherit_initial_state = false;
     phase.initial_state_eci = post2::core::State{
         {post2::core::kEarthRadiusM + 1000.0, 0.0, 0.0},
@@ -215,6 +215,54 @@ int main()
     }
 
     {
+        post2::core::CaseConfig objective_case = make_payload_drop_case();
+        objective_case.optimization.mode = "optimize";
+        post2::core::OptimizationObjectiveConfig payload;
+        payload.enabled = true;
+        payload.metric = "payload_mass_kg";
+        payload.direction = "maximize";
+        payload.weight = 2.0;
+        post2::core::OptimizationObjectiveConfig altitude;
+        altitude.enabled = true;
+        altitude.metric = "terminal_altitude_m";
+        altitude.direction = "minimize";
+        altitude.weight = 0.5;
+        objective_case.optimization.objectives = {payload, altitude};
+
+        post2::core::NlpProblem problem;
+        std::string error;
+        if (!post2::core::build_nlp_problem_from_case(objective_case, &problem, &error)) {
+            std::cerr << "multi-objective NLP build failed: " << error << '\n';
+            return 1;
+        }
+        post2::core::NlpEvaluator evaluator(objective_case, service);
+        const auto eval = evaluator.evaluate(problem, {});
+        double payload_mass = 0.0;
+        double terminal_altitude = 0.0;
+        if (!eval.ok ||
+            !post2::core::evaluate_trajectory_metric(
+                eval.simulation.state_log,
+                objective_case,
+                "payload_mass_kg",
+                &payload_mass) ||
+            !post2::core::evaluate_trajectory_metric(
+                eval.simulation.state_log,
+                objective_case,
+                "terminal_altitude_m",
+                &terminal_altitude)) {
+            std::cerr << "multi-objective evaluation failed\n";
+            return 1;
+        }
+        const double expected =
+            -2.0 * payload_mass / post2::core::nlp_default_metric_scale("payload_mass_kg") +
+            0.5 * terminal_altitude / post2::core::nlp_default_metric_scale("terminal_altitude_m");
+        if (!near(eval.objective, expected, 1.0e-9) || problem.objectives.size() != 2) {
+            std::cerr << "multi-objective weighted sum mismatch\n";
+            return 1;
+        }
+    }
+
+    {
         drop_case.optimization.qp_solver = "active-set";
         drop_case.optimization.fd_mode = "central";
         drop_case.optimization.parallel_fd = false;
@@ -222,7 +270,7 @@ int main()
         drop_case.optimization.stationarity_tolerance = 0.02;
         drop_case.optimization.max_restoration_iterations = 3;
         drop_case.optimization.continuation.enabled = true;
-        drop_case.optimization.continuation.variable_path = "phases[0].duration_s";
+        drop_case.optimization.continuation.variable_path = "phases[0].termination.value";
         drop_case.optimization.continuation.direction = "decrease";
         drop_case.optimization.continuation.steps = 5;
         drop_case.optimization.continuation.multistart_enabled = true;
@@ -247,7 +295,7 @@ int main()
             !near(parsed.optimization.constraint_tolerance, 0.01, 1.0e-12) ||
             parsed.optimization.max_restoration_iterations != 3 ||
             !parsed.optimization.continuation.enabled ||
-            parsed.optimization.continuation.variable_path != "phases[0].duration_s" ||
+            parsed.optimization.continuation.variable_path != "phases[0].termination.value" ||
             parsed.optimization.continuation.direction != "decrease" ||
             parsed.optimization.continuation.steps != 5 ||
             !parsed.optimization.continuation.multistart_enabled ||
@@ -259,8 +307,49 @@ int main()
     }
 
     {
+        post2::core::CaseConfig target_case = make_drop_case();
+        target_case.phases[0].termination.value = 2.0;
+        const auto target_sim = service.simulate(target_case);
+        if (!target_sim.ok) {
+            std::cerr << "envelope target simulation failed: " << target_sim.error << '\n';
+            return 1;
+        }
+
+        post2::core::CaseConfig envelope_case = make_drop_case();
+        envelope_case.optimization.optimizer = "sqp";
+        envelope_case.optimization.max_iterations = 1;
+        envelope_case.optimization.tolerance = 1.0e-6;
+        envelope_case.optimization.constraint_tolerance = 1.0e-6;
+        envelope_case.optimization.variables.push_back({"phases[0].termination.value", true, 0.5, 2.0});
+        envelope_case.optimization.targets.push_back({
+            "terminal_altitude_m",
+            "equal",
+            target_sim.state_log.back().altitude_m,
+            0.0,
+            0.0,
+            1.0,
+        });
+        envelope_case.optimization.envelope_search.enabled = true;
+        envelope_case.optimization.envelope_search.sample_count = 4;
+        const auto result = post2::core::optimize_case(&envelope_case, service);
+        double duration = 0.0;
+        if (!result.found_feasible ||
+            !has_message(result.messages, "envelope: enabled") ||
+            !has_message(result.messages, "envelope: sampled 4 candidates") ||
+            !post2::core::read_optimization_variable(
+                envelope_case,
+                "phases[0].termination.value",
+                &duration,
+                nullptr) ||
+            duration < 1.9) {
+            std::cerr << "envelope warm start did not select the expected candidate\n";
+            return 1;
+        }
+    }
+
+    {
         post2::core::CaseConfig nlp_case = make_drop_case();
-        nlp_case.optimization.variables.push_back({"phases[0].duration_s", true, 0.5, 2.0});
+        nlp_case.optimization.variables.push_back({"phases[0].termination.value", true, 0.5, 2.0});
         nlp_case.optimization.targets.push_back({"terminal_altitude_m", "equal", 950.0, 0.0, 0.0, 1.0});
         post2::core::NlpProblem problem;
         std::string error;
@@ -283,7 +372,7 @@ int main()
 
     {
         post2::core::CaseConfig nlp_case = make_drop_case();
-        nlp_case.optimization.variables.push_back({"phases[0].duration_s", true, 0.5, 2.0});
+        nlp_case.optimization.variables.push_back({"phases[0].termination.value", true, 0.5, 2.0});
         nlp_case.optimization.targets.push_back({"terminal_altitude_m", "equal", 950.0, 0.0, 0.0, 1.0});
         post2::core::NlpProblem problem;
         std::string error;
@@ -321,7 +410,7 @@ int main()
         post2::core::CaseConfig sqp_case = make_drop_case();
         sqp_case.optimization.optimizer = "sqp";
         sqp_case.optimization.max_iterations = 2;
-        sqp_case.optimization.variables.push_back({"phases[0].duration_s", true, 0.5, 2.0});
+        sqp_case.optimization.variables.push_back({"phases[0].termination.value", true, 0.5, 2.0});
         sqp_case.optimization.targets.push_back({"terminal_altitude_m", "equal", 950.0, 0.0, 0.0, 1.0});
         const auto result = post2::core::optimize_case(&sqp_case, service);
         if (!has_message(result.messages, "nlp: problem built") ||
@@ -339,7 +428,7 @@ int main()
         active_set_case.optimization.optimizer = "sqp";
         active_set_case.optimization.qp_solver = "active-set";
         active_set_case.optimization.max_iterations = 1;
-        active_set_case.optimization.variables.push_back({"phases[0].duration_s", true, 0.5, 2.0});
+        active_set_case.optimization.variables.push_back({"phases[0].termination.value", true, 0.5, 2.0});
         active_set_case.optimization.targets.push_back({"terminal_altitude_m", "equal", 950.0, 0.0, 0.0, 1.0});
         const auto result = post2::core::optimize_case(&active_set_case, service);
         if (!has_message(result.messages, "qp: using active-set") ||
@@ -353,7 +442,7 @@ int main()
         post2::core::CaseConfig fmincon_case = make_drop_case();
         fmincon_case.optimization.optimizer = "fmincon";
         fmincon_case.optimization.max_iterations = 2;
-        fmincon_case.optimization.variables.push_back({"phases[0].duration_s", true, 0.5, 2.0});
+        fmincon_case.optimization.variables.push_back({"phases[0].termination.value", true, 0.5, 2.0});
         fmincon_case.optimization.targets.push_back({"terminal_altitude_m", "equal", 950.0, 0.0, 0.0, 1.0});
         const auto result = post2::core::optimize_case(&fmincon_case, service);
         if (result.variable_changes.empty() ||
@@ -376,7 +465,7 @@ int main()
         continuation_case.optimization.tolerance = 0.02;
         continuation_case.optimization.constraint_tolerance = 0.02;
         continuation_case.optimization.mode = "optimize";
-        continuation_case.optimization.variables.push_back({"phases[0].duration_s", true, 0.5, 2.0});
+        continuation_case.optimization.variables.push_back({"phases[0].termination.value", true, 0.5, 2.0});
         continuation_case.optimization.variables.push_back({"vehicle.stages[1].dry_mass_kg", true, 100.0, 180.0});
         continuation_case.optimization.targets.push_back({
             "terminal_altitude_m",
@@ -424,7 +513,7 @@ int main()
         continuation_case.optimization.max_iterations = 2;
         continuation_case.optimization.tolerance = 0.02;
         continuation_case.optimization.constraint_tolerance = 0.02;
-        continuation_case.optimization.variables.push_back({"phases[0].duration_s", true, 0.5, 2.0});
+        continuation_case.optimization.variables.push_back({"phases[0].termination.value", true, 0.5, 2.0});
         continuation_case.optimization.variables.push_back({"vehicle.dry_mass_kg", true, 500.0, 1000.0});
         continuation_case.optimization.targets.push_back({
             "terminal_altitude_m",
@@ -457,7 +546,7 @@ int main()
 
     {
         post2::core::CaseConfig invalid_continuation = make_drop_case();
-        invalid_continuation.optimization.variables.push_back({"phases[0].duration_s", true, 0.5, 2.0});
+        invalid_continuation.optimization.variables.push_back({"phases[0].termination.value", true, 0.5, 2.0});
         invalid_continuation.optimization.targets.push_back({"terminal_altitude_m", "equal", 995.0, 0.0, 0.0, 1.0});
         invalid_continuation.optimization.continuation.enabled = true;
         invalid_continuation.optimization.continuation.variable_path = "vehicle.dry_mass_kg";
@@ -475,7 +564,7 @@ int main()
         impossible.optimization.optimizer = "sqp";
         impossible.optimization.max_iterations = 2;
         impossible.optimization.tolerance = 1.0e-8;
-        impossible.optimization.variables.push_back({"phases[0].duration_s", true, 0.5, 1.0});
+        impossible.optimization.variables.push_back({"phases[0].termination.value", true, 0.5, 1.0});
         impossible.optimization.targets.push_back({"terminal_altitude_m", "equal", 1.0e9, 0.0, 0.0, 1.0});
         const auto result = post2::core::optimize_case(&impossible, service);
         if (result.ok || result.found_feasible || result.max_constraint_violation <= 0.0 ||

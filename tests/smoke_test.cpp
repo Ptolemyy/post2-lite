@@ -14,6 +14,9 @@
 #include <cmath>
 #include <iostream>
 #include <optional>
+#include <sstream>
+#include <string>
+#include <vector>
 
 int main()
 {
@@ -307,7 +310,7 @@ int main()
 
     post2::core::PhaseConfig hdc_phase;
     hdc_phase.name = "hold";
-    hdc_phase.duration_s = 60.0;
+    hdc_phase.termination.value = 60.0;
     hdc_phase.optimize_enabled = true;
     hdc_phase.inherit_initial_state = false;
     hdc_phase.hold_down_clamp_initial_active = true;
@@ -327,7 +330,7 @@ int main()
 
     post2::core::PhaseConfig coast_phase;
     coast_phase.name = "coast";
-    coast_phase.duration_s = 20.0;
+    coast_phase.termination.value = 20.0;
     coast_phase.optimize_enabled = false;
     coast_phase.inherit_initial_state = true;
     coast_phase.force_models.thrust = false;
@@ -351,11 +354,18 @@ int main()
     case_config.phases.push_back(coast_phase);
     case_config.optimization.max_iterations = 12;
     case_config.optimization.tolerance = 1.0e-3;
-    case_config.optimization.variables.push_back({"phases[0].duration_s", true, 30.0, 90.0});
+    case_config.optimization.variables.push_back({"phases[0].termination.value", true, 30.0, 90.0});
     case_config.optimization.targets.push_back({"terminal_altitude_m", "equal", 0.0, 0.0, 0.0, 2.0});
     case_config.optimization.objective.enabled = true;
     case_config.optimization.objective.metric = "terminal_speed_mps";
     case_config.optimization.objective.direction = "minimize";
+    case_config.optimization.objectives.push_back(case_config.optimization.objective);
+    post2::core::OptimizationObjectiveConfig payload_objective;
+    payload_objective.enabled = true;
+    payload_objective.metric = "payload_mass_kg";
+    payload_objective.direction = "maximize";
+    payload_objective.weight = 0.25;
+    case_config.optimization.objectives.push_back(payload_objective);
 
     const auto case_json = post2::core::case_config_to_json(case_config);
     post2::core::CaseConfig loaded_case;
@@ -397,11 +407,13 @@ int main()
         loaded_case.optimization.max_iterations != 12 ||
         loaded_case.optimization.variables.size() != 1 ||
         !loaded_case.optimization.variables[0].enabled ||
-        loaded_case.optimization.variables[0].path != "phases[0].duration_s" ||
+        loaded_case.optimization.variables[0].path != "phases[0].termination.value" ||
         loaded_case.optimization.targets.size() != 1 ||
         loaded_case.optimization.targets[0].weight != 2.0 ||
         !loaded_case.optimization.objective.enabled ||
-        loaded_case.optimization.objective.metric != "terminal_speed_mps") {
+        loaded_case.optimization.objective.metric != "terminal_speed_mps" ||
+        loaded_case.optimization.objectives.size() != 2 ||
+        loaded_case.optimization.objectives[1].metric != "payload_mass_kg") {
         std::cerr << "case JSON roundtrip changed values\n";
         return 1;
     }
@@ -455,6 +467,188 @@ int main()
         return 1;
     }
 
+    {
+        const auto plain_case_csv = post2::core::trajectory_to_csv(case_result.state_log);
+        if (plain_case_csv.find("kos_") != std::string::npos ||
+            !post2::core::trajectory_from_csv(plain_case_csv).ok) {
+            std::cerr << "normal trajectory CSV changed after adding kOS export\n";
+            return 1;
+        }
+
+        const auto split_csv = [](const std::string& line) {
+            std::vector<std::string> parts;
+            std::istringstream input(line);
+            std::string item;
+            while (std::getline(input, item, ',')) {
+                parts.push_back(item);
+            }
+            return parts;
+        };
+        const auto find_col = [](const std::vector<std::string>& header, const std::string& name) {
+            const auto it = std::find(header.begin(), header.end(), name);
+            return it == header.end() ? -1 : static_cast<int>(std::distance(header.begin(), it));
+        };
+        const auto value_at = [](const std::vector<std::string>& row, int index) {
+            return index >= 0 && static_cast<std::size_t>(index) < row.size()
+                ? std::stod(row[static_cast<std::size_t>(index)])
+                : 0.0;
+        };
+
+        const auto kos_csv = post2::core::kos_trajectory_to_csv(case_result.state_log, loaded_case);
+        std::istringstream input(kos_csv);
+        std::string line;
+        if (!std::getline(input, line)) {
+            std::cerr << "kOS CSV was empty\n";
+            return 1;
+        }
+        const auto header = split_csv(line);
+        const int phase_index_col = find_col(header, "phase_index");
+        const int steer_avail_col = find_col(header, "kos_steering_poly_available");
+        const int az_c0_col = find_col(header, "kos_azimuth_c0");
+        const int el_c0_col = find_col(header, "kos_elevation_c0");
+        const int roll_avail_col = find_col(header, "kos_roll_available");
+        const int roll_c0_col = find_col(header, "kos_roll_c0");
+        const int throttle_avail_col = find_col(header, "kos_throttle_poly_available");
+        const int throttle_c0_col = find_col(header, "kos_throttle_c0");
+        const int stage_command_col = find_col(header, "kos_stage_command");
+        const int stage_plan_col = find_col(header, "kos_stage_plan_time_s");
+        const int stage_pulses_col = find_col(header, "kos_stage_pulse_count");
+        const int shutdown_before_stage_col = find_col(header, "kos_shutdown_before_stage");
+        if (phase_index_col < 0 ||
+            steer_avail_col < 0 ||
+            az_c0_col < 0 ||
+            el_c0_col < 0 ||
+            roll_avail_col < 0 ||
+            roll_c0_col < 0 ||
+            throttle_avail_col < 0 ||
+            throttle_c0_col < 0 ||
+            stage_command_col < 0 ||
+            stage_plan_col < 0 ||
+            stage_pulses_col < 0 ||
+            shutdown_before_stage_col < 0) {
+            std::cerr << "kOS CSV header is missing guidance/event columns\n";
+            return 1;
+        }
+
+        int stage_command_count = 0;
+        double stage_plan_time_s = -1.0;
+        double stage_pulses = 0.0;
+        double shutdown_before_stage = 0.0;
+        bool saw_phase0_poly = false;
+        bool saw_phase1_non_poly_throttle = false;
+        while (std::getline(input, line)) {
+            if (line.empty()) {
+                continue;
+            }
+            const auto row = split_csv(line);
+            const int phase_index = static_cast<int>(value_at(row, phase_index_col));
+            if (phase_index == 0 &&
+                value_at(row, steer_avail_col) == 1.0 &&
+                value_at(row, roll_avail_col) == 1.0 &&
+                value_at(row, throttle_avail_col) == 1.0 &&
+                std::abs(value_at(row, az_c0_col) - 90.0) < 1.0e-12 &&
+                std::abs(value_at(row, el_c0_col) - 5.0) < 1.0e-12 &&
+                std::abs(value_at(row, roll_c0_col)) < 1.0e-12 &&
+                std::abs(value_at(row, throttle_c0_col) - 0.5) < 1.0e-12) {
+                saw_phase0_poly = true;
+            }
+            if (phase_index == 1 && value_at(row, throttle_avail_col) == 0.0) {
+                saw_phase1_non_poly_throttle = true;
+            }
+            if (value_at(row, stage_command_col) > 0.5) {
+                ++stage_command_count;
+                stage_plan_time_s = value_at(row, stage_plan_col);
+                stage_pulses = value_at(row, stage_pulses_col);
+                shutdown_before_stage = value_at(row, shutdown_before_stage_col);
+            }
+        }
+
+        if (!saw_phase0_poly ||
+            !saw_phase1_non_poly_throttle ||
+            stage_command_count != 1 ||
+            std::abs(stage_plan_time_s - loaded_case.phases[0].termination.value) > 1.0e-9 ||
+            std::abs(stage_pulses - 1.0) > 1.0e-12 ||
+            std::abs(shutdown_before_stage - 1.0) > 1.0e-12) {
+            std::cerr << "kOS CSV did not encode expected guidance/stage event data\n";
+            return 1;
+        }
+    }
+
+    {
+        post2::core::CaseConfig pulse_case;
+        pulse_case.vehicle = loaded_vehicle_config;
+        pulse_case.vehicle.stages[0].name = "booster";
+        pulse_case.vehicle.stages[0].active = true;
+        pulse_case.vehicle.stages[0].attached = true;
+        pulse_case.vehicle.stages[1].name = "upper";
+        pulse_case.vehicle.stages[1].active = false;
+        pulse_case.vehicle.stages[1].attached = true;
+        post2::core::PhaseConfig pulse_phase0;
+        pulse_phase0.termination.value = 1.0;
+        post2::core::PhaseConfig pulse_phase1;
+        pulse_phase1.termination.value = 1.0;
+        pulse_case.phases = {pulse_phase0, pulse_phase1};
+
+        post2::core::StateLog pulse_log(pulse_case.earth_radius_m, pulse_case.vehicle);
+        post2::core::State pulse_state{
+            {post2::core::kEarthRadiusM + 1000.0, 0.0, 0.0},
+            {0.0, 0.0, 0.0},
+        };
+        auto runtime = post2::vehicle::make_initial_runtime_state(pulse_case.vehicle, pulse_state, 0.0);
+        pulse_log.set_phase_metadata(0, "boost");
+        pulse_log.append(pulse_log.build_entry(runtime));
+        post2::vehicle::set_stage_active(&runtime, 0, false);
+        post2::vehicle::set_stage_attached(&runtime, 0, false);
+        post2::vehicle::set_stage_active(&runtime, 1, true);
+        runtime.time_s = 1.0;
+        pulse_log.set_phase_metadata(1, "upper");
+        pulse_log.append(pulse_log.build_entry(runtime));
+
+        const auto split_csv = [](const std::string& line) {
+            std::vector<std::string> parts;
+            std::istringstream input(line);
+            std::string item;
+            while (std::getline(input, item, ',')) {
+                parts.push_back(item);
+            }
+            return parts;
+        };
+        const auto find_col = [](const std::vector<std::string>& header, const std::string& name) {
+            const auto it = std::find(header.begin(), header.end(), name);
+            return it == header.end() ? -1 : static_cast<int>(std::distance(header.begin(), it));
+        };
+        const auto value_at = [](const std::vector<std::string>& row, int index) {
+            return index >= 0 && static_cast<std::size_t>(index) < row.size()
+                ? std::stod(row[static_cast<std::size_t>(index)])
+                : 0.0;
+        };
+
+        const auto pulse_csv = post2::core::kos_trajectory_to_csv(pulse_log, pulse_case);
+        std::istringstream input(pulse_csv);
+        std::string line;
+        std::getline(input, line);
+        const auto header = split_csv(line);
+        const int command_col = find_col(header, "kos_stage_command");
+        const int pulses_col = find_col(header, "kos_stage_pulse_count");
+        const int shutdown_col = find_col(header, "kos_shutdown_before_stage");
+        bool saw_double_pulse = false;
+        while (std::getline(input, line)) {
+            if (line.empty()) {
+                continue;
+            }
+            const auto row = split_csv(line);
+            if (value_at(row, command_col) > 0.5 &&
+                std::abs(value_at(row, pulses_col) - 2.0) < 1.0e-12 &&
+                std::abs(value_at(row, shutdown_col) - 1.0) < 1.0e-12) {
+                saw_double_pulse = true;
+            }
+        }
+        if (!saw_double_pulse) {
+            std::cerr << "kOS CSV did not encode shutdown + separation + ignition pulses\n";
+            return 1;
+        }
+    }
+
     const auto metrics = post2::core::evaluate_trajectory_metrics(case_result.state_log, loaded_case);
     auto metric_value = [&](const std::string& name, double* value) {
         const auto it = std::find_if(metrics.begin(), metrics.end(), [&](const auto& candidate) {
@@ -490,7 +684,7 @@ int main()
     force_off_case.phases.clear();
     post2::core::PhaseConfig force_off_phase;
     force_off_phase.name = "force-off";
-    force_off_phase.duration_s = 10.0;
+    force_off_phase.termination.value = 10.0;
     force_off_phase.inherit_initial_state = false;
     force_off_phase.initial_state_eci = post2::core::State{
         {post2::core::kEarthRadiusM + 1000.0, 0.0, 0.0},
@@ -518,7 +712,7 @@ int main()
     impact_case.phases.clear();
     post2::core::PhaseConfig impact_phase;
     impact_phase.name = "impact";
-    impact_phase.duration_s = 50.0;
+    impact_phase.termination.value = 50.0;
     impact_phase.inherit_initial_state = false;
     impact_phase.initial_state_eci = post2::core::State{
         {post2::core::kEarthRadiusM + 1000.0, 0.0, 0.0},
@@ -533,7 +727,7 @@ int main()
         impact_result.error != "vehicle impacted Earth during propagation" ||
         impact_result.state_log.empty() ||
         impact_result.state_log.back().altitude_m < -50.0 ||
-        impact_result.state_log.back().time_s >= impact_phase.duration_s) {
+        impact_result.state_log.back().time_s >= impact_phase.termination.value) {
         std::cerr << "impact event did not terminate propagation at the surface\n";
         return 1;
     }
@@ -559,7 +753,7 @@ int main()
     drop_case.phases.clear();
     post2::core::PhaseConfig drop_phase;
     drop_phase.name = "drop";
-    drop_phase.duration_s = 1.0;
+    drop_phase.termination.value = 1.0;
     drop_phase.inherit_initial_state = false;
     drop_phase.initial_state_eci = post2::core::State{
         {post2::core::kEarthRadiusM + 1000.0, 0.0, 0.0},
@@ -570,7 +764,7 @@ int main()
     drop_case.phases.push_back(drop_phase);
     drop_case.optimization.max_iterations = 40;
     drop_case.optimization.tolerance = 1.0e-2;
-    drop_case.optimization.variables.push_back({"phases[0].duration_s", true, 1.0, 5.0});
+    drop_case.optimization.variables.push_back({"phases[0].termination.value", true, 1.0, 5.0});
     drop_case.optimization.variables.push_back({"vehicle.stages[1].dry_mass_kg", true, 100.0, 250.0});
     drop_case.optimization.targets.push_back({"terminal_altitude_m", "equal", 950.0, 0.0, 0.0, 1.0});
     drop_case.optimization.objective.enabled = true;
@@ -697,7 +891,7 @@ int main()
 
         post2::core::PhaseConfig phase;
         phase.name = "t2t";
-        phase.duration_s = 60.0;
+        phase.termination.value = 60.0;
         phase.inherit_initial_state = false;
         phase.initial_state_eci = post2::core::State{
             {post2::core::kEarthRadiusM + 200000.0, 0.0, 0.0},
@@ -761,7 +955,7 @@ int main()
 
         post2::core::PhaseConfig phase;
         phase.name = "burn";
-        phase.duration_s = 50.0;
+        phase.termination.value = 50.0;
         phase.inherit_initial_state = false;
         phase.initial_state_eci = post2::core::State{
             {post2::core::kEarthRadiusM + 200000.0, 0.0, 0.0},
@@ -841,7 +1035,7 @@ int main()
 
         post2::core::PhaseConfig phase;
         phase.name = "clamp burn";
-        phase.duration_s = 30.0;
+        phase.termination.value = 30.0;
         phase.inherit_initial_state = false;
         phase.hold_down_clamp_initial_active = true;
         phase.force_models.gravity = true;
@@ -889,7 +1083,7 @@ int main()
         dopri_case.vehicle.tanks.front().capacity_kg = 0.0;
         post2::core::PhaseConfig phase;
         phase.name = "dopri5 leo";
-        phase.duration_s = 5400.0;
+        phase.termination.value = 5400.0;
         phase.inherit_initial_state = false;
         phase.initial_state_eci = post2::core::State{
             {post2::core::kEarthRadiusM + 200000.0, 0.0, 0.0},

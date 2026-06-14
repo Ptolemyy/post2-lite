@@ -88,6 +88,27 @@ struct PhaseAction {
     std::string stage_name;
 };
 
+// Shared between phase termination and case-level mission events. For phase
+// termination the "time" type is phase-relative (preserves duration_s
+// semantics). For mission events the "time" type is mission-absolute.
+struct TriggerCondition {
+    // "time" | "altitude_m" | "velocity_mps" | "total_mass_kg" | "propellant_mass_kg"
+    std::string type = "time";
+    // ">=" or "<="
+    std::string comparison = ">=";
+    double value = kDefaultDurationS;
+};
+
+// Case-level non-sequential event. Trigger evaluates on every integrator
+// step boundary; the actions vector is applied atomically at the first
+// rising edge (prev_g < 0, g_now >= 0). Subsequent rising edges re-fire.
+struct EventConfig {
+    std::string name = "event";
+    bool enabled = true;
+    TriggerCondition trigger;
+    std::vector<PhaseAction> actions;
+};
+
 struct Poly2Config {
     double c0 = 0.0;
     double c1 = 0.0;
@@ -141,7 +162,10 @@ struct SteeringModelConfig {
 
 struct PhaseConfig {
     std::string name = "default";
-    double duration_s = kDefaultDurationS;
+    // Polymorphic termination condition. For type == "time" the value is the
+    // phase duration in seconds (phase-relative). For altitude/velocity/mass
+    // types, the phase ends when the comparison first becomes true.
+    TriggerCondition termination{"time", ">=", kDefaultDurationS};
     bool optimize_enabled = true;
     bool inherit_initial_state = true;
     std::optional<State> initial_state_eci;
@@ -180,6 +204,12 @@ struct OptimizationObjectiveConfig {
     double weight = 1.0;
 };
 
+struct OptimizationEnvelopeSearchConfig {
+    bool enabled = false;
+    int sample_count = 16;
+    int seed = 1;
+};
+
 struct OptimizationContinuationConfig {
     bool enabled = false;
     std::string variable_path;
@@ -204,7 +234,12 @@ struct OptimizationConfig {
     int max_restoration_iterations = 8;
     std::vector<OptimizationVariableConfig> variables;
     std::vector<OptimizationTargetConfig> targets;
+    std::vector<OptimizationObjectiveConfig> objectives;
+    // Legacy single-objective surface. When objectives is non-empty, the
+    // vector is authoritative; this member is kept for older case files and
+    // CLI/UI paths that still set one objective.
     OptimizationObjectiveConfig objective;
+    OptimizationEnvelopeSearchConfig envelope_search;
     OptimizationContinuationConfig continuation;
 };
 
@@ -222,6 +257,9 @@ struct CaseConfig {
     double earth_rotation_at_epoch_rad = 0.0;
     double step_s = kDefaultStepS;
     std::vector<PhaseConfig> phases;
+    // Non-sequential events. Evaluated each integrator step boundary; fire
+    // on rising edges of the trigger condition.
+    std::vector<EventConfig> events;
     OptimizationConfig optimization;
 };
 

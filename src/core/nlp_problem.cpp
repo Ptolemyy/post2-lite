@@ -217,6 +217,27 @@ double nlp_metric_scale(const std::string& metric, double reference)
     return std::max(nlp_default_metric_scale(metric), std::abs(reference));
 }
 
+std::vector<OptimizationObjectiveConfig> nlp_effective_objective_configs(
+    const OptimizationConfig& optimization)
+{
+    if (!optimization.objectives.empty()) {
+        return optimization.objectives;
+    }
+    return {optimization.objective};
+}
+
+NlpObjective make_objective(const OptimizationObjectiveConfig& objective)
+{
+    NlpObjective out;
+    out.enabled = objective.enabled;
+    out.metric = objective.metric;
+    out.weight = objective.weight;
+    out.direction = objective.direction == "maximize"
+        ? NlpObjectiveDirection::Maximize
+        : NlpObjectiveDirection::Minimize;
+    return out;
+}
+
 bool build_nlp_problem_from_case(
     const CaseConfig& config,
     NlpProblem* problem,
@@ -231,13 +252,19 @@ bool build_nlp_problem_from_case(
     NlpProblem out;
     out.base_case = config;
     out.optimization = config.optimization;
-    out.objective.enabled = config.optimization.objective.enabled;
-    out.objective.metric = config.optimization.objective.metric;
-    out.objective.weight = config.optimization.objective.weight;
-    out.objective.direction =
-        config.optimization.objective.direction == "maximize"
-            ? NlpObjectiveDirection::Maximize
-            : NlpObjectiveDirection::Minimize;
+    for (const auto& objective : nlp_effective_objective_configs(config.optimization)) {
+        NlpObjective nlp_objective = make_objective(objective);
+        if (!nlp_objective.enabled || nlp_objective.weight <= 0.0) {
+            continue;
+        }
+        out.objectives.push_back(std::move(nlp_objective));
+    }
+    if (!out.objectives.empty()) {
+        out.objective = out.objectives.front();
+    } else {
+        out.objective = make_objective(config.optimization.objective);
+        out.objective.enabled = false;
+    }
 
     for (const auto& variable : config.optimization.variables) {
         if (!variable.enabled) {

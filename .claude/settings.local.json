@@ -48,7 +48,17 @@
       "Bash(awk -F',' 'NR>1 && $19+0 > 0 {print NR\": q=\"$20\" mach=\"$21\" rho=\"$19\" pressure=\"$18; if\\(NR>10\\) exit}' trajectory.csv)",
       "Bash(awk -F',' 'NR<=15 || NR>=100 {print NR\": t=\"$1\" alt=\"$8}' trajectory.csv)",
       "Bash(cmake --build build --config Debug --target post2_gui)",
-      "Bash(cmake --build build --config Release --target post2_gui)"
+      "Bash(cmake --build build --config Release --target post2_gui)",
+      "Bash(awk NR>=290 && NR<=400 *)",
+      "Bash(awk NR>=620 && NR<=820 *)",
+      "Bash(ctest --test-dir build -C Debug --output-on-failure)",
+      "Bash(./build/Debug/post2_shell.exe simulate *)",
+      "Bash(cmake -S . -B build)",
+      "Bash(cmake --build build --config Debug --target post2_phase_termination_and_events_test)",
+      "Bash(./build/Debug/post2_phase_termination_and_events_test.exe)",
+      "Bash(gh pr *)",
+      "Bash(awk 'NR>=5400 && NR<=5520 && /^LRESULT CALLBACK|^[a-zA-Z].*proc.*HWND/' src/gui/main_win32.cpp)",
+      "Bash(./build/Release/post2_shell.exe simulate *)"
     ]
   }
 }
