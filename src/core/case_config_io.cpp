@@ -272,6 +272,15 @@ JsonValue tangent_to_json(const LinearTangentConfig& tangent)
     });
 }
 
+JsonValue upfg_to_json(const UpfgConfig& upfg)
+{
+    return JsonValue::object({
+        {"periapsis_km", number(upfg.periapsis_km)},
+        {"apoapsis_km", number(upfg.apoapsis_km)},
+        {"inclination_deg", number(upfg.inclination_deg)},
+    });
+}
+
 JsonValue steering_to_json(const SteeringModelConfig& steering)
 {
     JsonValue::Array points;
@@ -298,6 +307,7 @@ JsonValue steering_to_json(const SteeringModelConfig& steering)
         {"azimuth", poly_to_json(steering.azimuth_deg)},
         {"elevation", poly_to_json(steering.elevation_deg)},
         {"tangent", tangent_to_json(steering.tangent)},
+        {"upfg", upfg_to_json(steering.upfg)},
         {"fixed_direction_eci", vec3_to_json(steering.fixed_direction_eci)},
         {"points", JsonValue::array(std::move(points))},
         {"segments", JsonValue::array(std::move(segments))},
@@ -451,6 +461,7 @@ JsonValue optimization_to_json(const OptimizationConfig& optimization)
         })},
         {"continuation", JsonValue::object({
             {"enabled", boolean(optimization.continuation.enabled)},
+            {"mode", string(optimization.continuation.mode)},
             {"variable_path", string(optimization.continuation.variable_path)},
             {"direction", string(optimization.continuation.direction)},
             {"steps", number(static_cast<double>(optimization.continuation.steps))},
@@ -636,6 +647,27 @@ bool read_tangent(const JsonValue& object, const char* key, LinearTangentConfig*
 {
     const JsonValue* value = find_member(object, key);
     return !value || parse_tangent(*value, target, error);
+}
+
+bool parse_upfg(const JsonValue& value, UpfgConfig* target, std::string* error)
+{
+    if (!value.is_object()) {
+        return fail(error, "steering_model.upfg must be an object");
+    }
+    UpfgConfig parsed = *target;
+    if (!read_number(value, "periapsis_km", &parsed.periapsis_km, error) ||
+        !read_number(value, "apoapsis_km", &parsed.apoapsis_km, error) ||
+        !read_number(value, "inclination_deg", &parsed.inclination_deg, error)) {
+        return false;
+    }
+    *target = parsed;
+    return true;
+}
+
+bool read_upfg(const JsonValue& object, const char* key, UpfgConfig* target, std::string* error)
+{
+    const JsonValue* value = find_member(object, key);
+    return !value || parse_upfg(*value, target, error);
 }
 
 bool parse_gravity_model(const JsonValue& value, GravityModelConfig* target, std::string* error)
@@ -1021,6 +1053,7 @@ bool parse_steering(const JsonValue& value, SteeringModelConfig* target, std::st
         !read_poly(value, "azimuth", &parsed.azimuth_deg, error) ||
         !read_poly(value, "elevation", &parsed.elevation_deg, error) ||
         !read_tangent(value, "tangent", &parsed.tangent, error) ||
+        !read_upfg(value, "upfg", &parsed.upfg, error) ||
         !read_vec3(value, "fixed_direction_eci", &parsed.fixed_direction_eci, error)) {
         return false;
     }
@@ -1226,6 +1259,11 @@ bool parse_optimization(const JsonValue& value, OptimizationConfig* target, std:
         }
         parsed.continuation.steps = static_cast<int>(steps);
         parsed.continuation.multistart_count = static_cast<int>(multistart_count);
+        // "mode" is optional so pre-mode case files still load (default "variable").
+        if (find_member(*continuation, "mode") &&
+            !read_string(*continuation, "mode", &parsed.continuation.mode, error)) {
+            return false;
+        }
     }
 
     *target = std::move(parsed);

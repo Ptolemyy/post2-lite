@@ -2154,13 +2154,23 @@ bool validate_optimization_config(const OptimizationConfig& optimization, std::s
         return fail(error, "target mode requires at least one target");
     }
     if (optimization.continuation.enabled) {
-        if (optimization.continuation.variable_path.empty()) {
-            return fail(error, "continuation variable path is required");
+        const std::string& continuation_mode = optimization.continuation.mode;
+        if (continuation_mode != "variable" && continuation_mode != "objective") {
+            return fail(error, "unsupported continuation mode: " + continuation_mode);
         }
-        if (optimization.continuation.direction != "increase" &&
-            optimization.continuation.direction != "decrease") {
-            return fail(error, "unsupported continuation direction: " +
-                optimization.continuation.direction);
+        if (continuation_mode == "objective") {
+            if (!has_enabled_objective) {
+                return fail(error, "objective-mode (epsilon-constraint) continuation requires an enabled objective");
+            }
+        } else {
+            if (optimization.continuation.variable_path.empty()) {
+                return fail(error, "continuation variable path is required");
+            }
+            if (optimization.continuation.direction != "increase" &&
+                optimization.continuation.direction != "decrease") {
+                return fail(error, "unsupported continuation direction: " +
+                    optimization.continuation.direction);
+            }
         }
         if (optimization.continuation.steps <= 0) {
             return fail(error, "continuation steps must be positive");
@@ -2594,6 +2604,183 @@ double signed_distance_to_target(double value, double target, bool increasing)
     return increasing ? target - value : value - target;
 }
 
+// Epsilon-constraint continuation. The objective is an OUTPUT metric with no
+// single input lever (e.g. minimize(max_q_pa)), so the variable-ramp
+// continuation cannot drive it. Instead: solve target-only for a feasible warm
+// start, then repeatedly add the objective metric as a bound (max_q <= cap for
+// minimize, >= floor for maximize) and tighten the bound, warm-starting each
+// solve from the previous feasible case, until the targets can no longer be met.
+OptimizationResult optimize_case_with_epsilon_constraint(
+    CaseConfig* config,
+    ITrajectoryService& service,
+    const OptimizationConfig& optimization,
+    OptimizationRunOptions options)
+{
+    OptimizationResult result;
+    const CaseConfig initial_case = *config;
+    append_limited_message(&result.messages, "epsilon-constraint: enabled");
+
+    OptimizationObjectiveConfig objective;
+    bool have_objective = false;
+    for (const auto& candidate : effective_objective_configs(optimization)) {
+        if (candidate.enabled && candidate.weight > 0.0) {
+            objective = candidate;
+            have_objective = true;
+            break;
+        }
+    }
+    if (!have_objective) {
+        result.error = "epsilon-constraint continuation requires an enabled objective";
+        return result;
+    }
+    if (optimization.targets.empty()) {
+        result.error = "epsilon-constraint continuation requires at least one target";
+        return result;
+    }
+    const std::string metric = objective.metric;
+    const bool minimize = objective.direction != "maximize";
+
+    OptimizationRunOptions inner_options = options;
+    inner_options.run_final_simulation = true;
+
+    auto target_only_config = [&]() {
+        OptimizationConfig cfg = optimization;
+        cfg.mode = "target";
+        cfg.objective.enabled = false;
+        cfg.objectives.clear();
+        cfg.envelope_search.enabled = false;
+        cfg.continuation.enabled = false;
+        return cfg;
+    };
+
+    auto absorb = [&](const OptimizationResult& step) {
+        result.iterations += step.iterations;
+        result.evaluations += step.evaluations;
+        for (const auto& message : step.messages) {
+            append_limited_message(&result.messages, message);
+        }
+    };
+
+    // Solve `case_config` with `cfg` (a single target-only solve, warm-started
+    // through the case's current variable values).
+    auto solve = [&](CaseConfig& case_config, const OptimizationConfig& cfg) {
+        case_config.optimization = cfg;
+        OptimizationResult step = optimize_case(&case_config, service, inner_options);
+        absorb(step);
+        return step;
+    };
+
+    auto read_metric = [&](const OptimizationResult& step,
+                           const CaseConfig& case_config,
+                           double* out) {
+        return step.final_simulation.ok &&
+            evaluate_trajectory_metric(step.final_simulation.state_log, case_config, metric, out);
+    };
+
+    // Step 0: feasible orbit warm start (objective ignored).
+    CaseConfig best = *config;
+    OptimizationResult warm = solve(best, target_only_config());
+    if (!warm.found_feasible) {
+        result.error =
+            "epsilon-constraint: no feasible warm start; relax the targets. " + warm.error;
+        result.max_constraint_violation = warm.max_constraint_violation;
+        result.l1_constraint_violation = warm.l1_constraint_violation;
+        result.final_simulation = warm.final_simulation;
+        result.final_metrics = warm.final_metrics;
+        return result;
+    }
+    double best_metric = 0.0;
+    if (!read_metric(warm, best, &best_metric)) {
+        result.error = "epsilon-constraint: could not evaluate objective metric '" + metric + "'";
+        return result;
+    }
+    OptimizationResult best_step = warm;
+    {
+        std::ostringstream msg;
+        msg << "epsilon-constraint: feasible warm start, " << metric << " = " << best_metric;
+        append_limited_message(&result.messages, msg.str());
+    }
+
+    auto config_with_bound = [&](double bound) {
+        OptimizationConfig cfg = target_only_config();
+        OptimizationTargetConfig t;
+        t.metric = metric;
+        t.scope = "terminal";
+        t.phase_index = -1;
+        t.weight = 4.0;
+        t.value = bound;
+        if (minimize) {
+            t.mode = "upper";
+            t.max_value = bound;
+        } else {
+            t.mode = "lower";
+            t.min_value = bound;
+        }
+        cfg.targets.push_back(t);
+        return cfg;
+    };
+
+    // March the bound toward the optimum with a FIXED step, warm-starting each
+    // solve from the latest feasible case. Marching (rather than halving onto the
+    // nearest local frontier) is what lets a solve escape into a much lower-Q
+    // basin -- the large gains come from those jumps, not local polishing. Back
+    // off half a step on an unreachable bound; stop after two consecutive misses.
+    CaseConfig warm_case = best;
+    const double step = std::max(1.0e-12, 0.025 * std::abs(best_metric));
+    const int budget = std::max(20, optimization.continuation.steps);
+    double bound = minimize ? best_metric - step : best_metric + step;
+    int consecutive_misses = 0;
+    for (int i = 0; i < budget; ++i) {
+        if (consecutive_misses >= 2) {
+            break;
+        }
+        if (minimize && bound <= step) {
+            break;
+        }
+        const double solved_bound = bound;
+        CaseConfig trial = warm_case;
+        OptimizationResult step_result = solve(trial, config_with_bound(solved_bound));
+        double achieved = 0.0;
+        std::ostringstream msg;
+        if (step_result.found_feasible && read_metric(step_result, trial, &achieved)) {
+            warm_case = trial;
+            consecutive_misses = 0;
+            if (minimize ? achieved < best_metric : achieved > best_metric) {
+                best = trial;
+                best_metric = achieved;
+                best_step = step_result;
+            }
+            bound = minimize ? achieved - step : achieved + step;
+            msg << "epsilon-constraint: bound " << solved_bound << " -> feasible, "
+                << metric << " = " << achieved;
+        } else {
+            ++consecutive_misses;
+            bound = minimize ? bound + step * 0.5 : bound - step * 0.5;
+            msg << "epsilon-constraint: bound " << solved_bound
+                << " -> infeasible (miss " << consecutive_misses << ")";
+        }
+        append_limited_message(&result.messages, msg.str());
+    }
+
+    *config = best;
+    config->optimization = optimization;
+    result.ok = true;
+    result.found_feasible = true;
+    result.best_score = best_metric;
+    result.max_constraint_violation = best_step.max_constraint_violation;
+    result.l1_constraint_violation = best_step.l1_constraint_violation;
+    result.final_simulation = best_step.final_simulation;
+    result.final_metrics = best_step.final_metrics;
+    add_variable_changes(initial_case, *config, optimization, &result.variable_changes);
+    add_requested_metrics(&result, optimization, *config);
+    {
+        std::ostringstream msg;
+        msg << "epsilon-constraint: best " << metric << " = " << best_metric;
+        append_limited_message(&result.messages, msg.str());
+    }
+    return result;
+}
+
 OptimizationResult optimize_case_with_continuation(
     CaseConfig* config,
     ITrajectoryService& service,
@@ -2990,6 +3177,9 @@ OptimizationResult optimize_case(
         return result;
     }
     if (optimization.continuation.enabled) {
+        if (optimization.continuation.mode == "objective") {
+            return optimize_case_with_epsilon_constraint(config, service, optimization, options);
+        }
         return optimize_case_with_continuation(config, service, optimization, options);
     }
 

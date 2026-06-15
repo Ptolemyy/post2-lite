@@ -50,16 +50,17 @@
     "latitude_deg": 28.60838508605957,
     "longitude_deg": -80.5997543334961
   },
-  "name": "Falcon 9 ascent - minimize max-Q (continuity)",
+  "name": "Falcon 9 ascent - minimize max-Q (epsilon-constraint)",
   "optimization": {
     "constraint_tolerance": -1,
     "continuation": {
-      "direction": "increase",
-      "enabled": false,
-      "multistart_count": 3,
+      "direction": "decrease",
+      "enabled": true,
+      "mode": "objective",
+      "multistart_count": 2,
       "multistart_enabled": false,
-      "steps": 32,
-      "variable_path": "phases[2].duration_s"
+      "steps": 24,
+      "variable_path": ""
     },
     "envelope_search": {
       "enabled": false,
@@ -92,29 +93,9 @@
     "stationarity_tolerance": -1,
     "targets": [
       {
-        "max_value": 260000.0,
-        "metric": "phases[7].terminal_altitude_m",
-        "min_value": 180000,
-        "mode": "range",
-        "phase_index": -1,
-        "scope": "terminal",
-        "value": 200000,
-        "weight": 4
-      },
-      {
-        "max_value": 8050,
-        "metric": "phases[7].terminal_speed_mps",
-        "min_value": 7600,
-        "mode": "range",
-        "phase_index": -1,
-        "scope": "terminal",
-        "value": 7788.5,
-        "weight": 4
-      },
-      {
-        "max_value": 28.8,
+        "max_value": 29.0,
         "metric": "phases[7].inclination_deg",
-        "min_value": 28.3,
+        "min_value": 28.0,
         "mode": "range",
         "phase_index": -1,
         "scope": "terminal",
@@ -122,9 +103,9 @@
         "weight": 1
       },
       {
-        "max_value": 230000,
+        "max_value": 340000,
         "metric": "phases[7].periapsis_altitude_m",
-        "min_value": 180000,
+        "min_value": 160000,
         "mode": "range",
         "phase_index": -1,
         "scope": "terminal",
@@ -132,7 +113,7 @@
         "weight": 2
       },
       {
-        "max_value": 260000.0,
+        "max_value": 520000,
         "metric": "phases[7].apoapsis_altitude_m",
         "min_value": 180000,
         "mode": "range",
@@ -231,7 +212,7 @@
       {
         "enabled": true,
         "max_value": 0.05,
-        "min_value": -0.12,
+        "min_value": -0.5,
         "path": "phases[5].steering_model.elevation.c1"
       },
       {
@@ -295,21 +276,21 @@
         "path": "vehicle.stages[2].dry_mass_kg"
       },
       {
-        "enabled": false,
-        "max_value": 1,
-        "min_value": 0.7,
+        "enabled": true,
+        "max_value": 1.0,
+        "min_value": 0.45,
         "path": "phases[2].throttle_model.c0"
       },
       {
-        "enabled": false,
-        "max_value": 1,
-        "min_value": 0.7,
+        "enabled": true,
+        "max_value": 1.0,
+        "min_value": 0.45,
         "path": "phases[3].throttle_model.c0"
       },
       {
-        "enabled": false,
-        "max_value": 1,
-        "min_value": 0.7,
+        "enabled": true,
+        "max_value": 1.0,
+        "min_value": 0.45,
         "path": "phases[4].throttle_model.c0"
       },
       {

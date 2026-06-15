@@ -25,6 +25,7 @@ add_library(post2_core STATIC
     src/core/simulation_driver.cpp
     src/core/state_log.cpp
     src/core/trajectory_service.cpp
+    src/core/upfg.cpp
     src/environment/atmosphere.cpp
     src/integrators/dopri5.cpp
     src/integrators/ode_integrator.cpp
@@ -116,6 +117,12 @@ if(BUILD_TESTING)
     target_link_libraries(post2_phase_termination_and_events_test PRIVATE post2_core)
     add_test(NAME post2_phase_termination_and_events_test
         COMMAND post2_phase_termination_and_events_test)
+
+    add_executable(post2_upfg_guidance_test
+        tests/upfg_guidance_test.cpp
+    )
+    target_link_libraries(post2_upfg_guidance_test PRIVATE post2_core)
+    add_test(NAME post2_upfg_guidance_test COMMAND post2_upfg_guidance_test)
 
     add_executable(post2_ksp_vehicle_site_import_test
         tests/ksp_vehicle_site_import_test.cpp

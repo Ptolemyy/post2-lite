@@ -514,6 +514,10 @@ int main()
         const int stage_plan_col = find_col(header, "kos_stage_plan_time_s");
         const int stage_pulses_col = find_col(header, "kos_stage_pulse_count");
         const int shutdown_before_stage_col = find_col(header, "kos_shutdown_before_stage");
+        const int yaw_col = find_col(header, "kos_yaw_deg");
+        const int pitch_col = find_col(header, "kos_pitch_deg");
+        const int roll_deg_col = find_col(header, "kos_roll_deg");
+        const int roll_lock_col = find_col(header, "kos_roll_lock");
         if (phase_index_col < 0 ||
             steer_avail_col < 0 ||
             az_c0_col < 0 ||
@@ -525,10 +529,16 @@ int main()
             stage_command_col < 0 ||
             stage_plan_col < 0 ||
             stage_pulses_col < 0 ||
-            shutdown_before_stage_col < 0) {
+            shutdown_before_stage_col < 0 ||
+            yaw_col < 0 ||
+            pitch_col < 0 ||
+            roll_deg_col < 0 ||
+            roll_lock_col < 0) {
             std::cerr << "kOS CSV header is missing guidance/event columns\n";
             return 1;
         }
+
+        bool attitude_in_range = true;
 
         int stage_command_count = 0;
         double stage_plan_time_s = -1.0;
@@ -561,6 +571,23 @@ int main()
                 stage_pulses = value_at(row, stage_pulses_col);
                 shutdown_before_stage = value_at(row, shutdown_before_stage_col);
             }
+
+            // Host-computed navball attitude must stay in range (no NaN escaping
+            // the near-vertical singularity, no out-of-band pitch/heading). The
+            // !(in-range) form also rejects NaN, whose comparisons are all false.
+            const double yaw_deg = value_at(row, yaw_col);
+            const double pitch_deg = value_at(row, pitch_col);
+            const double roll_lock = value_at(row, roll_lock_col);
+            if (!(yaw_deg >= 0.0 && yaw_deg < 360.0) ||
+                !(pitch_deg >= -90.0 && pitch_deg <= 90.0) ||
+                !(roll_lock == 0.0 || roll_lock == 1.0)) {
+                attitude_in_range = false;
+            }
+        }
+
+        if (!attitude_in_range) {
+            std::cerr << "kOS CSV navball attitude out of range (yaw/pitch/roll_lock)\n";
+            return 1;
         }
 
         if (!saw_phase0_poly ||

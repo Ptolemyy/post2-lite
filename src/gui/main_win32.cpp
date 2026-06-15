@@ -3,6 +3,7 @@
 #include "post2/core/io.hpp"
 #include "post2/core/ksp_vehicle_site_import.hpp"
 #include "post2/core/optimization.hpp"
+#include "post2/core/simulation_driver.hpp"
 #include "post2/core/trajectory_service.hpp"
 #include "post2/vehicle/runtime_state.hpp"
 #include "post2/vehicle/vehicle_config_io.hpp"
@@ -34,6 +35,7 @@ using post2::core::CaseConfig;
 using post2::core::OptimizationResult;
 using post2::core::SimulationConfig;
 using post2::core::SimulationResult;
+using post2::core::StateLog;
 
 constexpr int kMenuRefresh = 1001;
 constexpr int kMenuExportCsv = 1002;
@@ -210,6 +212,9 @@ CoreMode g_mode = CoreMode::Local;
 SimulationConfig g_config;
 CaseConfig g_case;
 SimulationResult g_result;
+// Integrated predicted orbit from the final state, recomputed whenever g_result
+// changes; drawn (teal, with A/P markers) in the 3D scene and SVG export.
+StateLog g_predicted_orbit;
 std::string g_status;
 std::string g_remote_host = "127.0.0.1";
 int g_remote_port = 5050;
@@ -730,6 +735,9 @@ void run_simulation(HWND hwnd)
     ensure_case_initialized();
     const auto service = post2::core::make_trajectory_service(g_mode, g_remote_host, g_remote_port);
     g_result = service->simulate(g_case);
+    g_predicted_orbit = (g_result.ok && !g_result.state_log.empty())
+        ? post2::core::predict_orbit_path(g_case, g_result.state_log)
+        : StateLog{};
     if (g_result.ok && !g_result.state_log.empty()) {
         const double scene_radius_m = post2::gui::compute_scene_radius_m(g_result.state_log);
         if (!g_camera_initialized) {
@@ -833,6 +841,9 @@ void finish_optimization(HWND hwnd)
     sync_legacy_from_case();
     refresh_phase_list();
     load_selected_phase_controls();
+    g_predicted_orbit = (g_result.ok && !g_result.state_log.empty())
+        ? post2::core::predict_orbit_path(g_case, g_result.state_log)
+        : StateLog{};
     if (g_result.ok && !g_result.state_log.empty()) {
         const double scene_radius_m = post2::gui::compute_scene_radius_m(g_result.state_log);
         if (!g_camera_initialized) {
@@ -1626,7 +1637,13 @@ bool apply_numeric_variable_controls(
             SetFocus(row.min_edit);
             return false;
         }
-        if (opt_enabled && (value < min_value || value > max_value)) {
+        // Accept values sitting on a bound to within floating-point rounding.
+        // Optimized results routinely land exactly on a Min/Max and pick up a
+        // few ULPs of error when written to / read back from the case JSON, so a
+        // strict compare would spuriously reject an otherwise valid case; only
+        // flag genuine violations.
+        const double bound_tol = 1.0e-9 * (1.0 + std::abs(min_value) + std::abs(max_value));
+        if (opt_enabled && (value < min_value - bound_tol || value > max_value + bound_tol)) {
             MessageBoxW(dialog, widen(row.label + " value must be inside Min/Max.").c_str(), title, MB_ICONWARNING);
             SetFocus(row.value_edit);
             return false;
@@ -2813,13 +2830,15 @@ void sync_optimization_continuation_controls(OptimizationSettingsDialogState* st
         return;
     }
     const std::string strategy = get_combo_text(state->continuation_strategy_combo);
-    const bool enabled = strategy == "continuation" || strategy == "continuation+multistart";
+    const bool variable_continuation =
+        strategy == "continuation" || strategy == "continuation+multistart";
+    const bool epsilon = strategy == "epsilon-constraint";
     const bool multistart = strategy == "continuation+multistart";
     const bool envelope = strategy == "envelope";
-    EnableWindow(state->continuation_variable_combo, enabled);
-    EnableWindow(state->continuation_direction_combo, enabled);
-    EnableWindow(state->continuation_steps_edit, enabled);
-    EnableWindow(state->continuation_starts_edit, enabled && multistart);
+    EnableWindow(state->continuation_variable_combo, variable_continuation);
+    EnableWindow(state->continuation_direction_combo, variable_continuation);
+    EnableWindow(state->continuation_steps_edit, variable_continuation || epsilon);
+    EnableWindow(state->continuation_starts_edit, variable_continuation && multistart);
     EnableWindow(state->envelope_samples_edit, envelope);
 }
 
@@ -4263,15 +4282,18 @@ void create_optimization_settings_controls(OptimizationSettingsDialogState* stat
     add_combo_item(state->continuation_strategy_combo, L"single");
     add_combo_item(state->continuation_strategy_combo, L"continuation");
     add_combo_item(state->continuation_strategy_combo, L"continuation+multistart");
+    add_combo_item(state->continuation_strategy_combo, L"epsilon-constraint");
     add_combo_item(state->continuation_strategy_combo, L"envelope");
     select_combo_text(
         state->continuation_strategy_combo,
         state->config.envelope_search.enabled
             ? "envelope"
             : (state->config.continuation.enabled
-            ? (state->config.continuation.multistart_enabled
-                ? "continuation+multistart"
-                : "continuation")
+            ? (state->config.continuation.mode == "objective"
+                ? "epsilon-constraint"
+                : (state->config.continuation.multistart_enabled
+                    ? "continuation+multistart"
+                    : "continuation"))
             : "single"));
 
     create_label(state->hwnd, 270, 482, 58, L"Cont var", font);
@@ -4367,7 +4389,10 @@ bool accept_optimization_settings_dialog(OptimizationSettingsDialogState* state)
         : state->config.objectives.front();
     state->config.continuation.enabled =
         continuation_strategy == "continuation" ||
-        continuation_strategy == "continuation+multistart";
+        continuation_strategy == "continuation+multistart" ||
+        continuation_strategy == "epsilon-constraint";
+    state->config.continuation.mode =
+        continuation_strategy == "epsilon-constraint" ? "objective" : "variable";
     state->config.continuation.multistart_enabled =
         continuation_strategy == "continuation+multistart";
     state->config.envelope_search.enabled = continuation_strategy == "envelope";
@@ -4393,6 +4418,7 @@ bool accept_optimization_settings_dialog(OptimizationSettingsDialogState* state)
         return false;
     }
     if (state->config.continuation.enabled &&
+        state->config.continuation.mode != "objective" &&
         !optimization_has_enabled_variable(
             state->config,
             state->config.continuation.variable_path)) {
@@ -5941,6 +5967,20 @@ std::vector<std::string> format_final_lines()
     lines.push_back("Propellant: " + format_double_short(tail.propellant_mass_kg, 1) + " kg");
     lines.push_back("Engine thrust: " + format_double_short(tail.engine_thrust_n / 1000.0, 1) + " kN");
     lines.push_back(std::string("Hold-down: ") + (tail.hold_down_clamp_active ? "yes" : "no"));
+    // Predicted orbit apoapsis (A) / periapsis (P): the max / min geodetic
+    // altitude of the integrated orbit drawn in the 3D scene.
+    if (!g_predicted_orbit.empty()) {
+        double apoapsis_m = g_predicted_orbit.front().altitude_m;
+        double periapsis_m = apoapsis_m;
+        for (const auto& entry : g_predicted_orbit.entries()) {
+            apoapsis_m = std::max(apoapsis_m, entry.altitude_m);
+            periapsis_m = std::min(periapsis_m, entry.altitude_m);
+        }
+        lines.push_back("Apoapsis (A): " + format_double_short(apoapsis_m / 1000.0, 1) + " km");
+        lines.push_back("Periapsis (P): " + format_double_short(periapsis_m / 1000.0, 1) + " km");
+    } else {
+        lines.push_back("Predicted orbit: sub-orbital");
+    }
     return lines;
 }
 
@@ -6090,7 +6130,7 @@ void export_current(HWND hwnd, bool svg)
     std::string error;
     const std::string path = svg ? "gui_trajectory.svg" : "gui_trajectory.csv";
     const bool ok = svg
-        ? post2::core::write_svg_file(path, g_result.state_log, &error)
+        ? post2::core::write_svg_file(path, g_result.state_log, &g_predicted_orbit, &error)
         : post2::core::write_csv_file(path, g_result.state_log, &error);
 
     if (!ok) {
@@ -6296,6 +6336,7 @@ LRESULT CALLBACK scene_window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARA
         g_scene_renderer.render(
             g_camera,
             g_result.state_log,
+            g_predicted_orbit,
             g_case.earth_rotation_at_epoch_rad,
             g_case.earth_rotation_rad_per_s,
             false);

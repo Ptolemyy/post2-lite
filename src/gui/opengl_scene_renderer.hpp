@@ -74,6 +74,7 @@ public:
     void render(
         const Camera3D& camera,
         const post2::core::StateLog& state_log,
+        const post2::core::StateLog& predicted_orbit,
         double earth_rotation_at_epoch_rad,
         double earth_rotation_rad_per_s,
         bool earth_fixed_view);
@@ -85,6 +86,7 @@ private:
     void draw_scene(
         const Camera3D& camera,
         const post2::core::StateLog& state_log,
+        const post2::core::StateLog& predicted_orbit,
         double earth_rotation_at_epoch_rad,
         double earth_rotation_rad_per_s,
         bool earth_fixed_view);
@@ -92,6 +94,11 @@ private:
     void draw_axis() const;
     void draw_trajectory(
         const post2::core::StateLog& state_log,
+        double earth_rotation_at_epoch_rad,
+        double earth_rotation_rad_per_s,
+        bool earth_fixed_view) const;
+    void draw_predicted_orbit(
+        const post2::core::StateLog& predicted_orbit,
         double earth_rotation_at_epoch_rad,
         double earth_rotation_rad_per_s,
         bool earth_fixed_view) const;

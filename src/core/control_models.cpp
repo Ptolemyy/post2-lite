@@ -1,6 +1,7 @@
 #include "post2/core/control_models.hpp"
 
 #include "post2/core/coordinates.hpp"
+#include "post2/core/upfg.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -350,6 +351,129 @@ private:
     bool bilinear_ = false;
 };
 
+// Build the UPFG remaining-stage stack from the live vehicle, in burn order
+// (active stage first, then subsequent attached propulsive stages). Each stage's
+// mass_total is the vehicle mass at the moment it ignites: the current total
+// mass minus the dry + propellant mass of every lower stage burned and
+// jettisoned before it. Non-propulsive attached mass (payload, spent attached
+// stages) is carried, not burned. UPFG assumes full vacuum thrust per stage.
+std::vector<post2::core::UpfgStage> build_upfg_stages(
+    const CaseConfig& case_config,
+    const post2::vehicle::VehicleRuntimeState& runtime)
+{
+    std::vector<post2::core::UpfgStage> stages;
+    const auto& cfg_stages = case_config.vehicle.stages;
+    const auto& rt_stages = runtime.stages;
+    const std::size_t count = std::min(cfg_stages.size(), rt_stages.size());
+    const double total_mass = runtime.vehicle.total_mass_kg;
+
+    double lower_mass = 0.0;  // mass jettisoned before the next stage ignites
+    bool active_seen = false;
+    for (std::size_t i = 0; i < count; ++i) {
+        const auto& sc = cfg_stages[i];
+        const auto& rs = rt_stages[i];
+        if (!rs.attached) {
+            continue;  // already separated -- not part of the vehicle mass
+        }
+        const double thrust = static_cast<double>(sc.engine.engine_count) * sc.engine.thrust_vac_n;
+        const double isp = sc.engine.isp_vac_s;
+        const bool propulsive = thrust > 0.0 && isp > 0.0;
+        const double propellant = post2::vehicle::stage_propellant_kg(rs);
+
+        if (!active_seen) {
+            if (rs.active && propulsive) {
+                active_seen = true;  // fall through and add this stage
+            } else {
+                continue;  // pre-active or non-propulsive: carried, skip
+            }
+        }
+        if (!propulsive) {
+            continue;  // payload / inert attached stage: carried mass
+        }
+        if (propellant <= 1.0e-6 && !rs.active) {
+            continue;  // spent attached stage: carried dead mass
+        }
+
+        const double ve = isp * kStandardGravityMps2;
+        const double mdot = ve > 0.0 ? thrust / ve : 0.0;
+        if (!(mdot > 0.0)) {
+            continue;
+        }
+
+        post2::core::UpfgStage stage;
+        stage.mode = 1;  // constant thrust
+        stage.thrust_n = thrust;
+        stage.mdot_kgps = mdot;
+        stage.exhaust_velocity_mps = ve;
+        stage.mass_total_kg = std::max(0.0, total_mass - lower_mass);
+        stage.max_burn_time_s = propellant / mdot;
+        stages.push_back(stage);
+
+        lower_mass += rs.dry_mass_kg + propellant;
+    }
+    return stages;
+}
+
+// Closed-loop NASA UPFG steering. Unlike the open-loop poly models this reads
+// the live state and stage stack and computes the thrust direction that flies to
+// the configured target orbit. It solves UPFG to convergence at the current
+// state on every call (upfg_converge is a deterministic, reentrant function of
+// state, made contractive by the steering-turn clamp), so the integrator's dense
+// per-RK-stage sampling stays consistent. See post2/core/upfg.hpp.
+class UpfgSteeringModel final : public ISteeringModel {
+public:
+    explicit UpfgSteeringModel(SteeringModelConfig config)
+        : config_(std::move(config))
+    {
+    }
+
+    Vec3 thrust_direction_eci(
+        double,
+        const State& state,
+        const post2::vehicle::VehicleRuntimeState& runtime,
+        const PhaseContext& context) const override
+    {
+        const Vec3 fallback =
+            normalized_or(state.velocity_mps, normalized_or(state.position_m, {1.0, 0.0, 0.0}));
+        const CaseConfig* case_config = context.case_config;
+        if (!case_config) {
+            return fallback;
+        }
+        const double mu = case_config->earth_mu_m3s2;
+        const double body_radius_m = case_config->earth_radius_m;
+
+        const std::vector<post2::core::UpfgStage> stages = build_upfg_stages(*case_config, runtime);
+        if (stages.empty()) {
+            return fallback;
+        }
+
+        const post2::core::UpfgTarget target = post2::core::make_upfg_orbit_target(
+            config_.upfg.periapsis_km * 1000.0,
+            config_.upfg.apoapsis_km * 1000.0,
+            config_.upfg.inclination_deg,
+            state.position_m,
+            state.velocity_mps,
+            mu,
+            body_radius_m);
+
+        post2::core::UpfgVehicleState upfg_state;
+        upfg_state.time_s = runtime.time_s;
+        upfg_state.mass_kg = runtime.vehicle.total_mass_kg;
+        upfg_state.position_m = state.position_m;
+        upfg_state.velocity_mps = state.velocity_mps;
+
+        const post2::core::UpfgResult result =
+            post2::core::upfg_converge(stages, target, upfg_state, mu);
+        if (!result.ok) {
+            return fallback;
+        }
+        return normalized_or(result.thrust_unit_eci, fallback);
+    }
+
+private:
+    SteeringModelConfig config_;
+};
+
 class QuatInterpSteeringModel final : public ISteeringModel {
 public:
     explicit QuatInterpSteeringModel(SteeringModelConfig config)
@@ -461,6 +585,11 @@ void apply_steering_continuity(SteeringModelConfig* steering, const AzimuthEleva
         }
         return;
     }
+    if (type == "upfg") {
+        // Closed-loop guidance: nothing to re-anchor, the command is recomputed
+        // from the live state every call.
+        return;
+    }
     // generic_poly (default) and any poly-style fallback.
     if (steering->azimuth_deg.continuity) {
         steering->azimuth_deg.c0 = angles.azimuth_deg;
@@ -524,6 +653,9 @@ std::unique_ptr<ISteeringModel> make_steering_model(const SteeringModelConfig& c
     }
     if (type == "bilinear_tangent") {
         return std::make_unique<LinearTangentSteeringModel>(config, /*bilinear=*/true);
+    }
+    if (type == "upfg") {
+        return std::make_unique<UpfgSteeringModel>(config);
     }
     return std::make_unique<GenericPolySteeringModel>(config);
 }

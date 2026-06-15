@@ -592,6 +592,7 @@ void OpenGLSceneRenderer::resize(int width, int height)
 void OpenGLSceneRenderer::render(
     const Camera3D& camera,
     const post2::core::StateLog& state_log,
+    const post2::core::StateLog& predicted_orbit,
     double earth_rotation_at_epoch_rad,
     double earth_rotation_rad_per_s,
     bool earth_fixed_view)
@@ -606,7 +607,7 @@ void OpenGLSceneRenderer::render(
         resize(rect_width(client), rect_height(client));
     }
 
-    draw_scene(camera, state_log, earth_rotation_at_epoch_rad, earth_rotation_rad_per_s, earth_fixed_view);
+    draw_scene(camera, state_log, predicted_orbit, earth_rotation_at_epoch_rad, earth_rotation_rad_per_s, earth_fixed_view);
     SwapBuffers(hdc_);
 }
 
@@ -661,6 +662,7 @@ void OpenGLSceneRenderer::build_earth_mesh()
 void OpenGLSceneRenderer::draw_scene(
     const Camera3D& camera,
     const post2::core::StateLog& state_log,
+    const post2::core::StateLog& predicted_orbit,
     double earth_rotation_at_epoch_rad,
     double earth_rotation_rad_per_s,
     bool earth_fixed_view)
@@ -687,6 +689,7 @@ void OpenGLSceneRenderer::draw_scene(
                 takeoff_time_s_for_display(state_log));
         draw_earth(earth_rotation_for_display_rad);
         draw_axis();
+        draw_predicted_orbit(predicted_orbit, earth_rotation_at_epoch_rad, earth_rotation_rad_per_s, earth_fixed_view);
         draw_trajectory(state_log, earth_rotation_at_epoch_rad, earth_rotation_rad_per_s, earth_fixed_view);
         draw_markers(state_log, earth_rotation_at_epoch_rad, earth_rotation_rad_per_s, earth_fixed_view);
     }
@@ -796,6 +799,63 @@ void OpenGLSceneRenderer::draw_markers(
     glVertex3d(position.x, position.y, position.z);
     glEnd();
     glPointSize(1.0f);
+    glDepthMask(GL_TRUE);
+}
+
+void OpenGLSceneRenderer::draw_predicted_orbit(
+    const post2::core::StateLog& predicted_orbit,
+    double earth_rotation_at_epoch_rad,
+    double earth_rotation_rad_per_s,
+    bool earth_fixed_view) const
+{
+    const auto& entries = predicted_orbit.entries();
+    if (entries.size() < 2) {
+        return;
+    }
+
+    glDisable(GL_TEXTURE_2D);
+    glDepthMask(GL_FALSE);
+
+    // Dashed teal loop for the integrated predicted orbit (distinct from the
+    // solid red powered ascent).
+    glEnable(GL_LINE_STIPPLE);
+    glLineStipple(2, 0x00FF);
+    glLineWidth(2.0f);
+    glColor3ub(13, 148, 136);
+    glBegin(GL_LINE_STRIP);
+    for (const auto& entry : entries) {
+        const Vec3 position = lifted_for_display(position_for_display(
+            entry, earth_rotation_at_epoch_rad, earth_rotation_rad_per_s, earth_fixed_view));
+        glVertex3d(position.x, position.y, position.z);
+    }
+    glEnd();
+    glDisable(GL_LINE_STIPPLE);
+
+    // Apoapsis (max altitude) and periapsis (min altitude) markers.
+    const post2::core::LaunchVehicleStateLogEntry* apo = &entries.front();
+    const post2::core::LaunchVehicleStateLogEntry* peri = &entries.front();
+    for (const auto& entry : entries) {
+        if (entry.altitude_m > apo->altitude_m) {
+            apo = &entry;
+        }
+        if (entry.altitude_m < peri->altitude_m) {
+            peri = &entry;
+        }
+    }
+    glPointSize(9.0f);
+    glBegin(GL_POINTS);
+    const Vec3 apo_pos = lifted_for_display(position_for_display(
+        *apo, earth_rotation_at_epoch_rad, earth_rotation_rad_per_s, earth_fixed_view));
+    glColor3ub(37, 99, 235);   // blue = apoapsis (A)
+    glVertex3d(apo_pos.x, apo_pos.y, apo_pos.z);
+    const Vec3 peri_pos = lifted_for_display(position_for_display(
+        *peri, earth_rotation_at_epoch_rad, earth_rotation_rad_per_s, earth_fixed_view));
+    glColor3ub(219, 39, 119);  // magenta = periapsis (P)
+    glVertex3d(peri_pos.x, peri_pos.y, peri_pos.z);
+    glEnd();
+    glPointSize(1.0f);
+
+    glLineWidth(1.0f);
     glDepthMask(GL_TRUE);
 }
 

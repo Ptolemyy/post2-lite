@@ -51,6 +51,7 @@ struct Options {
     std::vector<PhaseOverride> phase_overrides;
     std::string csv_path = "trajectory.csv";
     std::string svg_path = "trajectory.svg";
+    std::string kos_csv_path;
     std::string save_vehicle_config_path;
     std::string save_case_config_path;
     bool write_csv = true;
@@ -106,6 +107,7 @@ void print_help()
         << "  --tank-initial KG         Override first tank initial mass\n"
         << "  --csv PATH                Export CSV path (default: trajectory.csv)\n"
         << "  --svg PATH                Export SVG chart path (default: trajectory.svg)\n"
+        << "  --kos-csv PATH            Export kOS player CSV (host-computed yaw/pitch/roll)\n"
         << "  --no-csv                  Do not write CSV\n"
         << "  --no-svg                  Do not write SVG\n\n"
         << "Optimize options:\n"
@@ -620,6 +622,8 @@ bool parse_options(int argc, char** argv, Options* options)
         } else if (arg == "--svg") {
             options->svg_path = value;
             options->write_svg = true;
+        } else if (arg == "--kos-csv") {
+            options->kos_csv_path = value;
         } else {
             std::cerr << "Unknown argument: " << arg << '\n';
             return false;
@@ -796,8 +800,24 @@ bool write_exports(
         std::cout << "wrote_csv: " << options.csv_path << '\n';
     }
 
+    if (!options.kos_csv_path.empty()) {
+        const post2::core::CaseConfig kos_case = options.has_case_config
+            ? options.case_config
+            : post2::core::case_from_simulation_config(options.config);
+        if (!post2::core::write_kos_csv_file(options.kos_csv_path, result.state_log, kos_case, &error)) {
+            std::cerr << "kOS CSV export failed: " << error << '\n';
+            return false;
+        }
+        std::cout << "wrote_kos_csv: " << options.kos_csv_path << '\n';
+    }
+
     if (options.write_svg) {
-        if (!post2::core::write_svg_file(options.svg_path, result.state_log, &error)) {
+        const post2::core::CaseConfig orbit_case = options.has_case_config
+            ? options.case_config
+            : post2::core::case_from_simulation_config(options.config);
+        const post2::core::StateLog predicted =
+            post2::core::predict_orbit_path(orbit_case, result.state_log);
+        if (!post2::core::write_svg_file(options.svg_path, result.state_log, &predicted, &error)) {
             std::cerr << "SVG export failed: " << error << '\n';
             return false;
         }

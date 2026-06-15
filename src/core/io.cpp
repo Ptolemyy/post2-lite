@@ -182,6 +182,143 @@ bool activated_stage_since(
     return false;
 }
 
+struct KosNavballAttitude {
+    double yaw_deg = 90.0;    // navball heading: 0 = north, 90 = east
+    double pitch_deg = 90.0;  // elevation above the local horizon: 90 = straight up
+};
+
+// Navball yaw/pitch the kOS player steers to. PITCH is reconstructed from
+// engine_direction_eci (the actual flown attitude, robust to phase-boundary
+// continuity which rewrites the stored elevation poly at runtime). AZIMUTH, for
+// poly steering, is taken DIRECTLY from the commanded azimuth polynomial, NOT
+// reconstructed: reconstructing azimuth from the thrust vector flips ~180 deg
+// whenever the commanded elevation tips past vertical (a pure artifact of
+// forcing pitch into [-90,90]) -- e.g. min-Q lofting produced yaw ~242 deg and
+// flew the vehicle west. The commanded azimuth (constant 90 = due east here) has
+// no such ambiguity. Non-poly phases fall back to reconstruction. Unsteered rows
+// (pre-launch / hold-down / coast) are skipped so their default body axis cannot
+// pollute the carry-forward that fills any remaining gaps.
+std::vector<KosNavballAttitude> compute_kos_navball_attitude(
+    const StateLog& state_log,
+    const CaseConfig& case_config)
+{
+    const auto& entries = state_log.entries();
+    const std::size_t n = entries.size();
+    std::vector<KosNavballAttitude> out(n);
+    std::vector<char> yaw_valid(n, 0);
+    std::vector<char> pitch_valid(n, 0);
+    const std::vector<double> phase_starts = configured_phase_start_times(case_config);
+
+    constexpr double kRadToDeg = 57.295779513082320876798154814105;
+    // |horizontal| below this => a reconstructed azimuth is numeric noise; carry
+    // the last good one (only used for the non-poly azimuth fallback).
+    constexpr double kHorizEps = 0.087;
+    constexpr double kMinThrottle = 1.0e-3;
+
+    for (std::size_t i = 0; i < n; ++i) {
+        const auto& point = entries[i];
+
+        // Commanded azimuth from the steering program (poly steering): explicit,
+        // unambiguous, and never flips past vertical.
+        const PhaseConfig* phase = phase_for_point(point, case_config);
+        const bool poly_azimuth = phase && is_generic_poly_steering(*phase);
+        if (poly_azimuth) {
+            const double phase_t = point.time_s - phase_start_time_s(point, phase_starts);
+            const Poly2Config& az = phase->steering_model.azimuth_deg;
+            double yaw = az.c0 + az.c1 * phase_t + az.c2 * phase_t * phase_t;
+            while (yaw < 0.0) { yaw += 360.0; }
+            while (yaw >= 360.0) { yaw -= 360.0; }
+            out[i].yaw_deg = yaw;
+            yaw_valid[i] = 1;
+        }
+
+        // Pitch (and, for non-poly phases, azimuth) come from the flown thrust
+        // direction. Skip unsteered rows: pre-launch, hold-down and shutdown/coast
+        // carry a default body axis, not a real command.
+        if (point.throttle <= kMinThrottle || point.hold_down_clamp_active) {
+            continue;
+        }
+
+        // UP = normalized position (fallback +X).
+        double ux = point.state.position_m.x;
+        double uy = point.state.position_m.y;
+        double uz = point.state.position_m.z;
+        double un = std::sqrt(ux * ux + uy * uy + uz * uz);
+        if (un < 1.0e-9) { ux = 1.0; uy = 0.0; uz = 0.0; un = 1.0; }
+        ux /= un; uy /= un; uz /= un;
+
+        // EAST = normalize(Z x UP), Z = (0,0,1)  ->  (-uy, ux, 0) (fallback +Y).
+        double ex = -uy, ey = ux, ez = 0.0;
+        double en = std::sqrt(ex * ex + ey * ey + ez * ez);
+        if (en < 1.0e-9) { ex = 0.0; ey = 1.0; ez = 0.0; en = 1.0; }
+        ex /= en; ey /= en; ez /= en;
+
+        // NORTH = UP x EAST (fallback +Z).
+        double nx = uy * ez - uz * ey;
+        double ny = uz * ex - ux * ez;
+        double nz = ux * ey - uy * ex;
+        double nn = std::sqrt(nx * nx + ny * ny + nz * nz);
+        if (nn < 1.0e-9) { nx = 0.0; ny = 0.0; nz = 1.0; nn = 1.0; }
+        nx /= nn; ny /= nn; nz /= nn;
+
+        // Commanded thrust direction (fallback to UP so pitch reads vertical).
+        double dx = point.engine_direction_eci.x;
+        double dy = point.engine_direction_eci.y;
+        double dz = point.engine_direction_eci.z;
+        double dn = std::sqrt(dx * dx + dy * dy + dz * dz);
+        if (dn < 1.0e-9) { dx = ux; dy = uy; dz = uz; dn = 1.0; }
+        dx /= dn; dy /= dn; dz /= dn;
+
+        const double east_c = dx * ex + dy * ey + dz * ez;
+        const double north_c = dx * nx + dy * ny + dz * nz;
+        const double up_c = dx * ux + dy * uy + dz * uz;
+        const double horizontal = std::sqrt(east_c * east_c + north_c * north_c);
+
+        out[i].pitch_deg = std::atan2(up_c, horizontal) * kRadToDeg;
+        pitch_valid[i] = 1;
+        if (!poly_azimuth && horizontal > kHorizEps) {
+            double yaw = std::atan2(east_c, north_c) * kRadToDeg;
+            if (yaw < 0.0) {
+                yaw += 360.0;
+            }
+            out[i].yaw_deg = yaw;
+            yaw_valid[i] = 1;
+        }
+    }
+
+    // Fill invalid samples (hold-down or near-vertical) from the nearest valid
+    // one: leading invalids inherit the first good value; later invalids hold the
+    // previous good value. With no valid sample at all, fall back to the defaults
+    // (vertical, due east).
+    auto carry_forward = [&](const std::vector<char>& valid, double KosNavballAttitude::* field, double fallback) {
+        std::size_t first = n;
+        for (std::size_t i = 0; i < n; ++i) {
+            if (valid[i]) { first = i; break; }
+        }
+        if (first == n) {
+            for (std::size_t i = 0; i < n; ++i) {
+                out[i].*field = fallback;
+            }
+            return;
+        }
+        const double lead = out[first].*field;
+        for (std::size_t i = 0; i < first; ++i) {
+            out[i].*field = lead;
+        }
+        double last = lead;
+        for (std::size_t i = first; i < n; ++i) {
+            if (valid[i]) {
+                last = out[i].*field;
+            } else {
+                out[i].*field = last;
+            }
+        }
+    };
+    carry_forward(pitch_valid, &KosNavballAttitude::pitch_deg, 90.0);
+    carry_forward(yaw_valid, &KosNavballAttitude::yaw_deg, 90.0);
+    return out;
+}
+
 double sx(double x_m, double scale, double center_x)
 {
     return center_x + x_m * scale;
@@ -219,11 +356,15 @@ std::string kos_trajectory_to_csv(const StateLog& state_log, const CaseConfig& c
               "kos_throttle_poly_available,"
               "kos_throttle_c0,kos_throttle_c1,kos_throttle_c2,"
               "kos_stage_command,kos_stage_plan_time_s,"
-              "kos_stage_pulse_count,kos_shutdown_before_stage\n";
+              "kos_stage_pulse_count,kos_shutdown_before_stage,"
+              "kos_yaw_deg,kos_pitch_deg,kos_roll_deg,kos_roll_lock\n";
 
     const std::vector<double> phase_starts = configured_phase_start_times(case_config);
-    const LaunchVehicleStateLogEntry* previous = nullptr;
-    for (const auto& point : state_log.entries()) {
+    const std::vector<KosNavballAttitude> navball = compute_kos_navball_attitude(state_log, case_config);
+    const auto& entries = state_log.entries();
+    for (std::size_t i = 0; i < entries.size(); ++i) {
+        const LaunchVehicleStateLogEntry& point = entries[i];
+        const LaunchVehicleStateLogEntry* previous = (i > 0) ? &entries[i - 1] : nullptr;
         const double phase_start_s = phase_start_time_s(point, phase_starts);
         const double phase_time_s = point.time_s - phase_start_s;
         const PhaseConfig* phase = phase_for_point(point, case_config);
@@ -233,6 +374,9 @@ std::string kos_trajectory_to_csv(const StateLog& state_log, const CaseConfig& c
         const Poly2Config elevation = steering_poly_available ? phase->steering_model.elevation_deg : Poly2Config{};
         const Poly2Config roll = steering_poly_available ? phase->steering_model.roll_deg : Poly2Config{};
         const bool roll_poly_available = steering_poly_available && is_nonzero_poly(roll);
+        const double roll_deg = roll_poly_available
+            ? roll.c0 + roll.c1 * phase_time_s + roll.c2 * phase_time_s * phase_time_s
+            : 0.0;
 
         const bool throttle_poly_available = phase && is_poly_throttle(*phase);
         double throttle_c0 = 0.0;
@@ -278,9 +422,11 @@ std::string kos_trajectory_to_csv(const StateLog& state_log, const CaseConfig& c
             << ',' << stage_plan_time_s
             << ',' << stage_pulse_count
             << ',' << (shutdown_before_stage ? 1 : 0)
+            << ',' << navball[i].yaw_deg
+            << ',' << navball[i].pitch_deg
+            << ',' << roll_deg
+            << ',' << (roll_poly_available ? 1 : 0)
             << '\n';
-
-        previous = &point;
     }
     return output.str();
 }

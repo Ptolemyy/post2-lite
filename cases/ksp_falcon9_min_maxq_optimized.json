@@ -46,20 +46,21 @@
     }
   ],
   "launch_site": {
-    "altitude_m": 144.8957865452394,
+    "altitude_m": 144.89578654523939,
     "latitude_deg": 28.60838508605957,
-    "longitude_deg": -80.5997543334961
+    "longitude_deg": -80.599754333496094
   },
-  "name": "Falcon 9 ascent - minimize max-Q (continuity)",
+  "name": "Falcon 9 ascent - minimize max-Q (epsilon-constraint)",
   "optimization": {
     "constraint_tolerance": -1,
     "continuation": {
-      "direction": "increase",
-      "enabled": false,
-      "multistart_count": 3,
+      "direction": "decrease",
+      "enabled": true,
+      "mode": "objective",
+      "multistart_count": 2,
       "multistart_enabled": false,
-      "steps": 32,
-      "variable_path": "phases[2].duration_s"
+      "steps": 24,
+      "variable_path": ""
     },
     "envelope_search": {
       "enabled": false,
@@ -68,8 +69,8 @@
     },
     "fd_mode": "auto",
     "feasibility_tolerance": 0.01,
-    "initial_step_fraction": 0.05,
-    "max_iterations": 100,
+    "initial_step_fraction": 0.050000000000000003,
+    "max_iterations": 200,
     "max_restoration_iterations": 8,
     "mode": "optimize",
     "objective": {
@@ -92,39 +93,19 @@
     "stationarity_tolerance": -1,
     "targets": [
       {
-        "max_value": 260000.0,
-        "metric": "phases[7].terminal_altitude_m",
-        "min_value": 180000,
-        "mode": "range",
-        "phase_index": -1,
-        "scope": "terminal",
-        "value": 200000,
-        "weight": 4
-      },
-      {
-        "max_value": 8050,
-        "metric": "phases[7].terminal_speed_mps",
-        "min_value": 7600,
-        "mode": "range",
-        "phase_index": -1,
-        "scope": "terminal",
-        "value": 7788.5,
-        "weight": 4
-      },
-      {
-        "max_value": 28.8,
+        "max_value": 29,
         "metric": "phases[7].inclination_deg",
-        "min_value": 28.3,
+        "min_value": 28,
         "mode": "range",
         "phase_index": -1,
         "scope": "terminal",
-        "value": 28.562,
+        "value": 28.562000000000001,
         "weight": 1
       },
       {
-        "max_value": 230000,
+        "max_value": 340000,
         "metric": "phases[7].periapsis_altitude_m",
-        "min_value": 180000,
+        "min_value": 160000,
         "mode": "range",
         "phase_index": -1,
         "scope": "terminal",
@@ -132,7 +113,7 @@
         "weight": 2
       },
       {
-        "max_value": 260000.0,
+        "max_value": 520000,
         "metric": "phases[7].apoapsis_altitude_m",
         "min_value": 180000,
         "mode": "range",
@@ -158,8 +139,8 @@
       },
       {
         "enabled": true,
-        "max_value": -0.05,
-        "min_value": -0.8,
+        "max_value": -0.050000000000000003,
+        "min_value": -0.80000000000000004,
         "path": "phases[2].steering_model.elevation.c1"
       },
       {
@@ -182,8 +163,8 @@
       },
       {
         "enabled": true,
-        "max_value": 0.05,
-        "min_value": -0.8,
+        "max_value": 0.050000000000000003,
+        "min_value": -0.80000000000000004,
         "path": "phases[3].steering_model.elevation.c1"
       },
       {
@@ -206,8 +187,8 @@
       },
       {
         "enabled": true,
-        "max_value": 0.2,
-        "min_value": -0.6,
+        "max_value": 0.20000000000000001,
+        "min_value": -0.59999999999999998,
         "path": "phases[4].steering_model.elevation.c1"
       },
       {
@@ -230,14 +211,14 @@
       },
       {
         "enabled": true,
-        "max_value": 0.05,
-        "min_value": -0.12,
+        "max_value": 0.050000000000000003,
+        "min_value": -0.5,
         "path": "phases[5].steering_model.elevation.c1"
       },
       {
         "enabled": true,
-        "max_value": 0.0005,
-        "min_value": -0.0005,
+        "max_value": 0.00050000000000000001,
+        "min_value": -0.00050000000000000001,
         "path": "phases[5].steering_model.elevation.c2"
       },
       {
@@ -254,14 +235,14 @@
       },
       {
         "enabled": true,
-        "max_value": 0.05,
+        "max_value": 0.050000000000000003,
         "min_value": -0.12,
         "path": "phases[6].steering_model.elevation.c1"
       },
       {
         "enabled": true,
-        "max_value": 0.0005,
-        "min_value": -0.0005,
+        "max_value": 0.00050000000000000001,
+        "min_value": -0.00050000000000000001,
         "path": "phases[6].steering_model.elevation.c2"
       },
       {
@@ -278,14 +259,14 @@
       },
       {
         "enabled": true,
-        "max_value": 0.05,
-        "min_value": -0.1,
+        "max_value": 0.050000000000000003,
+        "min_value": -0.10000000000000001,
         "path": "phases[7].steering_model.elevation.c1"
       },
       {
         "enabled": true,
-        "max_value": 0.0005,
-        "min_value": -0.0005,
+        "max_value": 0.00050000000000000001,
+        "min_value": -0.00050000000000000001,
         "path": "phases[7].steering_model.elevation.c2"
       },
       {
@@ -295,39 +276,39 @@
         "path": "vehicle.stages[2].dry_mass_kg"
       },
       {
-        "enabled": false,
+        "enabled": true,
         "max_value": 1,
-        "min_value": 0.7,
+        "min_value": 0.45000000000000001,
         "path": "phases[2].throttle_model.c0"
       },
       {
-        "enabled": false,
+        "enabled": true,
         "max_value": 1,
-        "min_value": 0.7,
+        "min_value": 0.45000000000000001,
         "path": "phases[3].throttle_model.c0"
       },
       {
-        "enabled": false,
+        "enabled": true,
         "max_value": 1,
-        "min_value": 0.7,
+        "min_value": 0.45000000000000001,
         "path": "phases[4].throttle_model.c0"
       },
       {
         "enabled": false,
         "max_value": 1,
-        "min_value": 0.6,
+        "min_value": 0.59999999999999998,
         "path": "phases[5].throttle_model.c0"
       },
       {
         "enabled": false,
         "max_value": 1,
-        "min_value": 0.6,
+        "min_value": 0.59999999999999998,
         "path": "phases[6].throttle_model.c0"
       },
       {
         "enabled": false,
         "max_value": 1,
-        "min_value": 0.6,
+        "min_value": 0.59999999999999998,
         "path": "phases[7].throttle_model.c0"
       }
     ]
@@ -372,12 +353,14 @@
         "azimuth": {
           "c0": 90,
           "c1": 0,
-          "c2": 0
+          "c2": 0,
+          "continuity": false
         },
         "elevation": {
           "c0": 90,
           "c1": 0,
-          "c2": 0
+          "c2": 0,
+          "continuity": false
         },
         "fixed_direction_eci": [
           1,
@@ -387,20 +370,31 @@
         "pitch": {
           "c0": 0,
           "c1": 0,
-          "c2": 0
+          "c2": 0,
+          "continuity": false
         },
         "points": [],
         "roll": {
           "c0": 0,
           "c1": 0,
-          "c2": 0
+          "c2": 0,
+          "continuity": false
         },
         "segments": [],
+        "tangent": {
+          "a": 0,
+          "a_dot": 0,
+          "b": 0,
+          "b_dot": 0,
+          "continuity": false,
+          "t_offset_s": 0
+        },
         "type": "generic_poly",
         "yaw": {
           "c0": 0,
           "c1": 0,
-          "c2": 0
+          "c2": 0,
+          "continuity": false
         }
       },
       "termination": {
@@ -412,6 +406,7 @@
         "c0": 0,
         "c1": 0,
         "c2": 0,
+        "continuity": false,
         "points": [],
         "target_t2w": 1,
         "type": "poly"
@@ -419,7 +414,7 @@
       "tolerances": {
         "atol_position_m": 0.001,
         "atol_tank_mass_kg": 0.001,
-        "atol_velocity_mps": 1e-06,
+        "atol_velocity_mps": 9.9999999999999995e-07,
         "rtol": 1e-08
       }
     },
@@ -462,7 +457,8 @@
         "azimuth": {
           "c0": 90,
           "c1": 0,
-          "c2": 0
+          "c2": 0,
+          "continuity": false
         },
         "elevation": {
           "c0": 90,
@@ -478,31 +474,43 @@
         "pitch": {
           "c0": 0,
           "c1": 0,
-          "c2": 0
+          "c2": 0,
+          "continuity": false
         },
         "points": [],
         "roll": {
           "c0": 0,
           "c1": 0,
-          "c2": 0
+          "c2": 0,
+          "continuity": false
         },
         "segments": [],
+        "tangent": {
+          "a": 0,
+          "a_dot": 0,
+          "b": 0,
+          "b_dot": 0,
+          "continuity": false,
+          "t_offset_s": 0
+        },
         "type": "generic_poly",
         "yaw": {
           "c0": 0,
           "c1": 0,
-          "c2": 0
+          "c2": 0,
+          "continuity": false
         }
       },
       "termination": {
         "comparison": ">=",
         "type": "altitude_m",
-        "value": 194.8957865452394
+        "value": 194.89578654523939
       },
       "throttle_model": {
-        "c0": 0.9936095769377906,
+        "c0": 0.99360957693779062,
         "c1": 0,
         "c2": 0,
+        "continuity": false,
         "points": [],
         "target_t2w": 1,
         "type": "poly"
@@ -510,7 +518,7 @@
       "tolerances": {
         "atol_position_m": 0.001,
         "atol_tank_mass_kg": 0.001,
-        "atol_velocity_mps": 1e-06,
+        "atol_velocity_mps": 9.9999999999999995e-07,
         "rtol": 1e-08
       }
     },
@@ -553,12 +561,13 @@
         "azimuth": {
           "c0": 90,
           "c1": 0,
-          "c2": 0
+          "c2": 0,
+          "continuity": false
         },
         "elevation": {
           "c0": 90,
-          "c1": -0.470482,
-          "c2": -0.000677093,
+          "c1": -0.28915707889076225,
+          "c2": 0.0002682234193190987,
           "continuity": true
         },
         "fixed_direction_eci": [
@@ -569,31 +578,43 @@
         "pitch": {
           "c0": 0,
           "c1": 0,
-          "c2": 0
+          "c2": 0,
+          "continuity": false
         },
         "points": [],
         "roll": {
           "c0": 0,
           "c1": 0,
-          "c2": 0
+          "c2": 0,
+          "continuity": false
         },
         "segments": [],
+        "tangent": {
+          "a": 0,
+          "a_dot": 0,
+          "b": 0,
+          "b_dot": 0,
+          "continuity": false,
+          "t_offset_s": 0
+        },
         "type": "generic_poly",
         "yaw": {
           "c0": 0,
           "c1": 0,
-          "c2": 0
+          "c2": 0,
+          "continuity": false
         }
       },
       "termination": {
         "comparison": ">=",
         "type": "time",
-        "value": 44.6116
+        "value": 60.530264664352174
       },
       "throttle_model": {
-        "c0": 1,
+        "c0": 0.87699989089382413,
         "c1": 0,
         "c2": 0,
+        "continuity": false,
         "points": [],
         "target_t2w": 1,
         "type": "poly"
@@ -601,7 +622,7 @@
       "tolerances": {
         "atol_position_m": 0.001,
         "atol_tank_mass_kg": 0.001,
-        "atol_velocity_mps": 1e-06,
+        "atol_velocity_mps": 9.9999999999999995e-07,
         "rtol": 1e-08
       }
     },
@@ -636,12 +657,13 @@
         "azimuth": {
           "c0": 90,
           "c1": 0,
-          "c2": 0
+          "c2": 0,
+          "continuity": false
         },
         "elevation": {
           "c0": 80,
-          "c1": -0.719585,
-          "c2": -0.000463228,
+          "c1": -0.6036644499191528,
+          "c2": -1.5540283222966866e-05,
           "continuity": true
         },
         "fixed_direction_eci": [
@@ -652,31 +674,43 @@
         "pitch": {
           "c0": 0,
           "c1": 0,
-          "c2": 0
+          "c2": 0,
+          "continuity": false
         },
         "points": [],
         "roll": {
           "c0": 0,
           "c1": 0,
-          "c2": 0
+          "c2": 0,
+          "continuity": false
         },
         "segments": [],
+        "tangent": {
+          "a": 0,
+          "a_dot": 0,
+          "b": 0,
+          "b_dot": 0,
+          "continuity": false,
+          "t_offset_s": 0
+        },
         "type": "generic_poly",
         "yaw": {
           "c0": 0,
           "c1": 0,
-          "c2": 0
+          "c2": 0,
+          "continuity": false
         }
       },
       "termination": {
         "comparison": ">=",
         "type": "time",
-        "value": 57.6869
+        "value": 50.164362952855015
       },
       "throttle_model": {
-        "c0": 0.9999984359275484,
+        "c0": 0.97840065147177602,
         "c1": 0,
         "c2": 0,
+        "continuity": false,
         "points": [],
         "target_t2w": 1,
         "type": "poly"
@@ -684,7 +718,7 @@
       "tolerances": {
         "atol_position_m": 0.001,
         "atol_tank_mass_kg": 0.001,
-        "atol_velocity_mps": 1e-06,
+        "atol_velocity_mps": 9.9999999999999995e-07,
         "rtol": 1e-08
       }
     },
@@ -719,12 +753,13 @@
         "azimuth": {
           "c0": 90,
           "c1": 0,
-          "c2": 0
+          "c2": 0,
+          "continuity": false
         },
         "elevation": {
-          "c0": 5.019846760934443,
-          "c1": -0.44401,
-          "c2": -1.95871e-06,
+          "c0": 5.0198467609344428,
+          "c1": -0.51273300077187056,
+          "c2": -3.1616792624776079e-05,
           "continuity": true
         },
         "fixed_direction_eci": [
@@ -735,31 +770,43 @@
         "pitch": {
           "c0": 0,
           "c1": 0,
-          "c2": 0
+          "c2": 0,
+          "continuity": false
         },
         "points": [],
         "roll": {
           "c0": 0,
           "c1": 0,
-          "c2": 0
+          "c2": 0,
+          "continuity": false
         },
         "segments": [],
+        "tangent": {
+          "a": 0,
+          "a_dot": 0,
+          "b": 0,
+          "b_dot": 0,
+          "continuity": false,
+          "t_offset_s": 0
+        },
         "type": "generic_poly",
         "yaw": {
           "c0": 0,
           "c1": 0,
-          "c2": 0
+          "c2": 0,
+          "continuity": false
         }
       },
       "termination": {
         "comparison": ">=",
         "type": "time",
-        "value": 39.8408
+        "value": 35.853071862340578
       },
       "throttle_model": {
-        "c0": 0.9788238559297084,
+        "c0": 0.95686530549178994,
         "c1": 0,
         "c2": 0,
+        "continuity": false,
         "points": [],
         "target_t2w": 1,
         "type": "poly"
@@ -767,7 +814,7 @@
       "tolerances": {
         "atol_position_m": 0.001,
         "atol_tank_mass_kg": 0.001,
-        "atol_velocity_mps": 1e-06,
+        "atol_velocity_mps": 9.9999999999999995e-07,
         "rtol": 1e-08
       }
     },
@@ -810,12 +857,13 @@
         "azimuth": {
           "c0": 90,
           "c1": 0,
-          "c2": 0
+          "c2": 0,
+          "continuity": false
         },
         "elevation": {
           "c0": 5,
-          "c1": -0.101917,
-          "c2": 4.22e-05,
+          "c1": -0.32569562361311089,
+          "c2": 9.1731871776790791e-07,
           "continuity": true
         },
         "fixed_direction_eci": [
@@ -826,31 +874,43 @@
         "pitch": {
           "c0": 0,
           "c1": 0,
-          "c2": 0
+          "c2": 0,
+          "continuity": false
         },
         "points": [],
         "roll": {
           "c0": 0,
           "c1": 0,
-          "c2": 0
+          "c2": 0,
+          "continuity": false
         },
         "segments": [],
+        "tangent": {
+          "a": 0,
+          "a_dot": 0,
+          "b": 0,
+          "b_dot": 0,
+          "continuity": false,
+          "t_offset_s": 0
+        },
         "type": "generic_poly",
         "yaw": {
           "c0": 0,
           "c1": 0,
-          "c2": 0
+          "c2": 0,
+          "continuity": false
         }
       },
       "termination": {
         "comparison": ">=",
         "type": "time",
-        "value": 96.2577
+        "value": 103.4238836499388
       },
       "throttle_model": {
-        "c0": 0.8738676923549563,
+        "c0": 0.87386769235495632,
         "c1": 0,
         "c2": 0,
+        "continuity": false,
         "points": [],
         "target_t2w": 1,
         "type": "poly"
@@ -858,7 +918,7 @@
       "tolerances": {
         "atol_position_m": 0.001,
         "atol_tank_mass_kg": 0.001,
-        "atol_velocity_mps": 1e-06,
+        "atol_velocity_mps": 9.9999999999999995e-07,
         "rtol": 1e-08
       }
     },
@@ -893,12 +953,13 @@
         "azimuth": {
           "c0": 90,
           "c1": 0,
-          "c2": 0
+          "c2": 0,
+          "continuity": false
         },
         "elevation": {
           "c0": 0,
-          "c1": -0.0962673,
-          "c2": 6.45526e-05,
+          "c1": -0.11946500636041789,
+          "c2": -9.8322174097044803e-06,
           "continuity": true
         },
         "fixed_direction_eci": [
@@ -909,31 +970,43 @@
         "pitch": {
           "c0": 0,
           "c1": 0,
-          "c2": 0
+          "c2": 0,
+          "continuity": false
         },
         "points": [],
         "roll": {
           "c0": 0,
           "c1": 0,
-          "c2": 0
+          "c2": 0,
+          "continuity": false
         },
         "segments": [],
+        "tangent": {
+          "a": 0,
+          "a_dot": 0,
+          "b": 0,
+          "b_dot": 0,
+          "continuity": false,
+          "t_offset_s": 0
+        },
         "type": "generic_poly",
         "yaw": {
           "c0": 0,
           "c1": 0,
-          "c2": 0
+          "c2": 0,
+          "continuity": false
         }
       },
       "termination": {
         "comparison": ">=",
         "type": "time",
-        "value": 94.1169
+        "value": 103.39841882989407
       },
       "throttle_model": {
-        "c0": 0.8271117138977391,
+        "c0": 0.82711171389773908,
         "c1": 0,
         "c2": 0,
+        "continuity": false,
         "points": [],
         "target_t2w": 1,
         "type": "poly"
@@ -941,7 +1014,7 @@
       "tolerances": {
         "atol_position_m": 0.001,
         "atol_tank_mass_kg": 0.001,
-        "atol_velocity_mps": 1e-06,
+        "atol_velocity_mps": 9.9999999999999995e-07,
         "rtol": 1e-08
       }
     },
@@ -976,12 +1049,13 @@
         "azimuth": {
           "c0": 90,
           "c1": 0,
-          "c2": 0
+          "c2": 0,
+          "continuity": false
         },
         "elevation": {
           "c0": 11.499184853553153,
-          "c1": -0.0131194,
-          "c2": 6.36983e-05,
+          "c1": -0.031307452779216788,
+          "c2": -4.5790259812319208e-06,
           "continuity": true
         },
         "fixed_direction_eci": [
@@ -992,31 +1066,43 @@
         "pitch": {
           "c0": 0,
           "c1": 0,
-          "c2": 0
+          "c2": 0,
+          "continuity": false
         },
         "points": [],
         "roll": {
           "c0": 0,
           "c1": 0,
-          "c2": 0
+          "c2": 0,
+          "continuity": false
         },
         "segments": [],
+        "tangent": {
+          "a": 0,
+          "a_dot": 0,
+          "b": 0,
+          "b_dot": 0,
+          "continuity": false,
+          "t_offset_s": 0
+        },
         "type": "generic_poly",
         "yaw": {
           "c0": 0,
           "c1": 0,
-          "c2": 0
+          "c2": 0,
+          "continuity": false
         }
       },
       "termination": {
         "comparison": ">=",
         "type": "time",
-        "value": 101.545
+        "value": 113.07472234327156
       },
       "throttle_model": {
-        "c0": 0.8870794821973509,
+        "c0": 0.88707948219735089,
         "c1": 0,
         "c2": 0,
+        "continuity": false,
         "points": [],
         "target_t2w": 1,
         "type": "poly"
@@ -1024,7 +1110,7 @@
       "tolerances": {
         "atol_position_m": 0.001,
         "atol_tank_mass_kg": 0.001,
-        "atol_velocity_mps": 1e-06,
+        "atol_velocity_mps": 9.9999999999999995e-07,
         "rtol": 1e-08
       }
     },
@@ -1059,12 +1145,14 @@
         "azimuth": {
           "c0": 90,
           "c1": 0,
-          "c2": 0
+          "c2": 0,
+          "continuity": false
         },
         "elevation": {
           "c0": 0,
           "c1": 0,
-          "c2": 0
+          "c2": 0,
+          "continuity": false
         },
         "fixed_direction_eci": [
           1,
@@ -1074,20 +1162,31 @@
         "pitch": {
           "c0": 0,
           "c1": 0,
-          "c2": 0
+          "c2": 0,
+          "continuity": false
         },
         "points": [],
         "roll": {
           "c0": 0,
           "c1": 0,
-          "c2": 0
+          "c2": 0,
+          "continuity": false
         },
         "segments": [],
+        "tangent": {
+          "a": 0,
+          "a_dot": 0,
+          "b": 0,
+          "b_dot": 0,
+          "continuity": false,
+          "t_offset_s": 0
+        },
         "type": "generic_poly",
         "yaw": {
           "c0": 0,
           "c1": 0,
-          "c2": 0
+          "c2": 0,
+          "continuity": false
         }
       },
       "termination": {
@@ -1099,6 +1198,7 @@
         "c0": 0,
         "c1": 0,
         "c2": 0,
+        "continuity": false,
         "points": [],
         "target_t2w": 1,
         "type": "poly"
@@ -1106,7 +1206,7 @@
       "tolerances": {
         "atol_position_m": 0.001,
         "atol_tank_mass_kg": 0.001,
-        "atol_velocity_mps": 1e-06,
+        "atol_velocity_mps": 9.9999999999999995e-07,
         "rtol": 1e-08
       }
     }
@@ -1146,15 +1246,15 @@
       "shutdown_delay_s": 0,
       "throttle_curve": [],
       "thrust_buildup_s": 0,
-      "thrust_sl_n": 7645979.553222656,
-      "thrust_vac_n": 8429489.868164062
+      "thrust_sl_n": 7645979.5532226562,
+      "thrust_vac_n": 8429489.8681640625
     },
     "name": "PMBT-SpaceX Falcon 9 v1.2 Block-5",
     "stages": [
       {
         "active": true,
         "attached": true,
-        "dry_mass_kg": 9768.219662713818,
+        "dry_mass_kg": 9768.2196627138183,
         "engine": {
           "direction_body": [
             1,
@@ -1180,14 +1280,14 @@
           "shutdown_delay_s": 0,
           "throttle_curve": [],
           "thrust_buildup_s": 0,
-          "thrust_sl_n": 7645979.553222656,
-          "thrust_vac_n": 8429489.868164062
+          "thrust_sl_n": 7645979.5532226562,
+          "thrust_vac_n": 8429489.8681640625
         },
         "name": "booster",
         "tanks": [
           {
             "capacity_kg": 407310.22164199484,
-            "initial_kg": 407246.2216436116,
+            "initial_kg": 407246.22164361161,
             "name": "main",
             "propellant": "KSP resources"
           }
@@ -1196,7 +1296,7 @@
       {
         "active": false,
         "attached": true,
-        "dry_mass_kg": 5510.339757427573,
+        "dry_mass_kg": 5510.3397574275732,
         "engine": {
           "direction_body": [
             1,
@@ -1238,7 +1338,7 @@
       {
         "active": false,
         "attached": true,
-        "dry_mass_kg": 947.636203,
+        "dry_mass_kg": 947.63620300000002,
         "engine": {
           "direction_body": [
             1,
@@ -1277,7 +1377,7 @@
     "tanks": [
       {
         "capacity_kg": 407310.22164199484,
-        "initial_kg": 407246.2216436116,
+        "initial_kg": 407246.22164361161,
         "name": "main",
         "propellant": "KSP resources"
       }

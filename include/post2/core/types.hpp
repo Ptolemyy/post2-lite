@@ -167,6 +167,20 @@ struct LinearTangentConfig {
     bool continuity = false;
 };
 
+// NASA-standard Unified Powered Flight Guidance (steering type "upfg"). The
+// closed-loop backup to the open-loop polynomial steering: instead of a fixed
+// attitude program it computes, from the live state, the thrust direction that
+// flies the vehicle to the target orbit. Insertion is at the target periapsis
+// (flight-path angle 0); periapsis == apoapsis gives a circular orbit. Use on
+// vacuum/upper-stage phases only (it ignores drag and can command large
+// pitch-overs in-atmosphere) and pair with a full-throttle phase (it assumes
+// full vacuum thrust per remaining stage). See post2/core/upfg.hpp.
+struct UpfgConfig {
+    double periapsis_km = 200.0;
+    double apoapsis_km = 200.0;
+    double inclination_deg = kDefaultInclinationDeg;
+};
+
 struct SteeringModelConfig;
 
 struct SelectableSteeringSegment {
@@ -182,6 +196,7 @@ struct SteeringModelConfig {
     Poly2Config azimuth_deg;
     Poly2Config elevation_deg;
     LinearTangentConfig tangent;
+    UpfgConfig upfg;
     Vec3 fixed_direction_eci = {1.0, 0.0, 0.0};
     std::vector<QuaternionPoint> points;
     std::vector<SelectableSteeringSegment> segments;
@@ -239,6 +254,12 @@ struct OptimizationEnvelopeSearchConfig {
 
 struct OptimizationContinuationConfig {
     bool enabled = false;
+    // "variable": ramp an input variable (variable_path) to its feasibility
+    // frontier. "objective": epsilon-constraint -- push the enabled objective
+    // metric (as an upper/lower bound target) toward its optimum via warm-started
+    // target-only solves. Use "objective" for output-metric objectives such as
+    // minimize(max_q_pa) that have no single input lever.
+    std::string mode = "variable";
     std::string variable_path;
     std::string direction = "increase";
     int steps = 8;
