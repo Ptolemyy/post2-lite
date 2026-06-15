@@ -2,6 +2,7 @@
 #include "post2/core/case_config_io.hpp"
 #include "post2/core/ksp_vehicle_site_import.hpp"
 #include "post2/core/optimization.hpp"
+#include "post2/core/simulation_driver.hpp"
 #include "post2/core/trajectory_service.hpp"
 #include "post2/vehicle/runtime_state.hpp"
 #include "post2/vehicle/vehicle_config_io.hpp"
