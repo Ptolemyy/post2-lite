@@ -228,6 +228,17 @@ NlpDerivativeResult finite_difference_nlp(
 
     const double h_nominal = nlp_fd_step(options.step_fraction);
     constexpr double min_step = 1.0e-8;
+    // Per-variable starting h. Defaults to h_nominal; overridden by caller
+    // when SQP carries adaptive hints across iterations.
+    std::vector<double> h_initial_per_var(n, h_nominal);
+    if (options.step_fraction_per_variable.size() == n) {
+        for (std::size_t i = 0; i < n; ++i) {
+            const double hf = options.step_fraction_per_variable[i];
+            if (hf > 0.0) {
+                h_initial_per_var[i] = std::max(min_step, nlp_fd_step(hf));
+            }
+        }
+    }
     std::vector<ProbeState> probes(n);
     int failed_probe_count = 0;
     int one_sided_fallback_count = 0;
@@ -319,16 +330,16 @@ NlpDerivativeResult finite_difference_nlp(
             side_requested_initial(options.mode, 1, plus_possible, minus_possible);
         probes[i].minus.possible =
             side_requested_initial(options.mode, -1, plus_possible, minus_possible);
-        queue_probe(i, 1, h_nominal, &requests);
-        queue_probe(i, -1, h_nominal, &requests);
+        queue_probe(i, 1, h_initial_per_var[i], &requests);
+        queue_probe(i, -1, h_initial_per_var[i], &requests);
     }
     evaluate_requests(&requests);
 
     const double retry_factors[] = {0.25, 0.0625, 0.015625};
     for (const double factor : retry_factors) {
         for (std::size_t i = 0; i < n; ++i) {
-            queue_probe(i, 1, h_nominal * factor, &requests);
-            queue_probe(i, -1, h_nominal * factor, &requests);
+            queue_probe(i, 1, h_initial_per_var[i] * factor, &requests);
+            queue_probe(i, -1, h_initial_per_var[i] * factor, &requests);
         }
         evaluate_requests(&requests);
     }
@@ -403,13 +414,28 @@ NlpDerivativeResult finite_difference_nlp(
     };
 
     int unresolved = 0;
+    out.used_step_per_variable.assign(n, 0.0);
     for (std::size_t i = 0; i < n; ++i) {
         if (!write_derivative(i, probes[i].plus, probes[i].minus)) {
             ++unresolved;
             append_message(
                 &out.messages,
                 "finite difference failed for NLP variable " + std::to_string(i));
+            continue;
         }
+        // The "effective" h is the smaller of the two usable sides; if only
+        // one side is usable, that side's h. Callers use this to seed the
+        // next iteration's per-variable hint so the FD doesn't keep
+        // re-attempting the doomed nominal-h probe.
+        double h_used = 0.0;
+        if (probes[i].plus.usable && probes[i].minus.usable) {
+            h_used = std::min(probes[i].plus.h, probes[i].minus.h);
+        } else if (probes[i].plus.usable) {
+            h_used = probes[i].plus.h;
+        } else if (probes[i].minus.usable) {
+            h_used = probes[i].minus.h;
+        }
+        out.used_step_per_variable[i] = h_used;
     }
 
     if (parallel_used) {

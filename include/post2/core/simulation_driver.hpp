@@ -31,4 +31,14 @@ private:
         const StateLog& state_log) const;
 };
 
+// Propagates the final state of `source_log` forward by ~one orbital period under
+// the case's gravity model with thrust off, returning the numerically integrated
+// predicted orbit (NOT an analytic Kepler ellipse — it carries J2 etc.). Returns
+// an empty log when the final state is sub-orbital / hyperbolic. Intended for
+// visualization: the apoapsis/periapsis are the path's max/min-altitude points.
+StateLog predict_orbit_path(
+    const CaseConfig& case_config,
+    const StateLog& source_log,
+    int sample_count = 480);
+
 } // namespace post2::core

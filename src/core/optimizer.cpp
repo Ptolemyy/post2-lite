@@ -21,6 +21,7 @@ constexpr double kPi = 3.141592653589793238462643383279502884;
 
 struct ResolvedPath {
     double* value = nullptr;
+    bool* flag = nullptr;
     int phase_index = -1;
 };
 
@@ -91,6 +92,15 @@ bool finish_value(std::string_view text, double* source, ResolvedPath* target)
     return true;
 }
 
+bool finish_flag(std::string_view text, bool* source, ResolvedPath* target)
+{
+    if (!text.empty()) {
+        return false;
+    }
+    target->flag = source;
+    return true;
+}
+
 bool resolve_poly(Poly2Config* poly, std::string_view text, ResolvedPath* target)
 {
     if (text == "c0") {
@@ -101,6 +111,9 @@ bool resolve_poly(Poly2Config* poly, std::string_view text, ResolvedPath* target
     }
     if (text == "c2") {
         return finish_value({}, &poly->c2, target);
+    }
+    if (text == "continuity") {
+        return finish_flag({}, &poly->continuity, target);
     }
     return false;
 }
@@ -150,6 +163,9 @@ bool resolve_throttle(ThrottleModelConfig* throttle, std::string_view text, Reso
     if (text == "target_t2w") {
         return finish_value({}, &throttle->target_t2w, target);
     }
+    if (text == "continuity") {
+        return finish_flag({}, &throttle->continuity, target);
+    }
 
     std::size_t index = 0;
     if (consume_indexed(&text, "points", &index)) {
@@ -187,6 +203,29 @@ bool resolve_steering(SteeringModelConfig* steering, std::string_view text, Reso
         consume_poly_name("elevation", &steering->elevation_deg) ||
         consume_poly_name("elevation_deg", &steering->elevation_deg)) {
         return true;
+    }
+
+    std::string_view tangent_view = text;
+    if (consume_identifier(&tangent_view, "tangent") && consume_dot(&tangent_view)) {
+        if (tangent_view == "a") {
+            return finish_value({}, &steering->tangent.a, target);
+        }
+        if (tangent_view == "a_dot") {
+            return finish_value({}, &steering->tangent.a_dot, target);
+        }
+        if (tangent_view == "b") {
+            return finish_value({}, &steering->tangent.b, target);
+        }
+        if (tangent_view == "b_dot") {
+            return finish_value({}, &steering->tangent.b_dot, target);
+        }
+        if (tangent_view == "t_offset_s") {
+            return finish_value({}, &steering->tangent.t_offset_s, target);
+        }
+        if (tangent_view == "continuity") {
+            return finish_flag({}, &steering->tangent.continuity, target);
+        }
+        return false;
     }
 
     std::string_view working = text;
@@ -464,7 +503,11 @@ void append_limited_message(std::vector<std::string>* messages, const std::strin
     if (std::find(messages->begin(), messages->end(), message) != messages->end()) {
         return;
     }
-    if (messages->size() < 30) {
+    // Raised from 30 — continuation + multistart can emit hundreds of
+    // progress lines, and the diagnostic value of seeing accepted/rejected
+    // step values across the whole sweep far outweighs the small extra
+    // memory cost. Still deduplicates exact-duplicate messages.
+    if (messages->size() < 1000) {
         messages->push_back(message);
     }
 }
@@ -1079,6 +1122,11 @@ struct SqpJacobians {
     std::vector<double> grad_f;                       // size n
     std::vector<std::vector<double>> J_eq;            // m_eq x n
     std::vector<std::vector<double>> J_ineq;          // m_ineq x n
+    // Effective z-space step for each variable's actually-used probe.
+    // Zero means the FD failed for that variable. Carried back to the next
+    // FD call so variables whose nominal h crashes the simulator don't keep
+    // wasting evaluations on the same doomed probe.
+    std::vector<double> used_step_per_variable;
     bool ok = false;
 };
 
@@ -1112,6 +1160,7 @@ SqpJacobians compute_fd_jacobians(
     j.grad_f = std::move(deriv.grad_f);
     j.J_eq = std::move(deriv.J_eq);
     j.J_ineq = std::move(deriv.J_ineq);
+    j.used_step_per_variable = std::move(deriv.used_step_per_variable);
     j.ok = true;
     return j;
 }
@@ -1366,11 +1415,20 @@ LocalOptimResult run_sqp_nlp(
     consider(pe, z);
 
     // BFGS Hessian on the Lagrangian, in z-space. Identity is a reasonable
-    // start because every variable shares the box [-1, +1].
+    // start because every variable shares the box [-1, +1], but for problems
+    // where the initial objective gradient is huge (e.g. a far-from-feasible
+    // start on a tightly constrained orbit insertion) a plain identity
+    // produces a Newton step that overshoots into the infeasible region and
+    // exhausts the line search. The Hessian is rescaled by the first
+    // gradient norm below, once the FD Jacobian has been computed.
     std::vector<std::vector<double>> B(n, std::vector<double>(n, 0.0));
     for (std::size_t i = 0; i < n; ++i) {
         B[i][i] = 1.0;
     }
+    bool b_scaled = false;
+    // Cached scaling factor for re-initialising B after a stall recovery.
+    // Set when the first FD Jacobian is computed (see below).
+    double b_gamma = 1.0;
 
     // Full-size multipliers; inactive entries stay at zero.
     std::vector<double> lambda_eq(cs.eq.size(), 0.0);
@@ -1399,6 +1457,17 @@ LocalOptimResult run_sqp_nlp(
     int kkt_singular_events = 0;
     int line_search_failures = 0;
 
+    // Trust-region radius on the QP step's inf-norm (z-space). Caps how far a
+    // single Newton step can travel so it cannot leap across a constraint cliff
+    // (e.g. a free objective variable like payload jumping past the periapsis
+    // boundary into a suborbital basin where the gradient is meaningless). It
+    // shrinks when the line search rejects a step and grows after a clean,
+    // TR-limited accept, so well-conditioned iterations still take full steps
+    // (radius saturates at the box width and the cap becomes inert).
+    constexpr double kTrMin = 0.02;
+    constexpr double kTrMax = 2.0;
+    double tr_radius = 0.5;
+
     int it = 0;
     for (; it < iteration_budget; ++it) {
         out.iterations = it + 1;
@@ -1408,6 +1477,35 @@ LocalOptimResult run_sqp_nlp(
         if (!jac.ok) {
             append_limited_message(messages, "sqp: FD jacobian failed");
             break;
+        }
+
+        // First-iteration Hessian rescaling. Identity B implies the QP
+        // direction is d = -grad_L, whose magnitude scales with ||grad_L||.
+        // For a far-from-feasible starting point ||grad_L|| can be huge
+        // (constraint Jacobians times big residuals dominate), and the
+        // resulting Newton step blows the line search past every Armijo
+        // backtrack. Scaling B by gamma = ||grad_L||_inf normalises the
+        // first Newton step to roughly unit length in z-space, after which
+        // the BFGS updates take over.
+        if (!b_scaled) {
+            double grad_L_inf = 0.0;
+            for (std::size_t i = 0; i < n; ++i) {
+                double gli = jac.grad_f[i];
+                for (std::size_t k = 0; k < cs.eq.size(); ++k) {
+                    gli += lambda_eq[k] * jac.J_eq[k][i];
+                }
+                for (std::size_t k = 0; k < cs.ineq.size(); ++k) {
+                    gli += lambda_ineq[k] * jac.J_ineq[k][i];
+                }
+                grad_L_inf = std::max(grad_L_inf, std::abs(gli));
+            }
+            // Clamp so we never collapse B to ~0 (which would make the
+            // Newton step explode) or make it crushingly large.
+            b_gamma = std::clamp(grad_L_inf, 1.0, 1.0e6);
+            for (std::size_t i = 0; i < n; ++i) {
+                B[i][i] = b_gamma;
+            }
+            b_scaled = true;
         }
 
         // BFGS update from the previous step (skip on iteration 0). Uses
@@ -1514,6 +1612,22 @@ LocalOptimResult run_sqp_nlp(
             std::max(rho_eq, 1.5 * std::min(lambda_eq_max, rho_target)));
         rho_ineq = std::min(rho_max,
             std::max(rho_ineq, 1.5 * std::min(lambda_ineq_max, rho_target)));
+
+        // Trust-region cap on the raw QP step. Scaling the whole vector
+        // preserves the Newton direction while bounding its length; the line
+        // search and fraction-to-boundary still apply on top.
+        {
+            double dz_inf = 0.0;
+            for (double v : dz) {
+                dz_inf = std::max(dz_inf, std::abs(v));
+            }
+            if (dz_inf > tr_radius && dz_inf > 0.0) {
+                const double shrink = tr_radius / dz_inf;
+                for (double& v : dz) {
+                    v *= shrink;
+                }
+            }
+        }
 
         // Zero outward dz components at active bounds.
         for (std::size_t i = 0; i < n; ++i) {
@@ -1632,6 +1746,7 @@ LocalOptimResult run_sqp_nlp(
             const double phi0 = sqp_merit(pe, rho_eq, rho_ineq);
             const double viol0 = pe.max_violation;
             double alpha = std::min(1.0, alpha_bound);
+            bool soc_tried = false;
             for (int ls = 0; ls < 20; ++ls) {
                 for (std::size_t i = 0; i < n; ++i) {
                     z_new[i] = clamp(z[i] + alpha * dz[i], -1.0, 1.0);
@@ -1644,6 +1759,85 @@ LocalOptimResult run_sqp_nlp(
                         accepted = true;
                         alpha_final = alpha;
                         break;
+                    }
+
+                    // Second-order correction (SOC). On the first
+                    // backtracking attempt only, when the trial point is
+                    // simulator-OK but the merit is rejected and the
+                    // constraint violation has *increased* relative to the
+                    // current point, attempt a one-shot SOC step. This is
+                    // the classical Maratos-effect fix: even an exact
+                    // first-order Newton step (J*d + c = 0) can put us on
+                    // the wrong side of a curved constraint manifold, so a
+                    // small extra correction d_soc satisfying
+                    //   J(z) * d_soc = -c_active(z_new)
+                    // pulls back onto the manifold while preserving the
+                    // bulk of the Newton step's objective progress.
+                    //
+                    // d_soc = -J^T (J J^T + reg I)^{-1} c_active(z_new)
+                    if (!soc_tried && ls == 0 && rho_retry == 0 &&
+                        alpha >= 0.95 && !c_active.empty() &&
+                        pe_new.max_violation > viol0 * 1.05) {
+                        soc_tried = true;
+                        const std::size_t m_soc = c_active.size();
+                        std::vector<double> c_at_new(m_soc, 0.0);
+                        for (std::size_t k = 0; k < cs.eq.size() && k < m_soc; ++k) {
+                            c_at_new[k] = pe_new.c_eq[k];
+                        }
+                        for (std::size_t k = 0;
+                             k < cs.ineq.size() && cs.eq.size() + k < m_soc;
+                             ++k) {
+                            // Only include ineq rows we counted as active.
+                            // c_active for ineq carries the violation
+                            // (positive when violated); use the new point's
+                            // ineq residual the same way.
+                            c_at_new[cs.eq.size() + k] = std::max(0.0, pe_new.c_ineq[k]);
+                        }
+                        // Solve (J J^T + reg I) y = c_at_new, then d_soc = -J^T y.
+                        std::vector<std::vector<double>> JJT(
+                            m_soc, std::vector<double>(m_soc, 0.0));
+                        for (std::size_t a = 0; a < m_soc; ++a) {
+                            for (std::size_t b = 0; b < m_soc; ++b) {
+                                double sum = 0.0;
+                                for (std::size_t j = 0; j < n; ++j) {
+                                    sum += J_active[a][j] * J_active[b][j];
+                                }
+                                JJT[a][b] = sum;
+                            }
+                            JJT[a][a] += 1.0e-4;
+                        }
+                        std::vector<double> y_soc;
+                        if (solve_linear_system(JJT, c_at_new, &y_soc)) {
+                            std::vector<double> d_soc(n, 0.0);
+                            for (std::size_t j = 0; j < n; ++j) {
+                                double sum = 0.0;
+                                for (std::size_t a = 0; a < m_soc; ++a) {
+                                    sum += J_active[a][j] * y_soc[a];
+                                }
+                                d_soc[j] = -sum;
+                            }
+                            std::vector<double> z_soc(n, 0.0);
+                            for (std::size_t i = 0; i < n; ++i) {
+                                z_soc[i] = clamp(z_new[i] + d_soc[i], -1.0, 1.0);
+                            }
+                            PointEval pe_soc =
+                                evaluate_at(z_soc, problem, evaluator, messages);
+                            if (pe_soc.ok) {
+                                const double phi_soc =
+                                    sqp_merit(pe_soc, rho_eq, rho_ineq);
+                                // Accept SOC if it beats the merit *or*
+                                // pulls violation back below the original.
+                                if (phi_soc < phi0 - 1.0e-6 *
+                                        std::max(1.0, std::abs(phi0)) ||
+                                    pe_soc.max_violation < viol0) {
+                                    z_new = z_soc;
+                                    pe_new = pe_soc;
+                                    accepted = true;
+                                    alpha_final = alpha;
+                                    break;
+                                }
+                            }
+                        }
                     }
                     // Constraint-progress fallback: an aggressive reduction
                     // in violation buys us the step even if merit didn't
@@ -1683,6 +1877,10 @@ LocalOptimResult run_sqp_nlp(
 
         if (!accepted) {
             ++line_search_failures;
+            // The full Newton step was not productive: contract the trust
+            // region so the next iteration probes closer in before falling
+            // back to the restoration / steepest-descent recoveries below.
+            tr_radius = std::max(kTrMin, tr_radius * 0.4);
             // Feasibility-restoration phase: ignore objective and pull
             // straight toward c = 0 along a minimum-norm step that hits
             // the linearized constraint manifold. Solve
@@ -1767,11 +1965,14 @@ LocalOptimResult run_sqp_nlp(
                 }
             }
             // Forced merit-penalty steepest-descent step. Both LS and FR
-            // failed; rather than exiting, take a small fixed-magnitude
-            // step in the direction that reduces the L1 merit penalty.
-            // This breaks stalls where rho is over-weighted and the LS /
-            // FR convergence tests are conservative.
-            std::vector<double> dz_sd(n, 0.0);
+            // failed; rather than exiting, take a small step in the
+            // direction that reduces the L1 merit penalty. This breaks
+            // stalls where rho is over-weighted and the LS / FR convergence
+            // tests are conservative. We backtrack the step magnitude
+            // whenever the simulator refuses the trial point (e.g. the step
+            // pushes the trajectory through the ground) so a single bad
+            // probe does not kill the whole SQP run.
+            std::vector<double> dz_sd_unit(n, 0.0);
             for (std::size_t i = 0; i < n; ++i) {
                 double g = jac.grad_f[i];
                 for (std::size_t k = 0; k < cs.eq.size(); ++k) {
@@ -1783,14 +1984,14 @@ LocalOptimResult run_sqp_nlp(
                         g += rho_ineq * jac.J_ineq[k][i];
                     }
                 }
-                dz_sd[i] = -g;
+                dz_sd_unit[i] = -g;
             }
             for (std::size_t i = 0; i < n; ++i) {
-                if (z[i] >= 1.0 - 1.0e-12 && dz_sd[i] > 0.0) dz_sd[i] = 0.0;
-                if (z[i] <= -1.0 + 1.0e-12 && dz_sd[i] < 0.0) dz_sd[i] = 0.0;
+                if (z[i] >= 1.0 - 1.0e-12 && dz_sd_unit[i] > 0.0) dz_sd_unit[i] = 0.0;
+                if (z[i] <= -1.0 + 1.0e-12 && dz_sd_unit[i] < 0.0) dz_sd_unit[i] = 0.0;
             }
             double dz_sd_inf = 0.0;
-            for (double v : dz_sd) {
+            for (double v : dz_sd_unit) {
                 dz_sd_inf = std::max(dz_sd_inf, std::abs(v));
             }
             if (dz_sd_inf < 1.0e-12) {
@@ -1798,25 +1999,56 @@ LocalOptimResult run_sqp_nlp(
                     "sqp: line search failed - exiting (no descent)");
                 break;
             }
-            const double sd_step = 0.03;
+            // Normalise to inf-norm 1 so sd_step controls maximum component
+            // movement in z-space directly.
             for (std::size_t i = 0; i < n; ++i) {
-                dz_sd[i] *= sd_step / dz_sd_inf;
+                dz_sd_unit[i] /= dz_sd_inf;
             }
+
+            const double phi0_sd = sqp_merit(pe, rho_eq, rho_ineq);
+            bool sd_accepted = false;
+            PointEval pe_sd;
             std::vector<double> z_sd(n, 0.0);
-            for (std::size_t i = 0; i < n; ++i) {
-                z_sd[i] = clamp(z[i] + dz_sd[i], -1.0, 1.0);
+            // Halve the step until either the sim accepts AND merit doesn't
+            // strictly increase, or we hit a tiny floor. Starts modestly so
+            // a hard infeasible point with stiff constraints does not blow
+            // up the trajectory in the first probe.
+            double sd_step = 0.03;
+            for (int sd_try = 0; sd_try < 12; ++sd_try) {
+                for (std::size_t i = 0; i < n; ++i) {
+                    z_sd[i] = clamp(z[i] + sd_step * dz_sd_unit[i], -1.0, 1.0);
+                }
+                pe_sd = evaluate_at(z_sd, problem, evaluator, messages);
+                if (pe_sd.ok) {
+                    const double phi_sd = sqp_merit(pe_sd, rho_eq, rho_ineq);
+                    // Accept anything that doesn't strictly worsen the
+                    // merit; even a flat step is useful because it gets us
+                    // past the line-search / FR stall without abandoning
+                    // the run.
+                    if (phi_sd <=
+                            phi0_sd + 1.0e-9 * std::max(1.0, std::abs(phi0_sd))) {
+                        sd_accepted = true;
+                        break;
+                    }
+                }
+                sd_step *= 0.5;
+                if (sd_step < 1.0e-4) {
+                    break;
+                }
             }
-            PointEval pe_sd = evaluate_at(z_sd, problem, evaluator, messages);
-            if (!pe_sd.ok) {
+            if (!sd_accepted) {
                 append_limited_message(messages,
-                    "sqp: line search failed - exiting (sd sim failed)");
+                    "sqp: line search failed - exiting (sd backtrack exhausted)");
                 break;
             }
             // Reset B to keep the Hessian approximation honest after the
-            // forced (non-Newton-like) step.
+            // forced (non-Newton-like) step. Use the cached gamma so the
+            // next Newton step is sized like the initial well-scaled one,
+            // not like a raw identity (which made the line search fail in
+            // the first place).
             for (std::size_t i = 0; i < n; ++i) {
                 for (std::size_t k = 0; k < n; ++k) {
-                    B[i][k] = (i == k) ? 1.0 : 0.0;
+                    B[i][k] = (i == k) ? b_gamma : 0.0;
                 }
             }
             have_prev = false;
@@ -1825,6 +2057,19 @@ LocalOptimResult run_sqp_nlp(
             pe = pe_sd;
             consider(pe, z);
             continue;
+        }
+
+        // Clean accept: if the step used most of the trust region, expand it
+        // so the next iteration can take a longer Newton step. Backtracked,
+        // much-smaller steps leave the radius unchanged.
+        {
+            double step_inf = 0.0;
+            for (std::size_t i = 0; i < n; ++i) {
+                step_inf = std::max(step_inf, std::abs(z_new[i] - z[i]));
+            }
+            if (step_inf > 0.5 * tr_radius) {
+                tr_radius = std::min(kTrMax, tr_radius * 1.8);
+            }
         }
 
         // Save the previous Lagrangian gradient for the next BFGS update.
@@ -2659,6 +2904,9 @@ bool read_optimization_variable(
     if (!resolve_path(&copy, path, &resolved, error)) {
         return false;
     }
+    if (!resolved.value) {
+        return fail(error, "variable path is not numeric: " + path);
+    }
     *value = *resolved.value;
     return true;
 }
@@ -2673,7 +2921,45 @@ bool write_optimization_variable(
     if (!resolve_path(config, path, &resolved, error)) {
         return false;
     }
+    if (!resolved.value) {
+        return fail(error, "variable path is not numeric: " + path);
+    }
     *resolved.value = value;
+    return true;
+}
+
+bool read_optimization_flag(
+    const CaseConfig& config,
+    const std::string& path,
+    bool* value,
+    std::string* error)
+{
+    CaseConfig copy = config;
+    ResolvedPath resolved;
+    if (!resolve_path(&copy, path, &resolved, error)) {
+        return false;
+    }
+    if (!resolved.flag) {
+        return fail(error, "variable path is not a boolean flag: " + path);
+    }
+    *value = *resolved.flag;
+    return true;
+}
+
+bool write_optimization_flag(
+    CaseConfig* config,
+    const std::string& path,
+    bool value,
+    std::string* error)
+{
+    ResolvedPath resolved;
+    if (!resolve_path(config, path, &resolved, error)) {
+        return false;
+    }
+    if (!resolved.flag) {
+        return fail(error, "variable path is not a boolean flag: " + path);
+    }
+    *resolved.flag = value;
     return true;
 }
 

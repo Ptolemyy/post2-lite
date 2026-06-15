@@ -277,6 +277,166 @@ int test_mission_event_fires_and_deactivates_stage()
     return 0;
 }
 
+int test_continuity_flags_json_roundtrip()
+{
+    post2::core::CaseConfig config = make_base_case();
+    auto phase = make_default_phase(config);
+    phase.throttle_model.continuity = true;
+    phase.steering_model.azimuth_deg.continuity = true;
+    phase.steering_model.elevation_deg.continuity = false;
+    phase.steering_model.pitch_deg.continuity = true;
+    config.phases.push_back(phase);
+
+    const std::string json = post2::core::case_config_to_json(config);
+    post2::core::CaseConfig reloaded;
+    std::string error;
+    if (!post2::core::case_config_from_json(json, &reloaded, &error)) {
+        std::cerr << "continuity json reload failed: " << error << '\n';
+        return 1;
+    }
+    if (reloaded.phases.size() != 1) {
+        std::cerr << "continuity roundtrip: wrong phase count\n";
+        return 1;
+    }
+    const auto& p = reloaded.phases[0];
+    if (!p.throttle_model.continuity ||
+        !p.steering_model.azimuth_deg.continuity ||
+        p.steering_model.elevation_deg.continuity ||
+        !p.steering_model.pitch_deg.continuity) {
+        std::cerr << "continuity flags did not survive roundtrip\n";
+        return 1;
+    }
+    return 0;
+}
+
+// Finds the last phase-0 entry (the phase boundary) and the first phase-1 entry
+// (which reflects the phase-2 throttle/steering command — the inherited initial
+// entry is deduped because it shares the boundary's timestamp).
+bool find_boundary_and_next(
+    const post2::core::StateLog& log,
+    post2::core::LaunchVehicleStateLogEntry* boundary,
+    post2::core::LaunchVehicleStateLogEntry* next)
+{
+    bool have_boundary = false;
+    for (const auto& entry : log.entries()) {
+        if (entry.phase_index == 0) {
+            *boundary = entry;
+            have_boundary = true;
+        }
+    }
+    if (!have_boundary) {
+        return false;
+    }
+    for (const auto& entry : log.entries()) {
+        if (entry.phase_index == 1) {
+            *next = entry;
+            return true;
+        }
+    }
+    return false;
+}
+
+post2::core::CaseConfig make_two_phase_continuity_case(bool continuity, const std::string& p2_throttle_type)
+{
+    post2::core::CaseConfig config = make_base_case();
+
+    // Phase 1: a free-flight burn with a decreasing poly throttle and a fixed
+    // azimuth/elevation, so the boundary throttle and direction are non-trivial.
+    auto p1 = make_default_phase(config);
+    p1.name = "p1";
+    p1.inherit_initial_state = false;  // phase 0 uses the default LEO state
+    p1.termination = {"time", ">=", 10.0};
+    post2::core::PhaseAction enable_engine;
+    enable_engine.time_s = 0.0;
+    enable_engine.type = "set_engine_enabled";
+    enable_engine.value = true;
+    p1.actions.push_back(enable_engine);
+    p1.throttle_model.type = "poly";
+    p1.throttle_model.c0 = 1.0;
+    p1.throttle_model.c1 = -0.02;
+    p1.steering_model.type = "generic_poly";
+    p1.steering_model.azimuth_deg.c0 = 90.0;
+    p1.steering_model.elevation_deg.c0 = 80.0;
+    config.phases.push_back(p1);
+
+    // Phase 2: deliberately different configured constants. With continuity on
+    // they must be re-anchored to the phase-1 boundary; with it off they stand.
+    auto p2 = make_default_phase(config);
+    p2.name = "p2";
+    p2.inherit_initial_state = true;
+    p2.termination = {"time", ">=", 5.0};
+    p2.throttle_model.type = p2_throttle_type;
+    p2.throttle_model.c0 = 0.3;
+    p2.throttle_model.target_t2w = 0.1;
+    p2.throttle_model.continuity = continuity;
+    p2.steering_model.type = "generic_poly";
+    p2.steering_model.azimuth_deg.c0 = 0.0;
+    p2.steering_model.elevation_deg.c0 = 0.0;
+    p2.steering_model.azimuth_deg.continuity = continuity;
+    p2.steering_model.elevation_deg.continuity = continuity;
+    config.phases.push_back(p2);
+    return config;
+}
+
+int test_phase_continuity_reanchors_throttle_and_steering()
+{
+    post2::core::LocalTrajectoryService service;
+
+    // Continuity ON: phase 2 opens at the phase-1 boundary throttle/direction,
+    // for both the poly and T/W throttle models.
+    for (const std::string& type : {std::string("poly"), std::string("t2w")}) {
+        const auto config = make_two_phase_continuity_case(true, type);
+        const auto result = service.simulate(config);
+        if (!result.ok) {
+            std::cerr << "continuity(" << type << ") sim failed: " << result.error << '\n';
+            return 1;
+        }
+        post2::core::LaunchVehicleStateLogEntry boundary;
+        post2::core::LaunchVehicleStateLogEntry next;
+        if (!find_boundary_and_next(result.state_log, &boundary, &next)) {
+            std::cerr << "continuity(" << type << "): missing boundary/next entries\n";
+            return 1;
+        }
+        if (std::abs(next.throttle - boundary.throttle) > 2.0e-3) {
+            std::cerr << "continuity(" << type << "): throttle not held: boundary="
+                      << boundary.throttle << " next=" << next.throttle << '\n';
+            return 1;
+        }
+        const double dir_dot =
+            boundary.engine_direction_eci.x * next.engine_direction_eci.x +
+            boundary.engine_direction_eci.y * next.engine_direction_eci.y +
+            boundary.engine_direction_eci.z * next.engine_direction_eci.z;
+        if (dir_dot < 0.9999) {
+            std::cerr << "continuity(" << type << "): direction not held: dot=" << dir_dot << '\n';
+            return 1;
+        }
+    }
+
+    // Continuity OFF: phase 2 opens at its own configured throttle (0.3), which
+    // differs from the boundary value.
+    {
+        const auto config = make_two_phase_continuity_case(false, "poly");
+        const auto result = service.simulate(config);
+        if (!result.ok) {
+            std::cerr << "no-continuity sim failed: " << result.error << '\n';
+            return 1;
+        }
+        post2::core::LaunchVehicleStateLogEntry boundary;
+        post2::core::LaunchVehicleStateLogEntry next;
+        if (!find_boundary_and_next(result.state_log, &boundary, &next)) {
+            std::cerr << "no-continuity: missing boundary/next entries\n";
+            return 1;
+        }
+        if (std::abs(next.throttle - boundary.throttle) < 0.05) {
+            std::cerr << "no-continuity: throttle unexpectedly matched boundary (boundary="
+                      << boundary.throttle << " next=" << next.throttle << ")\n";
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
 } // namespace
 
 int main()
@@ -286,6 +446,8 @@ int main()
     failures += test_legacy_duration_s_synthesises_termination();
     failures += test_altitude_termination();
     failures += test_mission_event_fires_and_deactivates_stage();
+    failures += test_continuity_flags_json_roundtrip();
+    failures += test_phase_continuity_reanchors_throttle_and_steering();
     if (failures != 0) {
         std::cerr << "phase_termination_and_events_test: " << failures << " case(s) failed\n";
         return 1;

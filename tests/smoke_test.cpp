@@ -544,7 +544,7 @@ int main()
             const int phase_index = static_cast<int>(value_at(row, phase_index_col));
             if (phase_index == 0 &&
                 value_at(row, steer_avail_col) == 1.0 &&
-                value_at(row, roll_avail_col) == 1.0 &&
+                value_at(row, roll_avail_col) == 0.0 &&
                 value_at(row, throttle_avail_col) == 1.0 &&
                 std::abs(value_at(row, az_c0_col) - 90.0) < 1.0e-12 &&
                 std::abs(value_at(row, el_c0_col) - 5.0) < 1.0e-12 &&

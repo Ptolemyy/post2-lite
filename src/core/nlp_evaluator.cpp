@@ -565,6 +565,10 @@ NlpEvalResult NlpEvaluator::evaluate_no_count(
             result.error = "unsupported metric: " + constraint.metric;
             return result;
         }
+        if (!std::isfinite(metric_value)) {
+            result.error = "non-finite metric: " + constraint.metric;
+            return result;
+        }
         append_constraint_eval(constraint, metric_value, &result);
     }
     result.ok = std::isfinite(result.objective);

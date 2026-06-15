@@ -263,6 +263,31 @@ int main()
     }
 
     {
+        post2::core::CaseConfig hyperbolic_case = make_drop_case();
+        hyperbolic_case.phases[0].initial_state_eci = post2::core::State{
+            {post2::core::kEarthRadiusM + 200000.0, 0.0, 0.0},
+            {0.0, 12000.0, 0.0},
+        };
+        hyperbolic_case.phases[0].force_models.gravity = false;
+        hyperbolic_case.optimization.targets.push_back(
+            {"apoapsis_altitude_m", "range", 0.0, 180000.0, 230000.0, 1.0});
+
+        post2::core::NlpProblem problem;
+        std::string error;
+        if (!post2::core::build_nlp_problem_from_case(hyperbolic_case, &problem, &error)) {
+            std::cerr << "non-finite metric NLP build failed: " << error << '\n';
+            return 1;
+        }
+        post2::core::NlpEvaluator evaluator(hyperbolic_case, service);
+        const auto eval = evaluator.evaluate(problem, {});
+        if (eval.ok ||
+            eval.error.find("non-finite metric: apoapsis_altitude_m") == std::string::npos) {
+            std::cerr << "non-finite target metric was not rejected clearly\n";
+            return 1;
+        }
+    }
+
+    {
         drop_case.optimization.qp_solver = "active-set";
         drop_case.optimization.fd_mode = "central";
         drop_case.optimization.parallel_fd = false;

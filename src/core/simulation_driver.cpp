@@ -59,7 +59,60 @@ bool trigger_uses_event_path(const TriggerCondition& trigger)
         trigger.type == "velocity_mps" ||
         trigger.type == "total_mass_kg" ||
         trigger.type == "propellant_mass_kg" ||
+        trigger.type == "apoapsis_altitude_m" ||
+        trigger.type == "periapsis_altitude_m" ||
+        trigger.type == "orbital_energy" ||
+        trigger.type == "sma_m" ||
         trigger.type == "time";
+}
+
+// Specific orbital quantity from an inertial state, used by the orbital-element
+// phase/event triggers. Mirrors orbital_elements_for_entry in nlp_evaluator.cpp
+// but evaluable mid-integration from (r, v) alone so it can drive an
+// EventFunction. apoapsis on an unbound (e >= 1) osculating orbit is reported as
+// +infinity (any finite ">=" target is already exceeded).
+double orbital_trigger_quantity(
+    const std::string& type,
+    const Vec3& r,
+    const Vec3& v,
+    double mu_m3s2,
+    double earth_radius_m)
+{
+    const double r_norm = post2::vehicle::norm(r);
+    const double v_norm = post2::vehicle::norm(v);
+    if (r_norm <= 0.0 || mu_m3s2 <= 0.0) {
+        return std::numeric_limits<double>::quiet_NaN();
+    }
+    if (type == "orbital_energy") {
+        return 0.5 * v_norm * v_norm - mu_m3s2 / r_norm;
+    }
+    if (type == "sma_m") {
+        const double denom = 2.0 / r_norm - v_norm * v_norm / mu_m3s2;
+        return std::abs(denom) > 0.0 ? 1.0 / denom
+                                     : std::numeric_limits<double>::quiet_NaN();
+    }
+    const Vec3 h{
+        r.y * v.z - r.z * v.y,
+        r.z * v.x - r.x * v.z,
+        r.x * v.y - r.y * v.x,
+    };
+    const double h_norm = post2::vehicle::norm(h);
+    if (h_norm <= 0.0) {
+        return std::numeric_limits<double>::quiet_NaN();
+    }
+    const double rv = post2::vehicle::dot(r, v);
+    const Vec3 e_vec = (r * (v_norm * v_norm - mu_m3s2 / r_norm) - v * rv) / mu_m3s2;
+    const double e = post2::vehicle::norm(e_vec);
+    const double p = h_norm * h_norm / mu_m3s2;
+    if (type == "periapsis_altitude_m") {
+        return (1.0 + e > 0.0) ? p / (1.0 + e) - earth_radius_m
+                               : std::numeric_limits<double>::quiet_NaN();
+    }
+    // apoapsis_altitude_m
+    if (e >= 1.0) {
+        return std::numeric_limits<double>::infinity();
+    }
+    return p / (1.0 - e) - earth_radius_m;
 }
 
 // Builds an EventFunction whose g changes sign at the trigger's rising edge
@@ -69,9 +122,13 @@ bool trigger_uses_event_path(const TriggerCondition& trigger)
 //
 // `time_base_s` is subtracted from t for type=="time" triggers — pass the
 // phase start time for phase-relative semantics or 0 for mission-absolute.
+// `mu_m3s2` / `earth_radius_m` are only consulted by the orbital-element
+// trigger types (apoapsis/periapsis/energy/sma).
 post2::integrators::EventFunction make_trigger_event(
     const TriggerCondition& trigger,
     const post2::vehicle::VehicleRuntimeState& runtime_snapshot,
+    double mu_m3s2,
+    double earth_radius_m,
     double time_base_s,
     bool terminating,
     const std::string& name)
@@ -148,6 +205,18 @@ post2::integrators::EventFunction make_trigger_event(
                 }
             }
             return wrap(total);
+        };
+        return ev;
+    }
+
+    if (trigger.type == "apoapsis_altitude_m" ||
+        trigger.type == "periapsis_altitude_m" ||
+        trigger.type == "orbital_energy" ||
+        trigger.type == "sma_m") {
+        ev.g = [wrap, type = trigger.type, mu_m3s2, earth_radius_m](
+                   double, const post2::integrators::ExtendedState& s) {
+            return wrap(orbital_trigger_quantity(
+                type, s.motion.position_m, s.motion.velocity_mps, mu_m3s2, earth_radius_m));
         };
         return ev;
     }
@@ -849,6 +918,8 @@ StateLog propagate_phase(
                 events.push_back(make_trigger_event(
                     phase.termination,
                     runtime,
+                    case_config.earth_mu_m3s2,
+                    case_config.earth_radius_m,
                     phase_start_time_s,
                     /*terminating=*/true,
                     "phase_termination"));
@@ -873,6 +944,8 @@ StateLog propagate_phase(
                     events.push_back(make_trigger_event(
                         case_config.events[k].trigger,
                         runtime,
+                        case_config.earth_mu_m3s2,
+                        case_config.earth_radius_m,
                         /*time_base_s=*/0.0,
                         /*terminating=*/true,
                         "mission_event_" + std::to_string(k)));
@@ -1000,6 +1073,8 @@ StateLog propagate_phase(
                 post2::integrators::EventFunction probe = make_trigger_event(
                     case_config.events[k].trigger,
                     runtime,
+                    case_config.earth_mu_m3s2,
+                    case_config.earth_radius_m,
                     /*time_base_s=*/0.0,
                     /*terminating=*/false,
                     "mission_event_probe");
@@ -1204,7 +1279,9 @@ SimulationResult SimulationDriver::run(const CaseConfig& config) const
 
         double phase_start_time_s = 0.0;
         for (std::size_t phase_index = 0; phase_index < config.phases.size(); ++phase_index) {
-            const PhaseConfig& phase = config.phases[phase_index];
+            // Mutable copy: phase-boundary continuity may re-anchor the throttle
+            // and steering constants before this phase propagates.
+            PhaseConfig phase = config.phases[phase_index];
             const double phase_horizon_for_sim_config =
                 (phase.termination.type == "time") ? phase.termination.value : kMaxPhaseTimeS;
             const SimulationConfig simulation_config =
@@ -1223,6 +1300,17 @@ SimulationResult SimulationDriver::run(const CaseConfig& config) const
                 initial_runtime = vehicle_propagator.make_initial_state(initial_state, phase_start_time_s);
             } else {
                 return {false, "phase " + std::to_string(phase_index) + " has no initial state", state_log};
+            }
+
+            // At a phase switch, re-anchor any continuity-enabled throttle/
+            // steering constants to the previous phase's final state.
+            if (!state_log.empty()) {
+                apply_phase_start_continuity(
+                    &phase,
+                    config,
+                    initial_runtime,
+                    state_log.back().throttle,
+                    state_log.back().engine_direction_eci);
             }
 
             const StateLog phase_log = propagate_phase(
@@ -1274,6 +1362,75 @@ StateLog SimulationDriver::integrateOneEvent(
     const StateLog& state_log) const
 {
     return event.executeEvent(config, state_log);
+}
+
+StateLog predict_orbit_path(
+    const CaseConfig& case_config,
+    const StateLog& source_log,
+    int sample_count)
+{
+    StateLog empty(case_config.earth_radius_m, case_config.vehicle);
+    if (source_log.empty()) {
+        return empty;
+    }
+    const LaunchVehicleStateLogEntry& last = source_log.back();
+    const Vec3& r = last.state.position_m;
+    const Vec3& v = last.state.velocity_mps;
+    const double r_norm = post2::vehicle::norm(r);
+    const double v_norm = post2::vehicle::norm(v);
+    const double mu = case_config.earth_mu_m3s2;
+    if (r_norm <= 0.0 || mu <= 0.0) {
+        return empty;
+    }
+    // Semi-major axis from vis-viva; only closed (bound) orbits get a path.
+    const double specific_energy = 0.5 * v_norm * v_norm - mu / r_norm;
+    if (specific_energy >= 0.0) {
+        return empty;
+    }
+    const double a = -mu / (2.0 * specific_energy);
+    if (a <= 0.0) {
+        return empty;
+    }
+    constexpr double kPi = 3.141592653589793238462643383279502884;
+    const double period_s = 2.0 * kPi * std::sqrt((a * a * a) / mu);
+    const double horizon_s = period_s * 1.02;
+
+    // Coast the final state forward under the case's gravity model with the
+    // engine off. Re-anchor the Earth's epoch orientation so coast-time 0 lines
+    // up with the source state's mission time (keeps J2 and geodetic altitude
+    // consistent with where the vehicle actually is).
+    CaseConfig coast = case_config;
+    coast.events.clear();
+    coast.optimization = OptimizationConfig{};
+    coast.earth_rotation_at_epoch_rad =
+        case_config.earth_rotation_at_epoch_rad +
+        case_config.earth_rotation_rad_per_s * last.time_s;
+
+    PhaseConfig phase;
+    phase.name = "predicted orbit";
+    phase.inherit_initial_state = false;
+    phase.initial_state_eci = last.state;
+    phase.hold_down_clamp_initial_active = false;
+    phase.optimize_enabled = false;
+    phase.integrator = "dopri5";
+    phase.force_models = case_config.phases.empty()
+        ? ForceModelSwitches{}
+        : case_config.phases.back().force_models;
+    phase.force_models.thrust = false;
+    phase.force_models.normal_force = false;
+    phase.throttle_model = ThrottleModelConfig{};
+    phase.throttle_model.c0 = 0.0;
+    phase.steering_model = SteeringModelConfig{};
+    phase.termination = TriggerCondition{"time", ">=", horizon_s};
+    coast.phases = {phase};
+    const int samples = std::max(60, sample_count);
+    coast.step_s = horizon_s / static_cast<double>(samples);
+
+    const SimulationResult result = SimulationDriver{}.run(coast);
+    if (!result.ok) {
+        return empty;
+    }
+    return result.state_log;
 }
 
 } // namespace post2::core

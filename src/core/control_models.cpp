@@ -83,6 +83,28 @@ Vec3 direction_from_azimuth_elevation_deg(const State& state, double azimuth_deg
         basis.north);
 }
 
+struct AzimuthElevationDeg {
+    double azimuth_deg = 0.0;
+    double elevation_deg = 0.0;
+};
+
+// Inverse of direction_from_azimuth_elevation_deg: recovers the local
+// azimuth/elevation (degrees) of an ECI direction at the given state. Used to
+// back out the "current" steering angles from a final thrust direction.
+AzimuthElevationDeg azimuth_elevation_from_direction(const State& state, const Vec3& direction_eci)
+{
+    constexpr double kRadToDeg = 57.295779513082320876798154814105;
+    const LocalEnuBasis basis = local_enu_basis(state);
+    const Vec3 dir = normalized_or(direction_eci, basis.north);
+    const double up_comp = clamp(post2::vehicle::dot(dir, basis.up), -1.0, 1.0);
+    const double north_comp = post2::vehicle::dot(dir, basis.north);
+    const double east_comp = post2::vehicle::dot(dir, basis.east);
+    return {
+        std::atan2(east_comp, north_comp) * kRadToDeg,
+        std::asin(up_comp) * kRadToDeg,
+    };
+}
+
 Quaternion normalized_or_identity(Quaternion quat)
 {
     const double length = std::sqrt(quat.w * quat.w + quat.x * quat.x + quat.y * quat.y + quat.z * quat.z);
@@ -291,6 +313,43 @@ private:
     SteeringModelConfig config_;
 };
 
+// Linear / bilinear tangent steering: tan(elevation) is linear (or quadratic,
+// "bilinear") in phase time. Azimuth still comes from the azimuth poly.
+class LinearTangentSteeringModel final : public ISteeringModel {
+public:
+    LinearTangentSteeringModel(SteeringModelConfig config, bool bilinear)
+        : config_(std::move(config))
+        , bilinear_(bilinear)
+    {
+    }
+
+    Vec3 thrust_direction_eci(
+        double time_s,
+        const State& state,
+        const post2::vehicle::VehicleRuntimeState&,
+        const PhaseContext&) const override
+    {
+        constexpr double kRadToDeg = 57.295779513082320876798154814105;
+        const LinearTangentConfig& t = config_.tangent;
+        const double dt = time_s + t.t_offset_s;
+        double tan_value;
+        if (bilinear_) {
+            const double a_value = t.a + t.a_dot * dt;
+            const double b_value = t.b + t.b_dot * dt;
+            tan_value = a_value * dt + b_value;
+        } else {
+            tan_value = t.a * dt + t.b;
+        }
+        const double elevation_deg = std::atan(tan_value) * kRadToDeg;
+        const double azimuth_deg = evaluate_poly(config_.azimuth_deg, time_s);
+        return direction_from_azimuth_elevation_deg(state, azimuth_deg, elevation_deg);
+    }
+
+private:
+    SteeringModelConfig config_;
+    bool bilinear_ = false;
+};
+
 class QuatInterpSteeringModel final : public ISteeringModel {
 public:
     explicit QuatInterpSteeringModel(SteeringModelConfig config)
@@ -369,6 +428,63 @@ private:
     std::vector<Segment> segments_;
 };
 
+void apply_steering_continuity(SteeringModelConfig* steering, const AzimuthElevationDeg& angles)
+{
+    const std::string type = lowercase(steering->type);
+    if (type == "rpy_poly" || type == "roll_pitch_yaw_poly") {
+        // yaw maps to azimuth, pitch to elevation (roll has no thrust effect).
+        if (steering->yaw_deg.continuity) {
+            steering->yaw_deg.c0 = angles.azimuth_deg;
+        }
+        if (steering->pitch_deg.continuity) {
+            steering->pitch_deg.c0 = angles.elevation_deg;
+        }
+        return;
+    }
+    if (type == "generic_selectable" || type == "selectable") {
+        for (auto& segment : steering->segments) {
+            if (segment.model) {
+                apply_steering_continuity(segment.model.get(), angles);
+            }
+        }
+        return;
+    }
+    if (type == "linear_tangent" || type == "bilinear_tangent") {
+        // Re-anchor the tangent intercept b = tan(boundary elevation) so the
+        // pitch law continues from the previous phase's final attitude
+        // (KSPTOT setBForContinuity). Azimuth re-anchors via its poly c0.
+        if (steering->tangent.continuity) {
+            steering->tangent.b = std::tan(degrees_to_radians(angles.elevation_deg));
+        }
+        if (steering->azimuth_deg.continuity) {
+            steering->azimuth_deg.c0 = angles.azimuth_deg;
+        }
+        return;
+    }
+    // generic_poly (default) and any poly-style fallback.
+    if (steering->azimuth_deg.continuity) {
+        steering->azimuth_deg.c0 = angles.azimuth_deg;
+    }
+    if (steering->elevation_deg.continuity) {
+        steering->elevation_deg.c0 = angles.elevation_deg;
+    }
+}
+
+bool steering_has_continuity(const SteeringModelConfig& steering)
+{
+    if (steering.roll_deg.continuity || steering.pitch_deg.continuity ||
+        steering.yaw_deg.continuity || steering.azimuth_deg.continuity ||
+        steering.elevation_deg.continuity || steering.tangent.continuity) {
+        return true;
+    }
+    for (const auto& segment : steering.segments) {
+        if (segment.model && steering_has_continuity(*segment.model)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 } // namespace
 
 double clamp_throttle(double value)
@@ -403,7 +519,56 @@ std::unique_ptr<ISteeringModel> make_steering_model(const SteeringModelConfig& c
     if (type == "generic_selectable" || type == "selectable") {
         return std::make_unique<SelectableSteeringModel>(config);
     }
+    if (type == "linear_tangent") {
+        return std::make_unique<LinearTangentSteeringModel>(config, /*bilinear=*/false);
+    }
+    if (type == "bilinear_tangent") {
+        return std::make_unique<LinearTangentSteeringModel>(config, /*bilinear=*/true);
+    }
     return std::make_unique<GenericPolySteeringModel>(config);
+}
+
+void apply_phase_start_continuity(
+    PhaseConfig* phase,
+    const CaseConfig& case_config,
+    const post2::vehicle::VehicleRuntimeState& start_runtime,
+    double boundary_throttle,
+    const Vec3& boundary_direction_eci)
+{
+    if (!phase) {
+        return;
+    }
+
+    // Throttle: re-anchor so the new phase opens at the previous phase's final
+    // throttle. Each model type expresses that hold differently.
+    ThrottleModelConfig& throttle = phase->throttle_model;
+    if (throttle.continuity) {
+        const double held = clamp_throttle(boundary_throttle);
+        const std::string type = lowercase(throttle.type);
+        if (type == "t2w" || type == "target_t2w") {
+            const double max_thrust_n =
+                post2::vehicle::active_max_thrust_n(case_config.vehicle, start_runtime);
+            const double mass_kg = start_runtime.vehicle.total_mass_kg;
+            if (max_thrust_n > 0.0 && mass_kg > 0.0) {
+                throttle.target_t2w = held * max_thrust_n / (mass_kg * kStandardGravityMps2);
+            }
+        } else if (type == "interpolated" || type == "tabular") {
+            if (!throttle.points.empty()) {
+                throttle.points.front().throttle = held;
+            }
+        } else {
+            // poly (default): the constant term is the value at phase t=0.
+            throttle.c0 = held;
+        }
+    }
+
+    // Steering: re-anchor enabled angle constant terms to the local
+    // azimuth/elevation of the previous phase's final thrust direction.
+    if (steering_has_continuity(phase->steering_model)) {
+        const AzimuthElevationDeg angles =
+            azimuth_elevation_from_direction(start_runtime.vehicle.motion, boundary_direction_eci);
+        apply_steering_continuity(&phase->steering_model, angles);
+    }
 }
 
 } // namespace post2::core

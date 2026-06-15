@@ -58,6 +58,7 @@ JsonValue poly_to_json(const Poly2Config& poly)
         {"c0", number(poly.c0)},
         {"c1", number(poly.c1)},
         {"c2", number(poly.c2)},
+        {"continuity", boolean(poly.continuity)},
     });
 }
 
@@ -254,7 +255,20 @@ JsonValue throttle_to_json(const ThrottleModelConfig& throttle)
         {"c1", number(throttle.c1)},
         {"c2", number(throttle.c2)},
         {"target_t2w", number(throttle.target_t2w)},
+        {"continuity", boolean(throttle.continuity)},
         {"points", JsonValue::array(std::move(points))},
+    });
+}
+
+JsonValue tangent_to_json(const LinearTangentConfig& tangent)
+{
+    return JsonValue::object({
+        {"a", number(tangent.a)},
+        {"a_dot", number(tangent.a_dot)},
+        {"b", number(tangent.b)},
+        {"b_dot", number(tangent.b_dot)},
+        {"t_offset_s", number(tangent.t_offset_s)},
+        {"continuity", boolean(tangent.continuity)},
     });
 }
 
@@ -283,6 +297,7 @@ JsonValue steering_to_json(const SteeringModelConfig& steering)
         {"yaw", poly_to_json(steering.yaw_deg)},
         {"azimuth", poly_to_json(steering.azimuth_deg)},
         {"elevation", poly_to_json(steering.elevation_deg)},
+        {"tangent", tangent_to_json(steering.tangent)},
         {"fixed_direction_eci", vec3_to_json(steering.fixed_direction_eci)},
         {"points", JsonValue::array(std::move(points))},
         {"segments", JsonValue::array(std::move(segments))},
@@ -585,7 +600,8 @@ bool parse_poly(const JsonValue& value, Poly2Config* target, std::string* error)
     Poly2Config parsed = *target;
     if (!read_number(value, "c0", &parsed.c0, error) ||
         !read_number(value, "c1", &parsed.c1, error) ||
-        !read_number(value, "c2", &parsed.c2, error)) {
+        !read_number(value, "c2", &parsed.c2, error) ||
+        !read_bool(value, "continuity", &parsed.continuity, error)) {
         return false;
     }
     *target = parsed;
@@ -596,6 +612,30 @@ bool read_poly(const JsonValue& object, const char* key, Poly2Config* target, st
 {
     const JsonValue* value = find_member(object, key);
     return !value || parse_poly(*value, target, error);
+}
+
+bool parse_tangent(const JsonValue& value, LinearTangentConfig* target, std::string* error)
+{
+    if (!value.is_object()) {
+        return fail(error, "steering_model.tangent must be an object");
+    }
+    LinearTangentConfig parsed = *target;
+    if (!read_number(value, "a", &parsed.a, error) ||
+        !read_number(value, "a_dot", &parsed.a_dot, error) ||
+        !read_number(value, "b", &parsed.b, error) ||
+        !read_number(value, "b_dot", &parsed.b_dot, error) ||
+        !read_number(value, "t_offset_s", &parsed.t_offset_s, error) ||
+        !read_bool(value, "continuity", &parsed.continuity, error)) {
+        return false;
+    }
+    *target = parsed;
+    return true;
+}
+
+bool read_tangent(const JsonValue& object, const char* key, LinearTangentConfig* target, std::string* error)
+{
+    const JsonValue* value = find_member(object, key);
+    return !value || parse_tangent(*value, target, error);
 }
 
 bool parse_gravity_model(const JsonValue& value, GravityModelConfig* target, std::string* error)
@@ -941,7 +981,8 @@ bool parse_throttle(const JsonValue& value, ThrottleModelConfig* target, std::st
         !read_number(value, "c0", &parsed.c0, error) ||
         !read_number(value, "c1", &parsed.c1, error) ||
         !read_number(value, "c2", &parsed.c2, error) ||
-        !read_number(value, "target_t2w", &parsed.target_t2w, error)) {
+        !read_number(value, "target_t2w", &parsed.target_t2w, error) ||
+        !read_bool(value, "continuity", &parsed.continuity, error)) {
         return false;
     }
 
@@ -979,6 +1020,7 @@ bool parse_steering(const JsonValue& value, SteeringModelConfig* target, std::st
         !read_poly(value, "yaw", &parsed.yaw_deg, error) ||
         !read_poly(value, "azimuth", &parsed.azimuth_deg, error) ||
         !read_poly(value, "elevation", &parsed.elevation_deg, error) ||
+        !read_tangent(value, "tangent", &parsed.tangent, error) ||
         !read_vec3(value, "fixed_direction_eci", &parsed.fixed_direction_eci, error)) {
         return false;
     }
@@ -1226,7 +1268,11 @@ bool parse_trigger_condition(const JsonValue& value, TriggerCondition* target, s
         parsed.type != "altitude_m" &&
         parsed.type != "velocity_mps" &&
         parsed.type != "total_mass_kg" &&
-        parsed.type != "propellant_mass_kg") {
+        parsed.type != "propellant_mass_kg" &&
+        parsed.type != "apoapsis_altitude_m" &&
+        parsed.type != "periapsis_altitude_m" &&
+        parsed.type != "orbital_energy" &&
+        parsed.type != "sma_m") {
         return fail(error, "trigger.type unrecognised: " + parsed.type);
     }
     if (parsed.comparison != ">=" && parsed.comparison != "<=") {

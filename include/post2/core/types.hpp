@@ -113,6 +113,9 @@ struct Poly2Config {
     double c0 = 0.0;
     double c1 = 0.0;
     double c2 = 0.0;
+    // When true, at a phase transition the constant term c0 is overwritten so
+    // this angle continues smoothly from the previous phase's final attitude.
+    bool continuity = false;
 };
 
 struct ThrottlePoint {
@@ -126,6 +129,11 @@ struct ThrottleModelConfig {
     double c1 = 0.0;
     double c2 = 0.0;
     double target_t2w = 1.0;
+    // When true, at a phase transition the model is re-anchored so throttle
+    // continues from the previous phase's final value: poly sets c0, the
+    // interpolated model sets its first point, and the T/W model sets the
+    // target ratio to the previous state's actual thrust-to-weight.
+    bool continuity = false;
     std::vector<ThrottlePoint> points;
 };
 
@@ -139,6 +147,24 @@ struct Quaternion {
 struct QuaternionPoint {
     double time_s = 0.0;
     Quaternion quat;
+};
+
+// Linear / bilinear tangent steering (the vacuum-optimal pitch law). The
+// elevation angle follows tan(elevation) = a_value*dt + b_value, with
+// a_value = a + a_dot*dt and b_value = b + b_dot*dt (KSPTOT LinearTangentModel),
+// where dt = phase_time_s + t_offset_s. "linear_tangent" holds a_dot = b_dot = 0
+// (tan linear in time); "bilinear_tangent" uses the full quadratic-in-tan form.
+// Azimuth is still taken from azimuth_deg (a poly). Cannot represent a vertical
+// (90 deg) elevation, so it belongs on the pitched-over upper-stage phases.
+struct LinearTangentConfig {
+    double a = 0.0;
+    double a_dot = 0.0;
+    double b = 0.0;
+    double b_dot = 0.0;
+    double t_offset_s = 0.0;
+    // When true, b is re-anchored at a phase boundary to tan(previous final
+    // elevation) so the pitch law continues smoothly (KSPTOT setBForContinuity).
+    bool continuity = false;
 };
 
 struct SteeringModelConfig;
@@ -155,6 +181,7 @@ struct SteeringModelConfig {
     Poly2Config yaw_deg;
     Poly2Config azimuth_deg;
     Poly2Config elevation_deg;
+    LinearTangentConfig tangent;
     Vec3 fixed_direction_eci = {1.0, 0.0, 0.0};
     std::vector<QuaternionPoint> points;
     std::vector<SelectableSteeringSegment> segments;

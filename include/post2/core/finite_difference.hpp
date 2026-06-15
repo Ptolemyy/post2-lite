@@ -19,6 +19,14 @@ struct FiniteDifferenceOptions {
     FiniteDifferenceMode mode = FiniteDifferenceMode::Auto;
     double step_fraction = 0.01;
     bool parallel = true;
+    // Per-variable starting step fraction in z-space. When non-empty and
+    // sized to the number of NLP variables, each variable's first probe is
+    // queued at this fraction (still subject to bounds clamping). Empty
+    // means "use step_fraction uniformly". Used to carry per-variable
+    // adaptation across SQP iterations: variables whose probes repeatedly
+    // crash the simulator get shrunk hints so subsequent iterations don't
+    // re-waste the doomed nominal-h probe.
+    std::vector<double> step_fraction_per_variable;
 };
 
 struct FiniteDifferenceResult {
@@ -35,6 +43,11 @@ struct NlpDerivativeResult {
     std::vector<std::vector<double>> J_eq;
     std::vector<std::vector<double>> J_ineq;
     std::vector<std::string> messages;
+    // Per-variable effective step (z-space) of the probe that actually
+    // contributed to the derivative. 0.0 means no usable probe. Caller uses
+    // this to seed step_fraction_per_variable for the next FD call so the
+    // adaptive shrinkage is carried across SQP iterations.
+    std::vector<double> used_step_per_variable;
 };
 
 const char* finite_difference_mode_name(FiniteDifferenceMode mode);

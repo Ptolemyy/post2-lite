@@ -133,6 +133,14 @@ bool is_poly_throttle(const PhaseConfig& phase)
     return lowercase(phase.throttle_model.type) == "poly";
 }
 
+bool is_nonzero_poly(const Poly2Config& poly)
+{
+    constexpr double kCoeffEpsilon = 1.0e-12;
+    return std::abs(poly.c0) > kCoeffEpsilon ||
+        std::abs(poly.c1) > kCoeffEpsilon ||
+        std::abs(poly.c2) > kCoeffEpsilon;
+}
+
 bool detached_stage_since(
     const LaunchVehicleStateLogEntry& previous,
     const LaunchVehicleStateLogEntry& current)
@@ -224,6 +232,7 @@ std::string kos_trajectory_to_csv(const StateLog& state_log, const CaseConfig& c
         const Poly2Config azimuth = steering_poly_available ? phase->steering_model.azimuth_deg : Poly2Config{};
         const Poly2Config elevation = steering_poly_available ? phase->steering_model.elevation_deg : Poly2Config{};
         const Poly2Config roll = steering_poly_available ? phase->steering_model.roll_deg : Poly2Config{};
+        const bool roll_poly_available = steering_poly_available && is_nonzero_poly(roll);
 
         const bool throttle_poly_available = phase && is_poly_throttle(*phase);
         double throttle_c0 = 0.0;
@@ -257,7 +266,7 @@ std::string kos_trajectory_to_csv(const StateLog& state_log, const CaseConfig& c
             << ',' << elevation.c0
             << ',' << elevation.c1
             << ',' << elevation.c2
-            << ',' << (steering_poly_available ? 1 : 0)
+            << ',' << (roll_poly_available ? 1 : 0)
             << ',' << roll.c0
             << ',' << roll.c1
             << ',' << roll.c2
@@ -408,7 +417,11 @@ bool write_kos_csv_file(
     return true;
 }
 
-bool write_svg_file(const std::string& path, const StateLog& state_log, std::string* error)
+bool write_svg_file(
+    const std::string& path,
+    const StateLog& state_log,
+    const StateLog* predicted_orbit,
+    std::string* error)
 {
     if (state_log.empty()) {
         if (error) {
@@ -425,13 +438,21 @@ bool write_svg_file(const std::string& path, const StateLog& state_log, std::str
         return false;
     }
 
+    const bool has_predicted = predicted_orbit && !predicted_orbit->empty();
+
     constexpr int width = 1000;
     constexpr int height = 760;
     constexpr double margin = 70.0;
     const double center_x = width * 0.5;
     const double center_y = height * 0.52;
     const OrbitPlaneProjector projector = make_orbit_plane_projector(state_log);
-    const double scale = (std::min(width, height) * 0.5 - margin) / max_abs_projected_xy(state_log, projector);
+    // The predicted orbit reaches the far side of Earth, so the drawing must
+    // scale to whichever extent is larger (ascent or full orbit).
+    double extent_m = max_abs_projected_xy(state_log, projector);
+    if (has_predicted) {
+        extent_m = std::max(extent_m, max_abs_projected_xy(*predicted_orbit, projector));
+    }
+    const double scale = (std::min(width, height) * 0.5 - margin) / extent_m;
     const double earth_radius_px = kEarthRadiusM * scale;
 
     output << std::fixed << std::setprecision(3);
@@ -444,6 +465,20 @@ bool write_svg_file(const std::string& path, const StateLog& state_log, std::str
            << "\" y2=\"" << height - margin << "\" stroke=\"#cbd5e1\" stroke-width=\"1\"/>\n";
     output << "<circle cx=\"" << center_x << "\" cy=\"" << center_y << "\" r=\"" << earth_radius_px
            << "\" fill=\"#2563eb\" opacity=\"0.22\" stroke=\"#1d4ed8\" stroke-width=\"2\"/>\n";
+
+    // Integrated predicted orbit (drawn behind the ascent), in teal and dashed
+    // to set it apart from the solid red powered ascent.
+    if (has_predicted) {
+        output << "<polyline fill=\"none\" stroke=\"#0d9488\" stroke-width=\"2\" "
+                  "stroke-dasharray=\"7 5\" points=\"";
+        for (const auto& point : predicted_orbit->entries()) {
+            const PlanePoint projected = projector.project(point.state.position_m);
+            output << sx(projected.x_m, scale, center_x) << ','
+                   << sy(projected.y_m, scale, center_y) << ' ';
+        }
+        output << "\"/>\n";
+    }
+
     output << "<polyline fill=\"none\" stroke=\"#dc2626\" stroke-width=\"2.5\" points=\"";
 
     for (const auto& point : state_log.entries()) {
@@ -464,6 +499,40 @@ bool write_svg_file(const std::string& path, const StateLog& state_log, std::str
            << "\" cy=\"" << sy(projected_last.y_m, scale, center_y)
            << "\" r=\"5\" fill=\"#111827\"/>\n";
 
+    // Apoapsis / periapsis = the max / min geodetic-altitude points of the
+    // integrated predicted orbit, marked with labels.
+    double apoapsis_km = 0.0;
+    double periapsis_km = 0.0;
+    if (has_predicted) {
+        const LaunchVehicleStateLogEntry* apo = nullptr;
+        const LaunchVehicleStateLogEntry* peri = nullptr;
+        for (const auto& point : predicted_orbit->entries()) {
+            if (!apo || point.altitude_m > apo->altitude_m) {
+                apo = &point;
+            }
+            if (!peri || point.altitude_m < peri->altitude_m) {
+                peri = &point;
+            }
+        }
+        if (apo && peri) {
+            apoapsis_km = apo->altitude_m / 1000.0;
+            periapsis_km = peri->altitude_m / 1000.0;
+            auto mark = [&](const LaunchVehicleStateLogEntry& e, const char* fill, const char* label) {
+                const PlanePoint p = projector.project(e.state.position_m);
+                const double px = sx(p.x_m, scale, center_x);
+                const double py = sy(p.y_m, scale, center_y);
+                output << "<circle cx=\"" << px << "\" cy=\"" << py << "\" r=\"6\" fill=\""
+                       << fill << "\" stroke=\"#ffffff\" stroke-width=\"1.5\"/>\n";
+                output << "<text x=\"" << px + 9.0 << "\" y=\"" << py - 8.0
+                       << "\" fill=\"" << fill
+                       << "\" font-family=\"Segoe UI, Arial\" font-size=\"16\" font-weight=\"bold\">"
+                       << label << "</text>\n";
+            };
+            mark(*apo, "#2563eb", "A");
+            mark(*peri, "#db2777", "P");
+        }
+    }
+
     output << "<text x=\"32\" y=\"40\" fill=\"#0f172a\" font-family=\"Segoe UI, Arial\" font-size=\"22\">POST2 Lite trajectory</text>\n";
     output << "<text x=\"32\" y=\"70\" fill=\"#475569\" font-family=\"Segoe UI, Arial\" font-size=\"14\">"
            << "state log entries: " << state_log.size()
@@ -471,6 +540,11 @@ bool write_svg_file(const std::string& path, const StateLog& state_log, std::str
            << " s | end altitude: " << last.altitude_m / 1000.0
            << " km | end speed: " << last.speed_mps
            << " m/s</text>\n";
+    if (has_predicted) {
+        output << "<text x=\"32\" y=\"92\" fill=\"#0d9488\" font-family=\"Segoe UI, Arial\" font-size=\"14\">"
+               << "predicted orbit (integrated)  |  A apoapsis: " << apoapsis_km
+               << " km  |  P periapsis: " << periapsis_km << " km</text>\n";
+    }
     output << "</svg>\n";
 
     return true;

@@ -286,6 +286,16 @@ struct NumericBindingRow {
 };
 
 std::vector<NumericBindingRow> g_phase_numeric_rows;
+
+// Phase-boundary continuity checkboxes. Bound to bool paths ending in
+// `.continuity` (steering angle polys and the throttle model) and round-tripped
+// through read/write_optimization_flag like the numeric rows above.
+struct ContinuityBindingRow {
+    std::string path;
+    HWND check = nullptr;
+};
+
+std::vector<ContinuityBindingRow> g_phase_continuity_rows;
 int g_phase_scroll_pos = 0;
 int g_phase_scroll_content_height = 0;
 int g_phase_scroll_page_height = 0;
@@ -343,6 +353,7 @@ void clear_phase_editor_handles()
     g_phase_action_stage = nullptr;
     g_phase_scroll_pane = nullptr;
     g_phase_numeric_rows.clear();
+    g_phase_continuity_rows.clear();
     g_phase_scroll_pos = 0;
     g_phase_scroll_content_height = 0;
     g_phase_scroll_page_height = 0;
@@ -5038,6 +5049,46 @@ void scroll_phase_pane_to(int new_pos)
     UpdateWindow(g_phase_scroll_pane);
 }
 
+// A continuity-held coefficient is determined at runtime from the previous
+// phase, so optimizing it is a no-op. When continuity is enabled we therefore
+// grey out (and clear) the Opt/Min/Max controls of the governed c0 row.
+void update_opt_state_for_continuity_row(const ContinuityBindingRow& crow)
+{
+    static const std::string suffix = ".continuity";
+    if (!crow.check ||
+        crow.path.size() <= suffix.size() ||
+        crow.path.compare(crow.path.size() - suffix.size(), suffix.size(), suffix) != 0) {
+        return;
+    }
+    const std::string c0_path = crow.path.substr(0, crow.path.size() - suffix.size()) + ".c0";
+    const bool continuity_on = Button_GetCheck(crow.check) == BST_CHECKED;
+    for (const auto& row : g_phase_numeric_rows) {
+        if (row.path != c0_path) {
+            continue;
+        }
+        EnableWindow(row.opt_check, continuity_on ? FALSE : TRUE);
+        EnableWindow(row.min_edit, continuity_on ? FALSE : TRUE);
+        EnableWindow(row.max_edit, continuity_on ? FALSE : TRUE);
+        if (continuity_on) {
+            Button_SetCheck(row.opt_check, BST_UNCHECKED);
+        }
+        break;
+    }
+}
+
+// Returns true (and re-applies the opt greying) if `control` is a continuity
+// checkbox, so the scroll-pane proc can treat the click as fully handled.
+bool handle_continuity_opt_toggle(HWND control)
+{
+    for (const auto& crow : g_phase_continuity_rows) {
+        if (crow.check == control) {
+            update_opt_state_for_continuity_row(crow);
+            return true;
+        }
+    }
+    return false;
+}
+
 LRESULT CALLBACK phase_scroll_pane_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam)
 {
     // Forward control notifications to the dialog window so the editor's
@@ -5045,6 +5096,10 @@ LRESULT CALLBACK phase_scroll_pane_proc(HWND hwnd, UINT message, WPARAM wparam, 
     // etc.) sees them. lparam != 0 distinguishes control notifications from
     // menu/accelerator commands; we only forward the former.
     if (message == WM_COMMAND && lparam != 0) {
+        if (HIWORD(wparam) == BN_CLICKED &&
+            handle_continuity_opt_toggle(reinterpret_cast<HWND>(lparam))) {
+            return 0;
+        }
         HWND parent = GetParent(hwnd);
         if (parent) {
             return SendMessageW(parent, message, wparam, lparam);
@@ -5127,17 +5182,33 @@ NumericBindingRow add_phase_numeric_row(
     return row;
 }
 
+// Places a phase-boundary continuity checkbox to the right of a coefficient row
+// (at vertical position row_y, the y of the relevant c0 row) and records its
+// bool path so load/apply can round-trip it.
+void add_phase_continuity_check(HWND parent, int row_y, const std::string& path, HFONT font)
+{
+    ContinuityBindingRow row;
+    row.path = path;
+    row.check = create_dynamic_checkbox(parent, 662, row_y + 1, 44, L"Cont", font);
+    g_phase_continuity_rows.push_back(row);
+}
+
 void add_phase_poly_rows(
     HWND parent,
     int* y,
     const std::string& label,
     const std::string& path,
     const post2::core::Poly2Config& poly,
-    HFONT font)
+    HFONT font,
+    bool with_continuity = false)
 {
+    const int c0_y = *y;
     add_phase_numeric_row(parent, y, label + " c0", path + ".c0", poly.c0, font);
     add_phase_numeric_row(parent, y, label + " c1", path + ".c1", poly.c1, font);
     add_phase_numeric_row(parent, y, label + " c2", path + ".c2", poly.c2, font);
+    if (with_continuity) {
+        add_phase_continuity_check(parent, c0_y, path + ".continuity", font);
+    }
 }
 
 void add_phase_throttle_rows(
@@ -5149,6 +5220,7 @@ void add_phase_throttle_rows(
 {
     NumericBindingRow row = add_phase_numeric_row(parent, y, "Throttle c0", path + ".c0", throttle.c0, font);
     g_phase_throttle_c0 = row.value_edit;
+    add_phase_continuity_check(parent, *y - 34, path + ".continuity", font);
     row = add_phase_numeric_row(parent, y, "Throttle c1", path + ".c1", throttle.c1, font);
     g_phase_throttle_c1 = row.value_edit;
     row = add_phase_numeric_row(parent, y, "Throttle c2", path + ".c2", throttle.c2, font);
@@ -5173,21 +5245,35 @@ void add_phase_steering_rows(
     HFONT font)
 {
     add_phase_poly_rows(parent, y, label_prefix + "Roll", path + ".roll", steering.roll_deg, font);
-    add_phase_poly_rows(parent, y, label_prefix + "Pitch", path + ".pitch", steering.pitch_deg, font);
-    add_phase_poly_rows(parent, y, label_prefix + "Yaw", path + ".yaw", steering.yaw_deg, font);
+    add_phase_poly_rows(parent, y, label_prefix + "Pitch", path + ".pitch", steering.pitch_deg, font, true);
+    add_phase_poly_rows(parent, y, label_prefix + "Yaw", path + ".yaw", steering.yaw_deg, font, true);
+    const int azimuth_c0_y = *y;
     NumericBindingRow row =
         add_phase_numeric_row(parent, y, label_prefix + "Azimuth c0", path + ".azimuth.c0", steering.azimuth_deg.c0, font);
     if (label_prefix.empty()) {
         g_phase_steering_azimuth = row.value_edit;
     }
+    add_phase_continuity_check(parent, azimuth_c0_y, path + ".azimuth.continuity", font);
     add_phase_numeric_row(parent, y, label_prefix + "Azimuth c1", path + ".azimuth.c1", steering.azimuth_deg.c1, font);
     add_phase_numeric_row(parent, y, label_prefix + "Azimuth c2", path + ".azimuth.c2", steering.azimuth_deg.c2, font);
+    const int elevation_c0_y = *y;
     row = add_phase_numeric_row(parent, y, label_prefix + "Elevation c0", path + ".elevation.c0", steering.elevation_deg.c0, font);
     if (label_prefix.empty()) {
         g_phase_steering_elevation = row.value_edit;
     }
+    add_phase_continuity_check(parent, elevation_c0_y, path + ".elevation.continuity", font);
     add_phase_numeric_row(parent, y, label_prefix + "Elevation c1", path + ".elevation.c1", steering.elevation_deg.c1, font);
     add_phase_numeric_row(parent, y, label_prefix + "Elevation c2", path + ".elevation.c2", steering.elevation_deg.c2, font);
+
+    // Linear/bilinear tangent steering coefficients (tan(elevation) = a*dt + b,
+    // with a_dot/b_dot adding the bilinear time-variation). Continuity anchors b.
+    add_phase_numeric_row(parent, y, label_prefix + "Tangent a", path + ".tangent.a", steering.tangent.a, font);
+    add_phase_numeric_row(parent, y, label_prefix + "Tangent a_dot", path + ".tangent.a_dot", steering.tangent.a_dot, font);
+    const int tangent_b_y = *y;
+    add_phase_numeric_row(parent, y, label_prefix + "Tangent b", path + ".tangent.b", steering.tangent.b, font);
+    add_phase_continuity_check(parent, tangent_b_y, path + ".tangent.continuity", font);
+    add_phase_numeric_row(parent, y, label_prefix + "Tangent b_dot", path + ".tangent.b_dot", steering.tangent.b_dot, font);
+    add_phase_numeric_row(parent, y, label_prefix + "Tangent t_offset", path + ".tangent.t_offset_s", steering.tangent.t_offset_s, font);
 
     add_phase_numeric_row(parent, y, label_prefix + "Fixed ECI x", path + ".fixed_direction_eci.x", steering.fixed_direction_eci.x, font);
     add_phase_numeric_row(parent, y, label_prefix + "Fixed ECI y", path + ".fixed_direction_eci.y", steering.fixed_direction_eci.y, font);
@@ -5227,6 +5313,20 @@ void load_phase_numeric_rows_from_case()
         if (post2::core::read_optimization_variable(g_case, row.path, &value, &error)) {
             load_numeric_binding_row(row, g_case.optimization, value);
         }
+    }
+}
+
+void load_phase_continuity_rows_from_case()
+{
+    for (const auto& row : g_phase_continuity_rows) {
+        bool value = false;
+        std::string error;
+        if (post2::core::read_optimization_flag(g_case, row.path, &value, &error)) {
+            Button_SetCheck(row.check, value ? BST_CHECKED : BST_UNCHECKED);
+        }
+        // Reflect the loaded continuity state in the governed c0 row's Opt/Min/
+        // Max enablement (must run after load_phase_numeric_rows_from_case).
+        update_opt_state_for_continuity_row(row);
     }
 }
 
@@ -5274,6 +5374,7 @@ void load_selected_phase_controls()
     select_combo_text(g_phase_throttle_type, phase->throttle_model.type);
     select_combo_text(g_phase_steering_type, phase->steering_model.type);
     load_phase_numeric_rows_from_case();
+    load_phase_continuity_rows_from_case();
     refresh_action_list();
     load_selected_action_controls();
 }
@@ -5334,6 +5435,12 @@ bool apply_phase_controls(HWND hwnd)
         if (!apply_numeric_variable_controls(hwnd, row, value, &candidate.optimization, L"Phase")) {
             return false;
         }
+    }
+
+    for (const auto& row : g_phase_continuity_rows) {
+        const bool flag_value = Button_GetCheck(row.check) == BST_CHECKED;
+        std::string flag_error;
+        post2::core::write_optimization_flag(&candidate, row.path, flag_value, &flag_error);
     }
 
     const auto& final_phase = candidate.phases[static_cast<std::size_t>(g_selected_phase_index)];
@@ -5468,6 +5575,8 @@ void create_phase_editor_controls(HWND hwnd)
     add_combo_item(g_phase_steering_type, L"fixed_eci");
     add_combo_item(g_phase_steering_type, L"generic_quat_interp");
     add_combo_item(g_phase_steering_type, L"generic_selectable");
+    add_combo_item(g_phase_steering_type, L"linear_tangent");
+    add_combo_item(g_phase_steering_type, L"bilinear_tangent");
     y += 38;
     add_phase_steering_rows(g_phase_scroll_pane, &y, phase->steering_model, prefix + ".steering_model", "", font);
 

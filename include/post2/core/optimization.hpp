@@ -24,6 +24,20 @@ bool write_optimization_variable(
     double value,
     std::string* error);
 
+// Boolean-flag counterparts of the numeric accessors above. Resolve paths that
+// end in a bool field (currently `...continuity`) and read/write it.
+bool read_optimization_flag(
+    const CaseConfig& config,
+    const std::string& path,
+    bool* value,
+    std::string* error);
+
+bool write_optimization_flag(
+    CaseConfig* config,
+    const std::string& path,
+    bool value,
+    std::string* error);
+
 OptimizationResult optimize_case(
     CaseConfig* config,
     ITrajectoryService& service,
