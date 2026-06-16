@@ -10,6 +10,7 @@
 #include <limits>
 #include <sstream>
 #include <string>
+#include <vector>
 
 namespace post2::core {
 
@@ -133,6 +134,121 @@ bool is_poly_throttle(const PhaseConfig& phase)
     return lowercase(phase.throttle_model.type) == "poly";
 }
 
+bool is_segmented_poly_type(const std::string& type)
+{
+    const std::string normalized = lowercase(type);
+    return normalized == "segmented_poly" ||
+        normalized == "generic_segmented_poly" ||
+        normalized == "piecewise_poly";
+}
+
+double coefficient_or_zero(const std::vector<double>& coefficients, std::size_t index)
+{
+    return index < coefficients.size() ? coefficients[index] : 0.0;
+}
+
+Poly2Config coefficients_to_phase_poly2(
+    const std::vector<double>& coefficients,
+    double segment_start_time_s)
+{
+    const double a0 = coefficient_or_zero(coefficients, 0);
+    const double a1 = coefficient_or_zero(coefficients, 1);
+    const double a2 = coefficient_or_zero(coefficients, 2);
+    Poly2Config out;
+    out.c0 = a0 - a1 * segment_start_time_s + a2 * segment_start_time_s * segment_start_time_s;
+    out.c1 = a1 - 2.0 * a2 * segment_start_time_s;
+    out.c2 = a2;
+    return out;
+}
+
+const SegmentedPolySegmentConfig* selected_segment(
+    const std::vector<SegmentedPolySegmentConfig>& segments,
+    double phase_time_s)
+{
+    if (segments.empty()) {
+        return nullptr;
+    }
+    const auto* selected = &segments.front();
+    for (const auto& segment : segments) {
+        if (phase_time_s >= segment.start_time_s) {
+            selected = &segment;
+        }
+    }
+    return selected;
+}
+
+const SegmentedSteeringPolySegmentConfig* selected_segment(
+    const std::vector<SegmentedSteeringPolySegmentConfig>& segments,
+    double phase_time_s)
+{
+    if (segments.empty()) {
+        return nullptr;
+    }
+    const auto* selected = &segments.front();
+    for (const auto& segment : segments) {
+        if (phase_time_s >= segment.start_time_s) {
+            selected = &segment;
+        }
+    }
+    return selected;
+}
+
+bool steering_poly_for_time(
+    const PhaseConfig& phase,
+    double phase_time_s,
+    Poly2Config* azimuth,
+    Poly2Config* elevation,
+    Poly2Config* roll)
+{
+    if (is_generic_poly_steering(phase)) {
+        *azimuth = phase.steering_model.azimuth_deg;
+        *elevation = phase.steering_model.elevation_deg;
+        *roll = phase.steering_model.roll_deg;
+        return true;
+    }
+    if (is_segmented_poly_type(phase.steering_model.type)) {
+        const auto* segment = selected_segment(
+            phase.steering_model.segmented_poly.segments,
+            phase_time_s);
+        if (!segment) {
+            return false;
+        }
+        *azimuth = coefficients_to_phase_poly2(
+            segment->azimuth_coefficients,
+            segment->start_time_s);
+        *elevation = coefficients_to_phase_poly2(
+            segment->elevation_coefficients,
+            segment->start_time_s);
+        *roll = {};
+        return true;
+    }
+    return false;
+}
+
+bool throttle_poly_for_time(
+    const PhaseConfig& phase,
+    double phase_time_s,
+    Poly2Config* throttle)
+{
+    if (is_poly_throttle(phase)) {
+        throttle->c0 = phase.throttle_model.c0;
+        throttle->c1 = phase.throttle_model.c1;
+        throttle->c2 = phase.throttle_model.c2;
+        return true;
+    }
+    if (is_segmented_poly_type(phase.throttle_model.type)) {
+        const auto* segment = selected_segment(
+            phase.throttle_model.segmented_poly.segments,
+            phase_time_s);
+        if (!segment) {
+            return false;
+        }
+        *throttle = coefficients_to_phase_poly2(segment->coefficients, segment->start_time_s);
+        return true;
+    }
+    return false;
+}
+
 bool is_nonzero_poly(const Poly2Config& poly)
 {
     constexpr double kCoeffEpsilon = 1.0e-12;
@@ -221,10 +337,12 @@ std::vector<KosNavballAttitude> compute_kos_navball_attitude(
         // Commanded azimuth from the steering program (poly steering): explicit,
         // unambiguous, and never flips past vertical.
         const PhaseConfig* phase = phase_for_point(point, case_config);
-        const bool poly_azimuth = phase && is_generic_poly_steering(*phase);
+        const double phase_t = point.time_s - phase_start_time_s(point, phase_starts);
+        Poly2Config az;
+        Poly2Config el;
+        Poly2Config roll;
+        const bool poly_azimuth = phase && steering_poly_for_time(*phase, phase_t, &az, &el, &roll);
         if (poly_azimuth) {
-            const double phase_t = point.time_s - phase_start_time_s(point, phase_starts);
-            const Poly2Config& az = phase->steering_model.azimuth_deg;
             double yaw = az.c0 + az.c1 * phase_t + az.c2 * phase_t * phase_t;
             while (yaw < 0.0) { yaw += 360.0; }
             while (yaw >= 360.0) { yaw -= 360.0; }
@@ -369,23 +487,26 @@ std::string kos_trajectory_to_csv(const StateLog& state_log, const CaseConfig& c
         const double phase_time_s = point.time_s - phase_start_s;
         const PhaseConfig* phase = phase_for_point(point, case_config);
 
-        const bool steering_poly_available = phase && is_generic_poly_steering(*phase);
-        const Poly2Config azimuth = steering_poly_available ? phase->steering_model.azimuth_deg : Poly2Config{};
-        const Poly2Config elevation = steering_poly_available ? phase->steering_model.elevation_deg : Poly2Config{};
-        const Poly2Config roll = steering_poly_available ? phase->steering_model.roll_deg : Poly2Config{};
+        Poly2Config azimuth;
+        Poly2Config elevation;
+        Poly2Config roll;
+        const bool steering_poly_available =
+            phase && steering_poly_for_time(*phase, phase_time_s, &azimuth, &elevation, &roll);
         const bool roll_poly_available = steering_poly_available && is_nonzero_poly(roll);
         const double roll_deg = roll_poly_available
             ? roll.c0 + roll.c1 * phase_time_s + roll.c2 * phase_time_s * phase_time_s
             : 0.0;
 
-        const bool throttle_poly_available = phase && is_poly_throttle(*phase);
+        Poly2Config throttle_poly;
+        const bool throttle_poly_available =
+            phase && throttle_poly_for_time(*phase, phase_time_s, &throttle_poly);
         double throttle_c0 = 0.0;
         double throttle_c1 = 0.0;
         double throttle_c2 = 0.0;
         if (throttle_poly_available) {
-            throttle_c0 = phase->throttle_model.c0;
-            throttle_c1 = phase->throttle_model.c1;
-            throttle_c2 = phase->throttle_model.c2;
+            throttle_c0 = throttle_poly.c0;
+            throttle_c1 = throttle_poly.c1;
+            throttle_c2 = throttle_poly.c2;
         }
 
         const bool stage_command = previous && detached_stage_since(*previous, point);

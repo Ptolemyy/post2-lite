@@ -9,12 +9,14 @@
 #include <memory>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace post2::core {
 
 namespace {
 
 constexpr double kStandardGravityMps2 = 9.80665;
+constexpr double kSegmentTimeEpsilonS = 1.0e-9;
 
 double clamp(double value, double low, double high)
 {
@@ -32,6 +34,40 @@ std::string lowercase(std::string text)
 double evaluate_poly(const Poly2Config& poly, double time_s)
 {
     return poly.c0 + poly.c1 * time_s + poly.c2 * time_s * time_s;
+}
+
+int sanitized_order(int order)
+{
+    return std::max(0, std::min(order, 8));
+}
+
+double evaluate_coefficients(const std::vector<double>& coefficients, double time_s, int order)
+{
+    const int usable_order = sanitized_order(order);
+    double value = 0.0;
+    double power = 1.0;
+    for (int i = 0; i <= usable_order; ++i) {
+        if (static_cast<std::size_t>(i) < coefficients.size()) {
+            value += coefficients[static_cast<std::size_t>(i)] * power;
+        }
+        power *= time_s;
+    }
+    return value;
+}
+
+std::vector<double> coefficients_from_poly(const Poly2Config& poly, int order)
+{
+    std::vector<double> coefficients(static_cast<std::size_t>(sanitized_order(order) + 1), 0.0);
+    if (!coefficients.empty()) {
+        coefficients[0] = poly.c0;
+    }
+    if (coefficients.size() > 1) {
+        coefficients[1] = poly.c1;
+    }
+    if (coefficients.size() > 2) {
+        coefficients[2] = poly.c2;
+    }
+    return coefficients;
 }
 
 double available_propellant_kg(const post2::vehicle::VehicleRuntimeState& runtime)
@@ -181,6 +217,54 @@ private:
     ThrottleModelConfig config_;
 };
 
+class ThrottleSegmentedPolyModel final : public IThrottleModel {
+public:
+    explicit ThrottleSegmentedPolyModel(ThrottleModelConfig config)
+        : order_(sanitized_order(config.segmented_poly.order))
+        , segments_(std::move(config.segmented_poly.segments))
+    {
+        if (segments_.empty()) {
+            segments_.push_back({0.0, coefficients_from_poly(
+                Poly2Config{config.c0, config.c1, config.c2, config.continuity},
+                order_)});
+        }
+        std::sort(segments_.begin(), segments_.end(), [](const auto& lhs, const auto& rhs) {
+            return lhs.start_time_s < rhs.start_time_s;
+        });
+    }
+
+    double throttle(double time_s, const post2::vehicle::VehicleRuntimeState&, const PhaseContext&) const override
+    {
+        const auto* segment = selected_segment(time_s);
+        if (!segment) {
+            return 0.0;
+        }
+        const double local_time_s = std::max(0.0, time_s - segment->start_time_s);
+        return clamp_throttle(evaluate_coefficients(
+            segment->coefficients,
+            local_time_s,
+            order_));
+    }
+
+private:
+    const SegmentedPolySegmentConfig* selected_segment(double time_s) const
+    {
+        if (segments_.empty()) {
+            return nullptr;
+        }
+        const auto* selected = &segments_.front();
+        for (const auto& segment : segments_) {
+            if (time_s + kSegmentTimeEpsilonS >= segment.start_time_s) {
+                selected = &segment;
+            }
+        }
+        return selected;
+    }
+
+    int order_ = 1;
+    std::vector<SegmentedPolySegmentConfig> segments_;
+};
+
 class T2WThrottleModel final : public IThrottleModel {
 public:
     explicit T2WThrottleModel(ThrottleModelConfig config)
@@ -312,6 +396,60 @@ public:
 
 private:
     SteeringModelConfig config_;
+};
+
+class GenericSegmentedPolySteeringModel final : public ISteeringModel {
+public:
+    explicit GenericSegmentedPolySteeringModel(SteeringModelConfig config)
+        : order_(sanitized_order(config.segmented_poly.order))
+        , segments_(std::move(config.segmented_poly.segments))
+    {
+        if (segments_.empty()) {
+            SegmentedSteeringPolySegmentConfig segment;
+            segment.start_time_s = 0.0;
+            segment.azimuth_coefficients = coefficients_from_poly(config.azimuth_deg, order_);
+            segment.elevation_coefficients = coefficients_from_poly(config.elevation_deg, order_);
+            segments_.push_back(std::move(segment));
+        }
+        std::sort(segments_.begin(), segments_.end(), [](const auto& lhs, const auto& rhs) {
+            return lhs.start_time_s < rhs.start_time_s;
+        });
+    }
+
+    Vec3 thrust_direction_eci(
+        double time_s,
+        const State& state,
+        const post2::vehicle::VehicleRuntimeState&,
+        const PhaseContext&) const override
+    {
+        const auto* segment = selected_segment(time_s);
+        if (!segment) {
+            return direction_from_azimuth_elevation_deg(state, 0.0, 0.0);
+        }
+        const double local_time_s = std::max(0.0, time_s - segment->start_time_s);
+        return direction_from_azimuth_elevation_deg(
+            state,
+            evaluate_coefficients(segment->azimuth_coefficients, local_time_s, order_),
+            evaluate_coefficients(segment->elevation_coefficients, local_time_s, order_));
+    }
+
+private:
+    const SegmentedSteeringPolySegmentConfig* selected_segment(double time_s) const
+    {
+        if (segments_.empty()) {
+            return nullptr;
+        }
+        const auto* selected = &segments_.front();
+        for (const auto& segment : segments_) {
+            if (time_s + kSegmentTimeEpsilonS >= segment.start_time_s) {
+                selected = &segment;
+            }
+        }
+        return selected;
+    }
+
+    int order_ = 1;
+    std::vector<SegmentedSteeringPolySegmentConfig> segments_;
 };
 
 // Linear / bilinear tangent steering: tan(elevation) is linear (or quadratic,
@@ -590,6 +728,28 @@ void apply_steering_continuity(SteeringModelConfig* steering, const AzimuthEleva
         // from the live state every call.
         return;
     }
+    if (type == "segmented_poly" || type == "generic_segmented_poly" || type == "piecewise_poly") {
+        auto set_c0 = [](std::vector<double>* coefficients, double value) {
+            if (coefficients->empty()) {
+                coefficients->push_back(value);
+            } else {
+                (*coefficients)[0] = value;
+            }
+        };
+        if (steering->segmented_poly.segments.empty()) {
+            SegmentedSteeringPolySegmentConfig segment;
+            segment.start_time_s = 0.0;
+            steering->segmented_poly.segments.push_back(std::move(segment));
+        }
+        auto& first = steering->segmented_poly.segments.front();
+        if (steering->azimuth_deg.continuity) {
+            set_c0(&first.azimuth_coefficients, angles.azimuth_deg);
+        }
+        if (steering->elevation_deg.continuity) {
+            set_c0(&first.elevation_coefficients, angles.elevation_deg);
+        }
+        return;
+    }
     // generic_poly (default) and any poly-style fallback.
     if (steering->azimuth_deg.continuity) {
         steering->azimuth_deg.c0 = angles.azimuth_deg;
@@ -614,6 +774,18 @@ bool steering_has_continuity(const SteeringModelConfig& steering)
     return false;
 }
 
+void set_coefficient_zero(std::vector<double>* coefficients, double value)
+{
+    if (!coefficients) {
+        return;
+    }
+    if (coefficients->empty()) {
+        coefficients->push_back(value);
+    } else {
+        (*coefficients)[0] = value;
+    }
+}
+
 } // namespace
 
 double clamp_throttle(double value)
@@ -629,6 +801,9 @@ std::unique_ptr<IThrottleModel> make_throttle_model(const ThrottleModelConfig& c
     }
     if (type == "interpolated" || type == "tabular") {
         return std::make_unique<ThrottleInterpolatedModel>(config);
+    }
+    if (type == "segmented_poly" || type == "piecewise_poly") {
+        return std::make_unique<ThrottleSegmentedPolyModel>(config);
     }
     return std::make_unique<ThrottlePolyModel>(config);
 }
@@ -647,6 +822,11 @@ std::unique_ptr<ISteeringModel> make_steering_model(const SteeringModelConfig& c
     }
     if (type == "generic_selectable" || type == "selectable") {
         return std::make_unique<SelectableSteeringModel>(config);
+    }
+    if (type == "segmented_poly" ||
+        type == "generic_segmented_poly" ||
+        type == "piecewise_poly") {
+        return std::make_unique<GenericSegmentedPolySteeringModel>(config);
     }
     if (type == "linear_tangent") {
         return std::make_unique<LinearTangentSteeringModel>(config, /*bilinear=*/false);
@@ -687,6 +867,14 @@ void apply_phase_start_continuity(
         } else if (type == "interpolated" || type == "tabular") {
             if (!throttle.points.empty()) {
                 throttle.points.front().throttle = held;
+            }
+        } else if (type == "segmented_poly" || type == "piecewise_poly") {
+            if (throttle.segmented_poly.segments.empty()) {
+                throttle.segmented_poly.segments.push_back({0.0, {held}});
+            } else {
+                set_coefficient_zero(
+                    &throttle.segmented_poly.segments.front().coefficients,
+                    held);
             }
         } else {
             // poly (default): the constant term is the value at phase t=0.

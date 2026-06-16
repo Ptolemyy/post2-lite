@@ -878,6 +878,36 @@ int main()
         return 1;
     }
 
+    post2::core::ThrottleModelConfig segmented_throttle;
+    segmented_throttle.type = "segmented_poly";
+    segmented_throttle.segmented_poly.order = 1;
+    segmented_throttle.segmented_poly.segments = {
+        {0.0, {0.2, 0.1}},
+        {5.0, {0.8, -0.1}},
+    };
+    const auto segmented_throttle_model = post2::core::make_throttle_model(segmented_throttle);
+    if (std::abs(segmented_throttle_model->throttle(2.0, runtime, context) - 0.4) > 1.0e-12 ||
+        std::abs(segmented_throttle_model->throttle(7.0, runtime, context) - 0.6) > 1.0e-12) {
+        std::cerr << "segmented throttle model returned unexpected values\n";
+        return 1;
+    }
+
+    post2::core::SteeringModelConfig segmented_steering;
+    segmented_steering.type = "segmented_poly";
+    segmented_steering.segmented_poly.order = 1;
+    segmented_steering.segmented_poly.segments = {
+        {0.0, {90.0, 0.0}, {0.0, 0.0}},
+        {5.0, {0.0, 0.0}, {0.0, 0.0}},
+    };
+    const auto segmented_steering_model = post2::core::make_steering_model(segmented_steering);
+    const auto segmented_east = segmented_steering_model->thrust_direction_eci(2.0, steering_state, runtime, context);
+    const auto segmented_north = segmented_steering_model->thrust_direction_eci(7.0, steering_state, runtime, context);
+    if (std::abs(segmented_east.y - 1.0) > 1.0e-9 ||
+        std::abs(segmented_north.z - 1.0) > 1.0e-9) {
+        std::cerr << "segmented steering model did not switch segments correctly\n";
+        return 1;
+    }
+
     post2::core::SteeringModelConfig quat_steering;
     quat_steering.type = "generic_quat_interp";
     quat_steering.points = {

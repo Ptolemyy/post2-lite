@@ -576,6 +576,14 @@ std::string narrow(const std::wstring& text)
     return narrow_text;
 }
 
+std::string lowercase(std::string text)
+{
+    std::transform(text.begin(), text.end(), text.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
+    return text;
+}
+
 std::wstring get_window_text(HWND hwnd)
 {
     const int length = GetWindowTextLengthW(hwnd);
@@ -5115,6 +5123,76 @@ bool handle_continuity_opt_toggle(HWND control)
     return false;
 }
 
+bool phase_editor_steering_is_upfg()
+{
+    return lowercase(get_combo_text(g_phase_steering_type)) == "upfg";
+}
+
+bool is_phase_throttle_path(const std::string& path)
+{
+    return path.find(".throttle_model.") != std::string::npos ||
+        path.find(".throttle.") != std::string::npos;
+}
+
+void remove_phase_throttle_optimization_variables(
+    post2::core::OptimizationConfig* optimization,
+    const std::string& phase_prefix)
+{
+    if (!optimization) {
+        return;
+    }
+    optimization->variables.erase(
+        std::remove_if(
+            optimization->variables.begin(),
+            optimization->variables.end(),
+            [&](const post2::core::OptimizationVariableConfig& variable) {
+                return variable.path.rfind(phase_prefix + ".throttle_model.", 0) == 0 ||
+                    variable.path.rfind(phase_prefix + ".throttle.", 0) == 0;
+            }),
+        optimization->variables.end());
+}
+
+void update_phase_upfg_throttle_state()
+{
+    const bool upfg = phase_editor_steering_is_upfg();
+    if (upfg && window_is_live(g_phase_throttle_type)) {
+        select_combo_text(g_phase_throttle_type, "poly");
+    }
+    if (upfg) {
+        if (window_is_live(g_phase_throttle_c0)) { SetWindowTextW(g_phase_throttle_c0, L"1"); }
+        if (window_is_live(g_phase_throttle_c1)) { SetWindowTextW(g_phase_throttle_c1, L"0"); }
+        if (window_is_live(g_phase_throttle_c2)) { SetWindowTextW(g_phase_throttle_c2, L"0"); }
+        if (window_is_live(g_phase_throttle_t2w)) { SetWindowTextW(g_phase_throttle_t2w, L"1"); }
+    }
+
+    if (window_is_live(g_phase_throttle_type)) {
+        EnableWindow(g_phase_throttle_type, upfg ? FALSE : TRUE);
+    }
+    for (const auto& row : g_phase_numeric_rows) {
+        if (!is_phase_throttle_path(row.path)) {
+            continue;
+        }
+        EnableWindow(row.value_edit, upfg ? FALSE : TRUE);
+        EnableWindow(row.opt_check, upfg ? FALSE : TRUE);
+        EnableWindow(row.min_edit, upfg ? FALSE : TRUE);
+        EnableWindow(row.max_edit, upfg ? FALSE : TRUE);
+        if (upfg) {
+            Button_SetCheck(row.opt_check, BST_UNCHECKED);
+        }
+    }
+    for (const auto& row : g_phase_continuity_rows) {
+        if (!is_phase_throttle_path(row.path)) {
+            continue;
+        }
+        EnableWindow(row.check, upfg ? FALSE : TRUE);
+        if (upfg) {
+            Button_SetCheck(row.check, BST_UNCHECKED);
+        } else {
+            update_opt_state_for_continuity_row(row);
+        }
+    }
+}
+
 LRESULT CALLBACK phase_scroll_pane_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam)
 {
     // Forward control notifications to the dialog window so the editor's
@@ -5237,6 +5315,53 @@ void add_phase_poly_rows(
     }
 }
 
+double coefficient_or_zero(const std::vector<double>& coefficients, std::size_t index)
+{
+    return index < coefficients.size() ? coefficients[index] : 0.0;
+}
+
+void add_phase_coefficient_rows(
+    HWND parent,
+    int* y,
+    const std::string& label,
+    const std::string& path,
+    const std::vector<double>& coefficients,
+    int order,
+    HFONT font)
+{
+    const int count = std::max(0, std::min(order, 8)) + 1;
+    for (int i = 0; i < count; ++i) {
+        add_phase_numeric_row(
+            parent,
+            y,
+            label + " c" + std::to_string(i),
+            path + ".c" + std::to_string(i),
+            coefficient_or_zero(coefficients, static_cast<std::size_t>(i)),
+            font);
+    }
+}
+
+void add_phase_segmented_throttle_rows(
+    HWND parent,
+    int* y,
+    const post2::core::SegmentedPolyConfig& segmented,
+    const std::string& path,
+    HFONT font)
+{
+    if (segmented.segments.empty()) {
+        return;
+    }
+    create_phase_section(parent, y, L"Throttle segmented poly", font);
+    add_phase_continuity_check(parent, *y, path + ".continuity", font);
+    for (std::size_t i = 0; i < segmented.segments.size(); ++i) {
+        const auto& segment = segmented.segments[i];
+        const std::string item = "Throttle seg " + std::to_string(i + 1);
+        const std::string segment_path = path + ".segments[" + std::to_string(i) + "]";
+        add_phase_numeric_row(parent, y, item + " start", segment_path + ".start_time_s", segment.start_time_s, font);
+        add_phase_coefficient_rows(parent, y, item, segment_path, segment.coefficients, segmented.order, font);
+    }
+}
+
 void add_phase_throttle_rows(
     HWND parent,
     int* y,
@@ -5259,6 +5384,63 @@ void add_phase_throttle_rows(
         const std::string point_path = path + ".points[" + std::to_string(i) + "]";
         add_phase_numeric_row(parent, y, item + "time", point_path + ".time_s", throttle.points[i].time_s, font);
         add_phase_numeric_row(parent, y, item + "throttle", point_path + ".throttle", throttle.points[i].throttle, font);
+    }
+
+    add_phase_segmented_throttle_rows(
+        parent,
+        y,
+        throttle.segmented_poly,
+        path + ".segmented_poly",
+        font);
+}
+
+void add_phase_upfg_rows(
+    HWND parent,
+    int* y,
+    const post2::core::UpfgConfig& upfg,
+    const std::string& path,
+    const std::string& label_prefix,
+    HFONT font)
+{
+    add_phase_numeric_row(parent, y, label_prefix + "UPFG periapsis km", path + ".periapsis_km", upfg.periapsis_km, font);
+    add_phase_numeric_row(parent, y, label_prefix + "UPFG apoapsis km", path + ".apoapsis_km", upfg.apoapsis_km, font);
+    add_phase_numeric_row(parent, y, label_prefix + "UPFG inclination", path + ".inclination_deg", upfg.inclination_deg, font);
+}
+
+void add_phase_segmented_steering_rows(
+    HWND parent,
+    int* y,
+    const post2::core::SegmentedSteeringPolyConfig& segmented,
+    const std::string& path,
+    const std::string& label_prefix,
+    HFONT font)
+{
+    if (segmented.segments.empty()) {
+        return;
+    }
+    create_phase_section(parent, y, L"Steering segmented poly", font);
+    add_phase_continuity_check(parent, *y, path + ".continuity", font);
+    for (std::size_t i = 0; i < segmented.segments.size(); ++i) {
+        const auto& segment = segmented.segments[i];
+        const std::string item = label_prefix + "Steer seg " + std::to_string(i + 1);
+        const std::string segment_path = path + ".segments[" + std::to_string(i) + "]";
+        add_phase_numeric_row(parent, y, item + " start", segment_path + ".start_time_s", segment.start_time_s, font);
+        add_phase_coefficient_rows(
+            parent,
+            y,
+            item + " az",
+            segment_path + ".azimuth",
+            segment.azimuth_coefficients,
+            segmented.order,
+            font);
+        add_phase_coefficient_rows(
+            parent,
+            y,
+            item + " el",
+            segment_path + ".elevation",
+            segment.elevation_coefficients,
+            segmented.order,
+            font);
     }
 }
 
@@ -5304,6 +5486,15 @@ void add_phase_steering_rows(
     add_phase_numeric_row(parent, y, label_prefix + "Fixed ECI x", path + ".fixed_direction_eci.x", steering.fixed_direction_eci.x, font);
     add_phase_numeric_row(parent, y, label_prefix + "Fixed ECI y", path + ".fixed_direction_eci.y", steering.fixed_direction_eci.y, font);
     add_phase_numeric_row(parent, y, label_prefix + "Fixed ECI z", path + ".fixed_direction_eci.z", steering.fixed_direction_eci.z, font);
+
+    add_phase_upfg_rows(parent, y, steering.upfg, path + ".upfg", label_prefix, font);
+    add_phase_segmented_steering_rows(
+        parent,
+        y,
+        steering.segmented_poly,
+        path + ".segmented_poly",
+        label_prefix,
+        font);
 
     for (std::size_t i = 0; i < steering.points.size(); ++i) {
         const std::string item = label_prefix + "Quat " + std::to_string(i + 1) + " ";
@@ -5401,6 +5592,7 @@ void load_selected_phase_controls()
     select_combo_text(g_phase_steering_type, phase->steering_model.type);
     load_phase_numeric_rows_from_case();
     load_phase_continuity_rows_from_case();
+    update_phase_upfg_throttle_state();
     refresh_action_list();
     load_selected_action_controls();
 }
@@ -5433,6 +5625,7 @@ bool apply_phase_controls(HWND hwnd)
 
     edited.throttle_model.type = get_combo_text(g_phase_throttle_type);
     edited.steering_model.type = get_combo_text(g_phase_steering_type);
+    const bool steering_upfg = lowercase(edited.steering_model.type) == "upfg";
 
     if (!update_selected_action_from_controls(hwnd, &edited)) {
         return false;
@@ -5441,6 +5634,9 @@ bool apply_phase_controls(HWND hwnd)
     candidate.phases[static_cast<std::size_t>(g_selected_phase_index)] = edited;
 
     for (const auto& row : g_phase_numeric_rows) {
+        if (steering_upfg && is_phase_throttle_path(row.path)) {
+            continue;
+        }
         const std::wstring text = get_window_text(row.value_edit);
         double value = 0.0;
         if (!parse_double_text(text, &value)) {
@@ -5464,9 +5660,24 @@ bool apply_phase_controls(HWND hwnd)
     }
 
     for (const auto& row : g_phase_continuity_rows) {
+        if (steering_upfg && is_phase_throttle_path(row.path)) {
+            continue;
+        }
         const bool flag_value = Button_GetCheck(row.check) == BST_CHECKED;
         std::string flag_error;
         post2::core::write_optimization_flag(&candidate, row.path, flag_value, &flag_error);
+    }
+
+    if (steering_upfg) {
+        auto& throttle = candidate.phases[static_cast<std::size_t>(g_selected_phase_index)].throttle_model;
+        throttle = post2::core::ThrottleModelConfig{};
+        throttle.type = "poly";
+        throttle.c0 = 1.0;
+        throttle.c1 = 0.0;
+        throttle.c2 = 0.0;
+        throttle.target_t2w = 1.0;
+        throttle.continuity = false;
+        remove_phase_throttle_optimization_variables(&candidate.optimization, phase_path_prefix());
     }
 
     const auto& final_phase = candidate.phases[static_cast<std::size_t>(g_selected_phase_index)];
@@ -5588,6 +5799,7 @@ void create_phase_editor_controls(HWND hwnd)
     create_label(g_phase_scroll_pane, 18, y + 4, 86, L"Type", font);
     g_phase_throttle_type = create_combo(g_phase_scroll_pane, kPhaseThrottleType, 118, y, 154, font);
     add_combo_item(g_phase_throttle_type, L"poly");
+    add_combo_item(g_phase_throttle_type, L"segmented_poly");
     add_combo_item(g_phase_throttle_type, L"t2w");
     add_combo_item(g_phase_throttle_type, L"interpolated");
     y += 38;
@@ -5597,12 +5809,14 @@ void create_phase_editor_controls(HWND hwnd)
     create_label(g_phase_scroll_pane, 18, y + 4, 86, L"Type", font);
     g_phase_steering_type = create_combo(g_phase_scroll_pane, kPhaseSteeringType, 118, y, 210, font);
     add_combo_item(g_phase_steering_type, L"generic_poly");
+    add_combo_item(g_phase_steering_type, L"segmented_poly");
     add_combo_item(g_phase_steering_type, L"rpy_poly");
     add_combo_item(g_phase_steering_type, L"fixed_eci");
     add_combo_item(g_phase_steering_type, L"generic_quat_interp");
     add_combo_item(g_phase_steering_type, L"generic_selectable");
     add_combo_item(g_phase_steering_type, L"linear_tangent");
     add_combo_item(g_phase_steering_type, L"bilinear_tangent");
+    add_combo_item(g_phase_steering_type, L"upfg");
     y += 38;
     add_phase_steering_rows(g_phase_scroll_pane, &y, phase->steering_model, prefix + ".steering_model", "", font);
 
@@ -5755,6 +5969,12 @@ LRESULT CALLBACK phase_editor_proc(HWND hwnd, UINT message, WPARAM wparam, LPARA
         case kPhaseActionDelete:
             delete_action_from_sidebar(hwnd);
             return 0;
+        case kPhaseSteeringType:
+            if (HIWORD(wparam) == CBN_SELCHANGE) {
+                update_phase_upfg_throttle_state();
+                return 0;
+            }
+            break;
         case kPhaseTerminationEditButton: {
             auto* phase = selected_phase();
             const std::string variable_path =

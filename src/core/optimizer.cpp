@@ -118,6 +118,48 @@ bool resolve_poly(Poly2Config* poly, std::string_view text, ResolvedPath* target
     return false;
 }
 
+bool parse_coefficient_name(std::string_view text, std::size_t* index)
+{
+    if (text.size() < 2 || text.front() != 'c') {
+        return false;
+    }
+    std::size_t parsed = 0;
+    for (std::size_t i = 1; i < text.size(); ++i) {
+        if (text[i] < '0' || text[i] > '9') {
+            return false;
+        }
+        parsed = parsed * 10 + static_cast<std::size_t>(text[i] - '0');
+    }
+    *index = parsed;
+    return true;
+}
+
+bool resolve_coefficients(std::vector<double>* coefficients, std::string_view text, ResolvedPath* target)
+{
+    std::size_t index = 0;
+    if (parse_coefficient_name(text, &index)) {
+        if (index > 64) {
+            return false;
+        }
+        if (index >= coefficients->size()) {
+            coefficients->resize(index + 1, 0.0);
+        }
+        return finish_value({}, &(*coefficients)[index], target);
+    }
+
+    std::string_view working = text;
+    if (consume_indexed(&working, "coefficients", &index)) {
+        if (index > 64) {
+            return false;
+        }
+        if (index >= coefficients->size()) {
+            coefficients->resize(index + 1, 0.0);
+        }
+        return finish_value(working, &(*coefficients)[index], target);
+    }
+    return false;
+}
+
 bool resolve_vec3(Vec3* vec, std::string_view text, ResolvedPath* target)
 {
     if (text == "x") {
@@ -149,6 +191,53 @@ bool resolve_quaternion(Quaternion* quat, std::string_view text, ResolvedPath* t
     return false;
 }
 
+bool resolve_segmented_poly(SegmentedPolyConfig* poly, std::string_view text, ResolvedPath* target)
+{
+    if (text == "continuity") {
+        return finish_flag({}, &poly->continuity, target);
+    }
+
+    std::size_t index = 0;
+    if (consume_indexed(&text, "segments", &index)) {
+        if (index >= poly->segments.size() || !consume_dot(&text)) {
+            return false;
+        }
+        if (text == "start_time_s") {
+            return finish_value({}, &poly->segments[index].start_time_s, target);
+        }
+        return resolve_coefficients(&poly->segments[index].coefficients, text, target);
+    }
+    return false;
+}
+
+bool resolve_segmented_steering_poly(
+    SegmentedSteeringPolyConfig* poly,
+    std::string_view text,
+    ResolvedPath* target)
+{
+    if (text == "continuity") {
+        return finish_flag({}, &poly->continuity, target);
+    }
+
+    std::size_t index = 0;
+    if (consume_indexed(&text, "segments", &index)) {
+        if (index >= poly->segments.size() || !consume_dot(&text)) {
+            return false;
+        }
+        auto& segment = poly->segments[index];
+        if (text == "start_time_s") {
+            return finish_value({}, &segment.start_time_s, target);
+        }
+        if (consume_identifier(&text, "azimuth") && consume_dot(&text)) {
+            return resolve_coefficients(&segment.azimuth_coefficients, text, target);
+        }
+        if (consume_identifier(&text, "elevation") && consume_dot(&text)) {
+            return resolve_coefficients(&segment.elevation_coefficients, text, target);
+        }
+    }
+    return false;
+}
+
 bool resolve_throttle(ThrottleModelConfig* throttle, std::string_view text, ResolvedPath* target)
 {
     if (text == "c0") {
@@ -165,6 +254,11 @@ bool resolve_throttle(ThrottleModelConfig* throttle, std::string_view text, Reso
     }
     if (text == "continuity") {
         return finish_flag({}, &throttle->continuity, target);
+    }
+
+    std::string_view working = text;
+    if (consume_identifier(&working, "segmented_poly") && consume_dot(&working)) {
+        return resolve_segmented_poly(&throttle->segmented_poly, working, target);
     }
 
     std::size_t index = 0;
@@ -205,6 +299,11 @@ bool resolve_steering(SteeringModelConfig* steering, std::string_view text, Reso
         return true;
     }
 
+    std::string_view segmented_view = text;
+    if (consume_identifier(&segmented_view, "segmented_poly") && consume_dot(&segmented_view)) {
+        return resolve_segmented_steering_poly(&steering->segmented_poly, segmented_view, target);
+    }
+
     std::string_view tangent_view = text;
     if (consume_identifier(&tangent_view, "tangent") && consume_dot(&tangent_view)) {
         if (tangent_view == "a") {
@@ -224,6 +323,20 @@ bool resolve_steering(SteeringModelConfig* steering, std::string_view text, Reso
         }
         if (tangent_view == "continuity") {
             return finish_flag({}, &steering->tangent.continuity, target);
+        }
+        return false;
+    }
+
+    std::string_view upfg_view = text;
+    if (consume_identifier(&upfg_view, "upfg") && consume_dot(&upfg_view)) {
+        if (upfg_view == "periapsis_km") {
+            return finish_value({}, &steering->upfg.periapsis_km, target);
+        }
+        if (upfg_view == "apoapsis_km") {
+            return finish_value({}, &steering->upfg.apoapsis_km, target);
+        }
+        if (upfg_view == "inclination_deg") {
+            return finish_value({}, &steering->upfg.inclination_deg, target);
         }
         return false;
     }

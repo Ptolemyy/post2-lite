@@ -62,6 +62,51 @@ JsonValue poly_to_json(const Poly2Config& poly)
     });
 }
 
+JsonValue coefficients_to_json(const std::vector<double>& coefficients)
+{
+    JsonValue::Array out;
+    out.reserve(coefficients.size());
+    for (const double value : coefficients) {
+        out.push_back(number(value));
+    }
+    return JsonValue::array(std::move(out));
+}
+
+JsonValue segmented_poly_to_json(const SegmentedPolyConfig& poly)
+{
+    JsonValue::Array segments;
+    segments.reserve(poly.segments.size());
+    for (const auto& segment : poly.segments) {
+        segments.push_back(JsonValue::object({
+            {"start_time_s", number(segment.start_time_s)},
+            {"coefficients", coefficients_to_json(segment.coefficients)},
+        }));
+    }
+    return JsonValue::object({
+        {"order", number(static_cast<double>(poly.order))},
+        {"continuity", boolean(poly.continuity)},
+        {"segments", JsonValue::array(std::move(segments))},
+    });
+}
+
+JsonValue segmented_steering_poly_to_json(const SegmentedSteeringPolyConfig& poly)
+{
+    JsonValue::Array segments;
+    segments.reserve(poly.segments.size());
+    for (const auto& segment : poly.segments) {
+        segments.push_back(JsonValue::object({
+            {"start_time_s", number(segment.start_time_s)},
+            {"azimuth", coefficients_to_json(segment.azimuth_coefficients)},
+            {"elevation", coefficients_to_json(segment.elevation_coefficients)},
+        }));
+    }
+    return JsonValue::object({
+        {"order", number(static_cast<double>(poly.order))},
+        {"continuity", boolean(poly.continuity)},
+        {"segments", JsonValue::array(std::move(segments))},
+    });
+}
+
 JsonValue quaternion_to_json(const Quaternion& quat)
 {
     return JsonValue::array({number(quat.w), number(quat.x), number(quat.y), number(quat.z)});
@@ -257,6 +302,7 @@ JsonValue throttle_to_json(const ThrottleModelConfig& throttle)
         {"target_t2w", number(throttle.target_t2w)},
         {"continuity", boolean(throttle.continuity)},
         {"points", JsonValue::array(std::move(points))},
+        {"segmented_poly", segmented_poly_to_json(throttle.segmented_poly)},
     });
 }
 
@@ -311,6 +357,7 @@ JsonValue steering_to_json(const SteeringModelConfig& steering)
         {"fixed_direction_eci", vec3_to_json(steering.fixed_direction_eci)},
         {"points", JsonValue::array(std::move(points))},
         {"segments", JsonValue::array(std::move(segments))},
+        {"segmented_poly", segmented_steering_poly_to_json(steering.segmented_poly)},
     });
 }
 
@@ -623,6 +670,126 @@ bool read_poly(const JsonValue& object, const char* key, Poly2Config* target, st
 {
     const JsonValue* value = find_member(object, key);
     return !value || parse_poly(*value, target, error);
+}
+
+bool parse_coefficients(const JsonValue& value, std::vector<double>* target, std::string* error)
+{
+    if (!value.is_array()) {
+        return fail(error, "coefficients must be an array");
+    }
+    std::vector<double> parsed;
+    parsed.reserve(value.array_value.size());
+    for (const auto& member : value.array_value) {
+        if (!member.is_number()) {
+            return fail(error, "coefficient entries must be numbers");
+        }
+        parsed.push_back(member.number_value);
+    }
+    *target = std::move(parsed);
+    return true;
+}
+
+bool parse_segmented_poly(const JsonValue& value, SegmentedPolyConfig* target, std::string* error)
+{
+    if (!value.is_object()) {
+        return fail(error, "segmented_poly must be an object");
+    }
+    SegmentedPolyConfig parsed = *target;
+    double order = static_cast<double>(parsed.order);
+    if (!read_number(value, "order", &order, error) ||
+        !read_bool(value, "continuity", &parsed.continuity, error)) {
+        return false;
+    }
+    parsed.order = std::max(0, static_cast<int>(order));
+    if (const JsonValue* segments = find_member(value, "segments")) {
+        if (!segments->is_array()) {
+            return fail(error, "segmented_poly.segments must be an array");
+        }
+        parsed.segments.clear();
+        parsed.segments.reserve(segments->array_value.size());
+        for (const auto& segment_value : segments->array_value) {
+            if (!segment_value.is_object()) {
+                return fail(error, "segmented_poly segment must be an object");
+            }
+            SegmentedPolySegmentConfig segment;
+            if (!read_number(segment_value, "start_time_s", &segment.start_time_s, error)) {
+                return false;
+            }
+            if (const JsonValue* coefficients = find_member(segment_value, "coefficients")) {
+                if (!parse_coefficients(*coefficients, &segment.coefficients, error)) {
+                    return false;
+                }
+            }
+            segment.coefficients.resize(static_cast<std::size_t>(parsed.order + 1), 0.0);
+            parsed.segments.push_back(std::move(segment));
+        }
+    }
+    *target = std::move(parsed);
+    return true;
+}
+
+bool read_segmented_poly(const JsonValue& object, const char* key, SegmentedPolyConfig* target, std::string* error)
+{
+    const JsonValue* value = find_member(object, key);
+    return !value || parse_segmented_poly(*value, target, error);
+}
+
+bool parse_segmented_steering_poly(
+    const JsonValue& value,
+    SegmentedSteeringPolyConfig* target,
+    std::string* error)
+{
+    if (!value.is_object()) {
+        return fail(error, "steering_model.segmented_poly must be an object");
+    }
+    SegmentedSteeringPolyConfig parsed = *target;
+    double order = static_cast<double>(parsed.order);
+    if (!read_number(value, "order", &order, error) ||
+        !read_bool(value, "continuity", &parsed.continuity, error)) {
+        return false;
+    }
+    parsed.order = std::max(0, static_cast<int>(order));
+    if (const JsonValue* segments = find_member(value, "segments")) {
+        if (!segments->is_array()) {
+            return fail(error, "steering_model.segmented_poly.segments must be an array");
+        }
+        parsed.segments.clear();
+        parsed.segments.reserve(segments->array_value.size());
+        for (const auto& segment_value : segments->array_value) {
+            if (!segment_value.is_object()) {
+                return fail(error, "steering segmented_poly segment must be an object");
+            }
+            SegmentedSteeringPolySegmentConfig segment;
+            if (!read_number(segment_value, "start_time_s", &segment.start_time_s, error)) {
+                return false;
+            }
+            if (const JsonValue* azimuth = find_member(segment_value, "azimuth")) {
+                if (!parse_coefficients(*azimuth, &segment.azimuth_coefficients, error)) {
+                    return false;
+                }
+            }
+            if (const JsonValue* elevation = find_member(segment_value, "elevation")) {
+                if (!parse_coefficients(*elevation, &segment.elevation_coefficients, error)) {
+                    return false;
+                }
+            }
+            segment.azimuth_coefficients.resize(static_cast<std::size_t>(parsed.order + 1), 0.0);
+            segment.elevation_coefficients.resize(static_cast<std::size_t>(parsed.order + 1), 0.0);
+            parsed.segments.push_back(std::move(segment));
+        }
+    }
+    *target = std::move(parsed);
+    return true;
+}
+
+bool read_segmented_steering_poly(
+    const JsonValue& object,
+    const char* key,
+    SegmentedSteeringPolyConfig* target,
+    std::string* error)
+{
+    const JsonValue* value = find_member(object, key);
+    return !value || parse_segmented_steering_poly(*value, target, error);
 }
 
 bool parse_tangent(const JsonValue& value, LinearTangentConfig* target, std::string* error)
@@ -1014,7 +1181,8 @@ bool parse_throttle(const JsonValue& value, ThrottleModelConfig* target, std::st
         !read_number(value, "c1", &parsed.c1, error) ||
         !read_number(value, "c2", &parsed.c2, error) ||
         !read_number(value, "target_t2w", &parsed.target_t2w, error) ||
-        !read_bool(value, "continuity", &parsed.continuity, error)) {
+        !read_bool(value, "continuity", &parsed.continuity, error) ||
+        !read_segmented_poly(value, "segmented_poly", &parsed.segmented_poly, error)) {
         return false;
     }
 
@@ -1054,7 +1222,8 @@ bool parse_steering(const JsonValue& value, SteeringModelConfig* target, std::st
         !read_poly(value, "elevation", &parsed.elevation_deg, error) ||
         !read_tangent(value, "tangent", &parsed.tangent, error) ||
         !read_upfg(value, "upfg", &parsed.upfg, error) ||
-        !read_vec3(value, "fixed_direction_eci", &parsed.fixed_direction_eci, error)) {
+        !read_vec3(value, "fixed_direction_eci", &parsed.fixed_direction_eci, error) ||
+        !read_segmented_steering_poly(value, "segmented_poly", &parsed.segmented_poly, error)) {
         return false;
     }
 

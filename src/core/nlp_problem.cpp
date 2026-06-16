@@ -3,6 +3,7 @@
 #include "post2/core/optimization.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <string_view>
 
@@ -70,11 +71,38 @@ int phase_index_from_path(const std::string& path)
     return -1;
 }
 
+bool path_targets_phase_throttle(const std::string& path)
+{
+    std::string_view text(path);
+    int index = -1;
+    if (!consume_indexed(&text, "phases", &index) || text.empty() || text.front() != '.') {
+        return false;
+    }
+    text.remove_prefix(1);
+    return starts_with(text, "throttle_model.") || starts_with(text, "throttle.");
+}
+
 bool metric_has_phase_prefix(const std::string& metric)
 {
     std::string_view text(metric);
     int index = -1;
     return consume_indexed(&text, "phases", &index) && !text.empty() && text.front() == '.';
+}
+
+std::string lowercase(std::string text)
+{
+    std::transform(text.begin(), text.end(), text.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
+    return text;
+}
+
+bool is_segmented_poly_type(const std::string& type)
+{
+    const std::string normalized = lowercase(type);
+    return normalized == "segmented_poly" ||
+        normalized == "generic_segmented_poly" ||
+        normalized == "piecewise_poly";
 }
 
 std::string scoped_metric(const OptimizationTargetConfig& target)
@@ -110,6 +138,77 @@ NlpConstraint make_constraint(
     }
     c.scale = nlp_metric_scale(c.metric, reference);
     return c;
+}
+
+void add_hidden_equality_constraint(
+    std::vector<NlpConstraint>* constraints,
+    const std::string& metric,
+    double scale)
+{
+    NlpConstraint c;
+    c.name = metric + ".eq";
+    c.metric = metric;
+    c.type = NlpConstraintType::Equality;
+    c.target = 0.0;
+    c.scale = scale > 0.0 ? scale : 1.0;
+    c.weight = 1.0;
+    c.scope = "config";
+    constraints->push_back(std::move(c));
+}
+
+void add_segmented_poly_continuity_constraints(const CaseConfig& config, std::vector<NlpConstraint>* constraints)
+{
+    for (std::size_t phase_index = 0; phase_index < config.phases.size(); ++phase_index) {
+        const PhaseConfig& phase = config.phases[phase_index];
+        if (!phase.optimize_enabled) {
+            continue;
+        }
+
+        const std::string phase_prefix =
+            "phases[" + std::to_string(phase_index) + "].";
+        if (is_segmented_poly_type(phase.throttle_model.type) &&
+            phase.throttle_model.segmented_poly.continuity) {
+            const auto& segments = phase.throttle_model.segmented_poly.segments;
+            for (std::size_t i = 1; i < segments.size(); ++i) {
+                add_hidden_equality_constraint(
+                    constraints,
+                    phase_prefix + "throttle_model.segmented_poly.continuity[" +
+                        std::to_string(i) + "]",
+                    1.0);
+            }
+        }
+
+        if (is_segmented_poly_type(phase.steering_model.type) &&
+            phase.steering_model.segmented_poly.continuity) {
+            const auto& segments = phase.steering_model.segmented_poly.segments;
+            for (std::size_t i = 1; i < segments.size(); ++i) {
+                add_hidden_equality_constraint(
+                    constraints,
+                    phase_prefix + "steering_model.segmented_poly.azimuth.continuity[" +
+                        std::to_string(i) + "]",
+                    1.0);
+                add_hidden_equality_constraint(
+                    constraints,
+                    phase_prefix + "steering_model.segmented_poly.elevation.continuity[" +
+                        std::to_string(i) + "]",
+                    1.0);
+            }
+        }
+
+        if (is_segmented_poly_type(phase.throttle_model.type) &&
+            is_segmented_poly_type(phase.steering_model.type)) {
+            const std::size_t sync_count = std::min(
+                phase.throttle_model.segmented_poly.segments.size(),
+                phase.steering_model.segmented_poly.segments.size());
+            for (std::size_t i = 1; i < sync_count; ++i) {
+                add_hidden_equality_constraint(
+                    constraints,
+                    phase_prefix + "segmented_poly.boundary_sync[" +
+                        std::to_string(i) + "]",
+                    1.0);
+            }
+        }
+    }
 }
 
 } // namespace
@@ -286,6 +385,12 @@ bool build_nlp_problem_from_case(
             !config.phases[static_cast<std::size_t>(phase_index)].optimize_enabled) {
             continue;
         }
+        if (phase_index >= 0 &&
+            static_cast<std::size_t>(phase_index) < config.phases.size() &&
+            lowercase(config.phases[static_cast<std::size_t>(phase_index)].steering_model.type) == "upfg" &&
+            path_targets_phase_throttle(variable.path)) {
+            continue;
+        }
         NlpVariable nlp_var;
         nlp_var.name = variable.path;
         nlp_var.path = variable.path;
@@ -315,6 +420,7 @@ bool build_nlp_problem_from_case(
             return false;
         }
     }
+    add_segmented_poly_continuity_constraints(config, &out.constraints);
 
     *problem = std::move(out);
     return true;

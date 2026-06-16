@@ -31,6 +31,11 @@ bool consume_literal(std::string_view* text, std::string_view literal)
     return true;
 }
 
+bool consume_dot(std::string_view* text)
+{
+    return consume_literal(text, ".");
+}
+
 bool consume_identifier(std::string_view* text, std::string_view id)
 {
     if (!consume_literal(text, id)) {
@@ -228,6 +233,145 @@ bool min_over_entries(
     return true;
 }
 
+int sanitized_order(int order)
+{
+    return std::max(0, std::min(order, 8));
+}
+
+double evaluate_coefficients(const std::vector<double>& coefficients, double time_s, int order)
+{
+    const int usable_order = sanitized_order(order);
+    double value = 0.0;
+    double power = 1.0;
+    for (int i = 0; i <= usable_order; ++i) {
+        if (static_cast<std::size_t>(i) < coefficients.size()) {
+            value += coefficients[static_cast<std::size_t>(i)] * power;
+        }
+        power *= time_s;
+    }
+    return value;
+}
+
+bool segmented_poly_continuity_residual(
+    const SegmentedPolyConfig& poly,
+    int segment_index,
+    double* value)
+{
+    if (segment_index <= 0 ||
+        static_cast<std::size_t>(segment_index) >= poly.segments.size()) {
+        return false;
+    }
+    const auto& previous = poly.segments[static_cast<std::size_t>(segment_index - 1)];
+    const auto& current = poly.segments[static_cast<std::size_t>(segment_index)];
+    const double local_boundary_time_s =
+        std::max(0.0, current.start_time_s - previous.start_time_s);
+    *value = evaluate_coefficients(
+        previous.coefficients,
+        local_boundary_time_s,
+        poly.order) -
+        evaluate_coefficients(current.coefficients, 0.0, poly.order);
+    return true;
+}
+
+bool segmented_steering_poly_continuity_residual(
+    const SegmentedSteeringPolyConfig& poly,
+    std::string_view channel,
+    int segment_index,
+    double* value)
+{
+    if (segment_index <= 0 ||
+        static_cast<std::size_t>(segment_index) >= poly.segments.size()) {
+        return false;
+    }
+    const auto& previous = poly.segments[static_cast<std::size_t>(segment_index - 1)];
+    const auto& current = poly.segments[static_cast<std::size_t>(segment_index)];
+    const auto* previous_coefficients = &previous.azimuth_coefficients;
+    const auto* current_coefficients = &current.azimuth_coefficients;
+    if (channel == "elevation") {
+        previous_coefficients = &previous.elevation_coefficients;
+        current_coefficients = &current.elevation_coefficients;
+    } else if (channel != "azimuth") {
+        return false;
+    }
+    const double local_boundary_time_s =
+        std::max(0.0, current.start_time_s - previous.start_time_s);
+    *value = evaluate_coefficients(
+        *previous_coefficients,
+        local_boundary_time_s,
+        poly.order) -
+        evaluate_coefficients(*current_coefficients, 0.0, poly.order);
+    return true;
+}
+
+bool evaluate_segmented_poly_metric(
+    const CaseConfig& config,
+    const MetricQuery& query,
+    double* value)
+{
+    if (query.phase_index < 0 ||
+        static_cast<std::size_t>(query.phase_index) >= config.phases.size()) {
+        return false;
+    }
+    const PhaseConfig& phase = config.phases[static_cast<std::size_t>(query.phase_index)];
+    std::string_view text = query.base_metric;
+
+    if (consume_identifier(&text, "segmented_poly") && consume_dot(&text)) {
+        int segment_index = -1;
+        if (consume_indexed(&text, "boundary_sync", &segment_index) && text.empty()) {
+            if (segment_index <= 0 ||
+                static_cast<std::size_t>(segment_index) >= phase.throttle_model.segmented_poly.segments.size() ||
+                static_cast<std::size_t>(segment_index) >= phase.steering_model.segmented_poly.segments.size()) {
+                return false;
+            }
+            *value =
+                phase.throttle_model.segmented_poly.segments[static_cast<std::size_t>(segment_index)].start_time_s -
+                phase.steering_model.segmented_poly.segments[static_cast<std::size_t>(segment_index)].start_time_s;
+            return true;
+        }
+        return false;
+    }
+
+    text = query.base_metric;
+
+    if (consume_identifier(&text, "throttle_model") && consume_dot(&text) &&
+        consume_identifier(&text, "segmented_poly") && consume_dot(&text)) {
+        int segment_index = -1;
+        if (consume_indexed(&text, "continuity", &segment_index) && text.empty()) {
+            return segmented_poly_continuity_residual(
+                phase.throttle_model.segmented_poly,
+                segment_index,
+                value);
+        }
+        return false;
+    }
+
+    text = query.base_metric;
+    if (consume_identifier(&text, "steering_model") && consume_dot(&text) &&
+        consume_identifier(&text, "segmented_poly") && consume_dot(&text)) {
+        std::string_view channel = text;
+        if (consume_identifier(&text, "azimuth")) {
+            channel = "azimuth";
+        } else if (consume_identifier(&text, "elevation")) {
+            channel = "elevation";
+        } else {
+            return false;
+        }
+        if (!consume_dot(&text)) {
+            return false;
+        }
+        int segment_index = -1;
+        if (consume_indexed(&text, "continuity", &segment_index) && text.empty()) {
+            return segmented_steering_poly_continuity_residual(
+                phase.steering_model.segmented_poly,
+                channel,
+                segment_index,
+                value);
+        }
+    }
+
+    return false;
+}
+
 double objective_value(
     const NlpProblem& problem,
     const StateLog& state_log,
@@ -326,6 +470,9 @@ bool evaluate_trajectory_metric(
 
     if (query.base_metric == "payload_mass_kg") {
         *value = post2::vehicle::payload_stage_dry_mass_kg(config.vehicle);
+        return true;
+    }
+    if (evaluate_segmented_poly_metric(config, query, value)) {
         return true;
     }
 

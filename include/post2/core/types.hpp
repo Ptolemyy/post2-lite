@@ -118,6 +118,29 @@ struct Poly2Config {
     bool continuity = false;
 };
 
+struct SegmentedPolySegmentConfig {
+    double start_time_s = 0.0;
+    std::vector<double> coefficients;
+};
+
+struct SegmentedPolyConfig {
+    int order = 1;
+    bool continuity = true;
+    std::vector<SegmentedPolySegmentConfig> segments;
+};
+
+struct SegmentedSteeringPolySegmentConfig {
+    double start_time_s = 0.0;
+    std::vector<double> azimuth_coefficients;
+    std::vector<double> elevation_coefficients;
+};
+
+struct SegmentedSteeringPolyConfig {
+    int order = 1;
+    bool continuity = true;
+    std::vector<SegmentedSteeringPolySegmentConfig> segments;
+};
+
 struct ThrottlePoint {
     double time_s = 0.0;
     double throttle = 0.0;
@@ -135,6 +158,7 @@ struct ThrottleModelConfig {
     // target ratio to the previous state's actual thrust-to-weight.
     bool continuity = false;
     std::vector<ThrottlePoint> points;
+    SegmentedPolyConfig segmented_poly;
 };
 
 struct Quaternion {
@@ -200,6 +224,7 @@ struct SteeringModelConfig {
     Vec3 fixed_direction_eci = {1.0, 0.0, 0.0};
     std::vector<QuaternionPoint> points;
     std::vector<SelectableSteeringSegment> segments;
+    SegmentedSteeringPolyConfig segmented_poly;
 };
 
 struct PhaseConfig {

@@ -332,6 +332,69 @@ int main()
     }
 
     {
+        post2::core::CaseConfig segmented_case = make_drop_case();
+        auto& phase = segmented_case.phases[0];
+        phase.throttle_model.type = "segmented_poly";
+        phase.throttle_model.segmented_poly.order = 1;
+        phase.throttle_model.segmented_poly.segments = {
+            {0.0, {0.2, 0.1}},
+            {0.5, {0.25, 0.0}},
+        };
+        phase.steering_model.type = "segmented_poly";
+        phase.steering_model.segmented_poly.order = 1;
+        phase.steering_model.segmented_poly.segments = {
+            {0.0, {90.0, 0.0}, {80.0, -10.0}},
+            {0.5, {90.0, 0.0}, {75.0, 0.0}},
+        };
+        segmented_case.optimization.variables.push_back({
+            "phases[0].throttle_model.segmented_poly.segments[1].c0",
+            true,
+            0.0,
+            1.0,
+        });
+        segmented_case.optimization.variables.push_back({
+            "phases[0].steering_model.segmented_poly.segments[1].elevation.c0",
+            true,
+            0.0,
+            90.0,
+        });
+
+        double value = 0.0;
+        std::string error;
+        if (!post2::core::read_optimization_variable(
+                segmented_case,
+                "phases[0].steering_model.segmented_poly.segments[1].elevation.c0",
+                &value,
+                &error) ||
+            !near(value, 75.0, 1.0e-12) ||
+            !post2::core::write_optimization_variable(
+                &segmented_case,
+                "phases[0].throttle_model.segmented_poly.segments[1].c0",
+                0.3,
+                &error)) {
+            std::cerr << "segmented poly optimization path failed: " << error << '\n';
+            return 1;
+        }
+
+        post2::core::NlpProblem problem;
+        if (!post2::core::build_nlp_problem_from_case(segmented_case, &problem, &error) ||
+            problem.constraints.size() != 4) {
+            std::cerr << "segmented poly hidden constraints missing: " << error << '\n';
+            return 1;
+        }
+        post2::core::NlpEvaluator evaluator(segmented_case, service);
+        const auto eval = evaluator.evaluate(problem, post2::core::make_initial_nlp_point(problem).z);
+        if (!eval.ok ||
+            eval.equality_residuals.size() != 4 ||
+            std::abs(eval.equality_residuals[0] + 0.05) > 1.0e-12 ||
+            std::abs(eval.equality_residuals[1] - 0.0) > 1.0e-12 ||
+            std::abs(eval.equality_residuals[3] - 0.0) > 1.0e-12) {
+            std::cerr << "segmented poly hidden constraint evaluation failed\n";
+            return 1;
+        }
+    }
+
+    {
         post2::core::CaseConfig target_case = make_drop_case();
         target_case.phases[0].termination.value = 2.0;
         const auto target_sim = service.simulate(target_case);

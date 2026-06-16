@@ -14,17 +14,28 @@
 #include "post2/vehicle/vehicle_config_io.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <exception>
 #include <limits>
 #include <memory>
+#include <sstream>
 #include <stdexcept>
+#include <string>
 #include <utility>
 #include <vector>
 
 namespace post2::core {
 
 namespace {
+
+std::string lowercase(std::string text)
+{
+    std::transform(text.begin(), text.end(), text.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
+    return text;
+}
 
 double minimum_effective_step_s(double nominal_step_s)
 {
@@ -651,12 +662,44 @@ struct TimedAction {
     PhaseAction action;
 };
 
+bool is_segmented_poly_type(const std::string& type)
+{
+    const std::string normalized = lowercase(type);
+    return normalized == "segmented_poly" ||
+        normalized == "generic_segmented_poly" ||
+        normalized == "piecewise_poly";
+}
+
+void add_control_switch_action(std::vector<TimedAction>* actions, double phase_time_s)
+{
+    if (!actions || !std::isfinite(phase_time_s) || phase_time_s <= 0.0) {
+        return;
+    }
+    PhaseAction action;
+    action.time_s = phase_time_s;
+    action.type = "control_switch";
+    actions->push_back({action});
+}
+
 std::vector<TimedAction> sorted_actions(const PhaseConfig& phase)
 {
     std::vector<TimedAction> actions;
-    actions.reserve(phase.actions.size());
+    actions.reserve(
+        phase.actions.size() +
+        phase.throttle_model.segmented_poly.segments.size() +
+        phase.steering_model.segmented_poly.segments.size());
     for (const auto& action : phase.actions) {
         actions.push_back({action});
+    }
+    if (is_segmented_poly_type(phase.throttle_model.type)) {
+        for (const auto& segment : phase.throttle_model.segmented_poly.segments) {
+            add_control_switch_action(&actions, segment.start_time_s);
+        }
+    }
+    if (is_segmented_poly_type(phase.steering_model.type)) {
+        for (const auto& segment : phase.steering_model.segmented_poly.segments) {
+            add_control_switch_action(&actions, segment.start_time_s);
+        }
     }
     std::sort(actions.begin(), actions.end(), [](const TimedAction& lhs, const TimedAction& rhs) {
         return lhs.action.time_s < rhs.action.time_s;
@@ -780,7 +823,17 @@ StateLog propagate_phase(
     post2::propagation::VehicleConsumptionPropagator vehicle_propagator(case_config.vehicle);
     auto integrator = post2::integrators::make_integrator(
         phase.integrator, case_config.step_s, phase.tolerances);
-    const auto throttle_model = make_throttle_model(phase.throttle_model);
+    ThrottleModelConfig effective_throttle = phase.throttle_model;
+    if (lowercase(phase.steering_model.type) == "upfg") {
+        effective_throttle = ThrottleModelConfig{};
+        effective_throttle.type = "poly";
+        effective_throttle.c0 = 1.0;
+        effective_throttle.c1 = 0.0;
+        effective_throttle.c2 = 0.0;
+        effective_throttle.target_t2w = 1.0;
+        effective_throttle.continuity = false;
+    }
+    const auto throttle_model = make_throttle_model(effective_throttle);
     const auto steering_model = make_steering_model(phase.steering_model);
     const PhaseContext context{&case_config, &phase, phase_index, phase_start_time_s};
     const post2::propagation::ForceModelSet force_models =
@@ -819,7 +872,11 @@ StateLog propagate_phase(
         }
 
         const double phase_time_s = time_s - phase_start_time_s;
+        const std::size_t action_index_before_step = control.next_action_index;
         apply_due_actions(actions, phase_time_s, simulation_config, &control, &runtime);
+        if (control.next_action_index != action_index_before_step) {
+            suggested_step_s = case_config.step_s;
+        }
 
         const double next_action_absolute_s = phase_start_time_s + next_action_time_s(actions, control);
         const double requested_step_s =
@@ -1000,7 +1057,20 @@ StateLog propagate_phase(
                 },
                 events);
             if (!step_result.accepted || step_result.h_used <= 1.0e-12) {
-                throw std::runtime_error("integrator failed to make progress");
+                std::ostringstream message;
+                message << "integrator failed to make progress"
+                        << " in phase " << phase_index
+                        << " (\"" << phase.name << "\")"
+                        << " at t=" << time_s << " s"
+                        << ", phase_t=" << phase_time_s << " s"
+                        << ", requested_h=" << step_s << " s"
+                        << ", used_h=" << step_result.h_used << " s"
+                        << ", accepted=" << (step_result.accepted ? "true" : "false");
+                if (step_result.event.has_value()) {
+                    message << ", event=\"" << step_result.event->name << "\""
+                            << ", event_t=" << step_result.event->t_s << " s";
+                }
+                throw std::runtime_error(message.str());
             }
             if (!step_result.event.has_value() &&
                 step_result.h_used < min_effective_step_s &&
@@ -1045,7 +1115,11 @@ StateLog propagate_phase(
         const double next_time_s = time_s + step_s;
         runtime = vehicle_propagator.commit(runtime, integrated, next_time_s, last_eval, command);
         set_hold_down_clamp_state(&runtime, simulation_config, control.hold_down_clamp_active);
+        const std::size_t action_index_before_commit_actions = control.next_action_index;
         apply_due_actions(actions, next_time_s - phase_start_time_s, simulation_config, &control, &runtime);
+        if (control.next_action_index != action_index_before_commit_actions) {
+            suggested_step_s = case_config.step_s;
+        }
 
         // Mission events: apply the fired event's actions atomically, then
         // re-evaluate prev_g for every enabled event so the next step arms
