@@ -1,0 +1,37 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 20,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "default",
+      "displayName": "Default (no vcpkg)",
+      "description": "Core build without the kRPC player",
+      "binaryDir": "${sourceDir}/build"
+    },
+    {
+      "name": "vcpkg",
+      "displayName": "vcpkg (krpc player)",
+      "description": "Configure with the vcpkg toolchain so find_package(krpc) succeeds and post2_player is built",
+      "binaryDir": "${sourceDir}/build-vcpkg",
+      "toolchainFile": "C:/Users/32796/Downloads/vcpkg/scripts/buildsystems/vcpkg.cmake",
+      "cacheVariables": {
+        "VCPKG_TARGET_TRIPLET": "x64-windows"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "default",
+      "configurePreset": "default"
+    },
+    {
+      "name": "vcpkg",
+      "configurePreset": "vcpkg",
+      "configuration": "Release"
+    }
+  ]
+}

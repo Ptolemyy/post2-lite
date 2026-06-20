@@ -67,10 +67,23 @@ struct EngineConfig {
     // interpolated; values outside the table clamp to the endpoints.
     std::vector<EngineThrottleCurvePoint> throttle_curve;
 
-    // Transient timing. Fields are persisted in config/JSON but the runtime
-    // currently models ignition and shutdown as instantaneous; the ramping
-    // physics will land once the event-detection integrator is available.
+    // Transient thrust dynamics. After the engine is commanded on (off->on
+    // edge) it stays dead for ignition_delay_s producing no thrust, then the
+    // actual throttle spools up from zero toward the commanded throttle. The
+    // spool is a first-order lag,
+    //     d(theta_actual)/dt = rate * (theta_cmd - theta_actual),
+    // with rate = spool_up_rate_per_s when accelerating (theta_cmd >=
+    // theta_actual) and spool_down_rate_per_s when decelerating. Units are
+    // throttle fraction per second; values derived from the KSP spool capture
+    // (~3.5 /s, ignition_delay ~2.4 s reproduces the ~3.7 s cold-start build to
+    // full thrust). A rate <= 0 means "instantaneous" (legacy, no transient).
+    // The same model drives stage ignitions (first stage on the pad, upper
+    // stage after separation) and any in-flight throttle change.
     double ignition_delay_s = 0.0;
+    double spool_up_rate_per_s = 0.0;
+    double spool_down_rate_per_s = 0.0;
+    // Legacy buildup-duration field, kept for config compatibility. Superseded
+    // by the spool-rate model above; not consulted at runtime.
     double thrust_buildup_s = 0.0;
     double shutdown_delay_s = 0.0;
 
@@ -117,12 +130,43 @@ struct T2TConnection {
     std::optional<double> end_time_s;
 };
 
+// One aerodynamic table for a particular staging configuration. It becomes
+// active once the lowest still-attached stage index reaches
+// activate_at_min_attached_stage (i.e. all lower stages have separated). The
+// full stack uses 0; the configuration after the first stage drops uses 1; etc.
+struct AeroStageTable {
+    int activate_at_min_attached_stage = 0;
+    std::string table_path;
+    double reference_area_m2 = 0.0;
+    // Geometry used to build this table (for display / regeneration).
+    double ref_diameter_m = 0.0;
+    double body_length_m = 0.0;
+    double nose_length_m = 0.0;
+    double base_diameter_m = 0.0;
+};
+
 struct AeroConfig {
     bool enabled = false;
     double reference_area_m2 = 10.0;
-    double cd = 0.5;
-    double cl = 0.0;
+    double cd = 0.5;   // constant-CD fallback when no table is used
+    double cl = 0.0;   // constant-CL fallback
     std::string aero_table_path;
+
+    // When true, drag/lift use tabulated CD/CL(Mach, alpha). The active table is
+    // chosen per staging configuration from stage_tables (falling back to
+    // aero_table_path when stage_tables is empty), instead of the constant cd/cl.
+    bool use_table = false;
+
+    // Per-configuration tables, ascending by activate_at_min_attached_stage.
+    std::vector<AeroStageTable> stage_tables;
+
+    // Geometry the offline generator used / will use to (re)build the level-0
+    // (full-stack) table. Zero means "unset" (generator falls back to defaults
+    // derived from the reference area). Lengths in metres.
+    double ref_diameter_m = 0.0;
+    double body_length_m = 0.0;
+    double nose_length_m = 0.0;
+    double base_diameter_m = 0.0;
 };
 
 struct VehicleConfig {
@@ -152,6 +196,13 @@ struct EngineState {
     double actual_thrust_n = 0.0;
     double isp_s = 0.0;
     double mass_flow_kgps = 0.0;
+    // Transient spool state. spool_throttle is the engine's actual (lagged)
+    // throttle fraction; it relaxes toward the commanded throttle per the
+    // first-order model in EngineConfig. ignition_time_s is the absolute time
+    // the engine last transitioned off->on (negative when not ignited), used to
+    // apply the ignition_delay dead-time before the spool begins.
+    double spool_throttle = 0.0;
+    double ignition_time_s = -1.0;
     Vec3 direction_body = {1.0, 0.0, 0.0};
 };
 

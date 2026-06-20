@@ -303,6 +303,11 @@ int main()
     case_config.name = "roundtrip";
     case_config.step_s = 10.0;
     case_config.vehicle = loaded_vehicle_config;
+    case_config.vehicle.aero.use_table = true;
+    case_config.vehicle.aero.stage_tables = {
+        post2::vehicle::AeroStageTable{0, "aero_full.csv", 21.2, 5.2, 70.0, 12.6, 3.66},
+        post2::vehicle::AeroStageTable{1, "aero_stage2.csv", 21.2, 5.2, 15.0, 12.6, 3.66},
+    };
     case_config.launch_site.latitude_deg = 28.5;
     case_config.launch_site.longitude_deg = -80.6;
     case_config.earth_j2 = 1.0827e-3;
@@ -392,6 +397,11 @@ int main()
         loaded_case.vehicle.aero.cd != 0.6 ||
         loaded_case.vehicle.aero.cl != 0.05 ||
         loaded_case.vehicle.aero.aero_table_path != "aero.csv" ||
+        !loaded_case.vehicle.aero.use_table ||
+        loaded_case.vehicle.aero.stage_tables.size() != 2 ||
+        loaded_case.vehicle.aero.stage_tables[1].activate_at_min_attached_stage != 1 ||
+        loaded_case.vehicle.aero.stage_tables[1].table_path != "aero_stage2.csv" ||
+        loaded_case.vehicle.aero.stage_tables[0].reference_area_m2 != 21.2 ||
         loaded_case.phases[0].actions.size() != 1 ||
         loaded_case.phases[0].steering_model.azimuth_deg.c0 != 90.0 ||
         loaded_case.phases[1].throttle_model.type != "t2w" ||
@@ -494,184 +504,86 @@ int main()
                 : 0.0;
         };
 
-        const auto kos_csv = post2::core::kos_trajectory_to_csv(case_result.state_log, loaded_case);
-        std::istringstream input(kos_csv);
+        // Guidance script CSV: sectioned per-phase poly params consumed by the
+        // standalone post2_player. Validate the record structure and that the
+        // first powered phase's poly + throttle and the staging actions survive.
+        (void)find_col;
+        const auto guidance_csv = post2::core::guidance_script_to_csv(loaded_case);
+        std::istringstream input(guidance_csv);
         std::string line;
-        if (!std::getline(input, line)) {
-            std::cerr << "kOS CSV was empty\n";
-            return 1;
-        }
-        const auto header = split_csv(line);
-        const int phase_index_col = find_col(header, "phase_index");
-        const int steer_avail_col = find_col(header, "kos_steering_poly_available");
-        const int az_c0_col = find_col(header, "kos_azimuth_c0");
-        const int el_c0_col = find_col(header, "kos_elevation_c0");
-        const int roll_avail_col = find_col(header, "kos_roll_available");
-        const int roll_c0_col = find_col(header, "kos_roll_c0");
-        const int throttle_avail_col = find_col(header, "kos_throttle_poly_available");
-        const int throttle_c0_col = find_col(header, "kos_throttle_c0");
-        const int stage_command_col = find_col(header, "kos_stage_command");
-        const int stage_plan_col = find_col(header, "kos_stage_plan_time_s");
-        const int stage_pulses_col = find_col(header, "kos_stage_pulse_count");
-        const int shutdown_before_stage_col = find_col(header, "kos_shutdown_before_stage");
-        const int yaw_col = find_col(header, "kos_yaw_deg");
-        const int pitch_col = find_col(header, "kos_pitch_deg");
-        const int roll_deg_col = find_col(header, "kos_roll_deg");
-        const int roll_lock_col = find_col(header, "kos_roll_lock");
-        if (phase_index_col < 0 ||
-            steer_avail_col < 0 ||
-            az_c0_col < 0 ||
-            el_c0_col < 0 ||
-            roll_avail_col < 0 ||
-            roll_c0_col < 0 ||
-            throttle_avail_col < 0 ||
-            throttle_c0_col < 0 ||
-            stage_command_col < 0 ||
-            stage_plan_col < 0 ||
-            stage_pulses_col < 0 ||
-            shutdown_before_stage_col < 0 ||
-            yaw_col < 0 ||
-            pitch_col < 0 ||
-            roll_deg_col < 0 ||
-            roll_lock_col < 0) {
-            std::cerr << "kOS CSV header is missing guidance/event columns\n";
-            return 1;
-        }
 
-        bool attitude_in_range = true;
-
-        int stage_command_count = 0;
-        double stage_plan_time_s = -1.0;
-        double stage_pulses = 0.0;
-        double shutdown_before_stage = 0.0;
-        bool saw_phase0_poly = false;
-        bool saw_phase1_non_poly_throttle = false;
+        bool saw_meta = false;
+        int stage_rows = 0;
+        bool phase0_generic_poly = false;
+        bool phase0_poly_throttle = false;
+        bool phase0_poly_angles = false;
+        bool phase1_non_poly_throttle = false;
+        int phase1_action_rows = 0;
+        bool phase1_stage_active_action = false;
+        bool phase1_stage_attached_action = false;
         while (std::getline(input, line)) {
             if (line.empty()) {
                 continue;
             }
             const auto row = split_csv(line);
-            const int phase_index = static_cast<int>(value_at(row, phase_index_col));
-            if (phase_index == 0 &&
-                value_at(row, steer_avail_col) == 1.0 &&
-                value_at(row, roll_avail_col) == 0.0 &&
-                value_at(row, throttle_avail_col) == 1.0 &&
-                std::abs(value_at(row, az_c0_col) - 90.0) < 1.0e-12 &&
-                std::abs(value_at(row, el_c0_col) - 5.0) < 1.0e-12 &&
-                std::abs(value_at(row, roll_c0_col)) < 1.0e-12 &&
-                std::abs(value_at(row, throttle_c0_col) - 0.5) < 1.0e-12) {
-                saw_phase0_poly = true;
-            }
-            if (phase_index == 1 && value_at(row, throttle_avail_col) == 0.0) {
-                saw_phase1_non_poly_throttle = true;
-            }
-            if (value_at(row, stage_command_col) > 0.5) {
-                ++stage_command_count;
-                stage_plan_time_s = value_at(row, stage_plan_col);
-                stage_pulses = value_at(row, stage_pulses_col);
-                shutdown_before_stage = value_at(row, shutdown_before_stage_col);
-            }
-
-            // Host-computed navball attitude must stay in range (no NaN escaping
-            // the near-vertical singularity, no out-of-band pitch/heading). The
-            // !(in-range) form also rejects NaN, whose comparisons are all false.
-            const double yaw_deg = value_at(row, yaw_col);
-            const double pitch_deg = value_at(row, pitch_col);
-            const double roll_lock = value_at(row, roll_lock_col);
-            if (!(yaw_deg >= 0.0 && yaw_deg < 360.0) ||
-                !(pitch_deg >= -90.0 && pitch_deg <= 90.0) ||
-                !(roll_lock == 0.0 || roll_lock == 1.0)) {
-                attitude_in_range = false;
-            }
-        }
-
-        if (!attitude_in_range) {
-            std::cerr << "kOS CSV navball attitude out of range (yaw/pitch/roll_lock)\n";
-            return 1;
-        }
-
-        if (!saw_phase0_poly ||
-            !saw_phase1_non_poly_throttle ||
-            stage_command_count != 1 ||
-            std::abs(stage_plan_time_s - loaded_case.phases[0].termination.value) > 1.0e-9 ||
-            std::abs(stage_pulses - 1.0) > 1.0e-12 ||
-            std::abs(shutdown_before_stage - 1.0) > 1.0e-12) {
-            std::cerr << "kOS CSV did not encode expected guidance/stage event data\n";
-            return 1;
-        }
-    }
-
-    {
-        post2::core::CaseConfig pulse_case;
-        pulse_case.vehicle = loaded_vehicle_config;
-        pulse_case.vehicle.stages[0].name = "booster";
-        pulse_case.vehicle.stages[0].active = true;
-        pulse_case.vehicle.stages[0].attached = true;
-        pulse_case.vehicle.stages[1].name = "upper";
-        pulse_case.vehicle.stages[1].active = false;
-        pulse_case.vehicle.stages[1].attached = true;
-        post2::core::PhaseConfig pulse_phase0;
-        pulse_phase0.termination.value = 1.0;
-        post2::core::PhaseConfig pulse_phase1;
-        pulse_phase1.termination.value = 1.0;
-        pulse_case.phases = {pulse_phase0, pulse_phase1};
-
-        post2::core::StateLog pulse_log(pulse_case.earth_radius_m, pulse_case.vehicle);
-        post2::core::State pulse_state{
-            {post2::core::kEarthRadiusM + 1000.0, 0.0, 0.0},
-            {0.0, 0.0, 0.0},
-        };
-        auto runtime = post2::vehicle::make_initial_runtime_state(pulse_case.vehicle, pulse_state, 0.0);
-        pulse_log.set_phase_metadata(0, "boost");
-        pulse_log.append(pulse_log.build_entry(runtime));
-        post2::vehicle::set_stage_active(&runtime, 0, false);
-        post2::vehicle::set_stage_attached(&runtime, 0, false);
-        post2::vehicle::set_stage_active(&runtime, 1, true);
-        runtime.time_s = 1.0;
-        pulse_log.set_phase_metadata(1, "upper");
-        pulse_log.append(pulse_log.build_entry(runtime));
-
-        const auto split_csv = [](const std::string& line) {
-            std::vector<std::string> parts;
-            std::istringstream input(line);
-            std::string item;
-            while (std::getline(input, item, ',')) {
-                parts.push_back(item);
-            }
-            return parts;
-        };
-        const auto find_col = [](const std::vector<std::string>& header, const std::string& name) {
-            const auto it = std::find(header.begin(), header.end(), name);
-            return it == header.end() ? -1 : static_cast<int>(std::distance(header.begin(), it));
-        };
-        const auto value_at = [](const std::vector<std::string>& row, int index) {
-            return index >= 0 && static_cast<std::size_t>(index) < row.size()
-                ? std::stod(row[static_cast<std::size_t>(index)])
-                : 0.0;
-        };
-
-        const auto pulse_csv = post2::core::kos_trajectory_to_csv(pulse_log, pulse_case);
-        std::istringstream input(pulse_csv);
-        std::string line;
-        std::getline(input, line);
-        const auto header = split_csv(line);
-        const int command_col = find_col(header, "kos_stage_command");
-        const int pulses_col = find_col(header, "kos_stage_pulse_count");
-        const int shutdown_col = find_col(header, "kos_shutdown_before_stage");
-        bool saw_double_pulse = false;
-        while (std::getline(input, line)) {
-            if (line.empty()) {
+            if (row.empty()) {
                 continue;
             }
-            const auto row = split_csv(line);
-            if (value_at(row, command_col) > 0.5 &&
-                std::abs(value_at(row, pulses_col) - 2.0) < 1.0e-12 &&
-                std::abs(value_at(row, shutdown_col) - 1.0) < 1.0e-12) {
-                saw_double_pulse = true;
+            const std::string& record = row[0];
+            if (record == "META") {
+                // META,name,mu,radius,...
+                saw_meta = row.size() >= 4 &&
+                    std::abs(value_at(row, 2) - loaded_case.earth_mu_m3s2) < 1.0e-3 &&
+                    std::abs(value_at(row, 3) - loaded_case.earth_radius_m) < 1.0e-6;
+            } else if (record == "STAGE") {
+                ++stage_rows;
+            } else if (record == "PHASE") {
+                // PHASE,phase_index,name,steering_type,...,throttle_type,...
+                const int phase_index = static_cast<int>(value_at(row, 1));
+                const std::string steering_type = row.size() > 3 ? row[3] : "";
+                const std::string throttle_type = row.size() > 7 ? row[7] : "";
+                if (phase_index == 0) {
+                    phase0_generic_poly = steering_type == "generic_poly";
+                    phase0_poly_throttle = throttle_type == "poly" &&
+                        std::abs(value_at(row, 8) - 0.5) < 1.0e-12;
+                }
+                if (phase_index == 1) {
+                    phase1_non_poly_throttle = throttle_type == "t2w";
+                }
+            } else if (record == "POLY") {
+                // POLY,phase_index,az_c0,az_c1,az_c2,el_c0,el_c1,el_c2,roll_c0,...
+                if (static_cast<int>(value_at(row, 1)) == 0) {
+                    phase0_poly_angles =
+                        std::abs(value_at(row, 2) - 90.0) < 1.0e-12 &&
+                        std::abs(value_at(row, 5) - 5.0) < 1.0e-12 &&
+                        std::abs(value_at(row, 8)) < 1.0e-12;
+                }
+            } else if (record == "ACTION") {
+                // ACTION,phase_index,time_s,type,value,stage_index,stage_name
+                if (static_cast<int>(value_at(row, 1)) == 1) {
+                    ++phase1_action_rows;
+                    const std::string type = row.size() > 3 ? row[3] : "";
+                    const int stage_index = static_cast<int>(value_at(row, 5));
+                    if (type == "set_stage_active" && stage_index == 1) {
+                        phase1_stage_active_action = true;
+                    }
+                    if (type == "set_stage_attached" && stage_index == 1) {
+                        phase1_stage_attached_action = true;
+                    }
+                }
             }
         }
-        if (!saw_double_pulse) {
-            std::cerr << "kOS CSV did not encode shutdown + separation + ignition pulses\n";
+
+        if (!saw_meta ||
+            stage_rows != static_cast<int>(loaded_case.vehicle.stages.size()) ||
+            !phase0_generic_poly ||
+            !phase0_poly_throttle ||
+            !phase0_poly_angles ||
+            !phase1_non_poly_throttle ||
+            phase1_action_rows != 2 ||
+            !phase1_stage_active_action ||
+            !phase1_stage_attached_action) {
+            std::cerr << "guidance script CSV did not encode expected per-phase guidance/actions\n";
             return 1;
         }
     }

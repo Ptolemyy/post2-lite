@@ -1,8 +1,10 @@
 #include "post2/propagation/force_model.hpp"
 
+#include "post2/aero/aero_table.hpp"
 #include "post2/propagation/force_models.hpp"
 
 #include <cmath>
+#include <string>
 
 namespace post2::propagation {
 
@@ -49,6 +51,128 @@ ForceModelOutput zero_output()
     return {};
 }
 
+post2::core::Vec3 scale_vec(const post2::core::Vec3& v, double s)
+{
+    return {v.x * s, v.y * s, v.z * s};
+}
+
+double dot_vec(const post2::core::Vec3& a, const post2::core::Vec3& b)
+{
+    return a.x * b.x + a.y * b.y + a.z * b.z;
+}
+
+// Loads (once, cached by path) an offline-generated aero table. Several tables
+// (one per staging configuration) may be live at once, so the cache keeps each
+// loaded path. Returns nullptr when the path is empty or fails to load.
+const post2::aero::AeroTable* load_cached_aero_table(const std::string& path)
+{
+    struct CacheEntry {
+        std::string path;
+        post2::aero::AeroTable table;
+        bool ok = false;
+    };
+    static std::vector<CacheEntry> cache;
+    if (path.empty()) {
+        return nullptr;
+    }
+    for (const auto& entry : cache) {
+        if (entry.path == path) {
+            return entry.ok ? &entry.table : nullptr;
+        }
+    }
+    CacheEntry entry;
+    entry.path = path;
+    std::string error;
+    entry.ok = post2::aero::read_aero_table_csv(path, &entry.table, &error);
+    cache.push_back(std::move(entry));
+    const CacheEntry& stored = cache.back();
+    return stored.ok ? &stored.table : nullptr;
+}
+
+// Index of the lowest stage still attached (== the current staging
+// configuration). All-attached -> 0; after the booster separates -> 1; etc.
+int current_min_attached_stage(const post2::vehicle::VehicleRuntimeState& runtime)
+{
+    for (std::size_t i = 0; i < runtime.stages.size(); ++i) {
+        if (runtime.stages[i].attached) {
+            return static_cast<int>(i);
+        }
+    }
+    return runtime.stages.empty() ? 0 : static_cast<int>(runtime.stages.size()) - 1;
+}
+
+struct ActiveAeroTable {
+    std::string path;
+    double reference_area_m2 = 0.0;
+};
+
+// Picks the table whose activate_at_min_attached_stage is the largest value not
+// exceeding the current configuration. Falls back to the single legacy table.
+ActiveAeroTable select_active_aero_table(const post2::vehicle::AeroConfig& aero,
+                                         const post2::vehicle::VehicleRuntimeState& runtime)
+{
+    ActiveAeroTable result;
+    if (aero.stage_tables.empty()) {
+        result.path = aero.aero_table_path;
+        result.reference_area_m2 = aero.reference_area_m2;
+        return result;
+    }
+    const int key = current_min_attached_stage(runtime);
+    const post2::vehicle::AeroStageTable* best = nullptr;
+    for (const auto& entry : aero.stage_tables) {
+        if (entry.activate_at_min_attached_stage <= key &&
+            (best == nullptr ||
+             entry.activate_at_min_attached_stage > best->activate_at_min_attached_stage)) {
+            best = &entry;
+        }
+    }
+    if (best == nullptr) {
+        best = &aero.stage_tables.front();  // current config below all entries -> first
+    }
+    result.path = best->table_path;
+    result.reference_area_m2 =
+        best->reference_area_m2 > 0.0 ? best->reference_area_m2 : aero.reference_area_m2;
+    return result;
+}
+
+struct AeroFlow {
+    post2::core::Vec3 v_rel_mps{0.0, 0.0, 0.0};
+    double speed_mps = 0.0;
+    double mach = 0.0;
+    double alpha_deg = 0.0;
+    post2::core::Vec3 body_axis{0.0, 0.0, 0.0};  // unit thrust/body direction (0 if coasting)
+    bool has_body_axis = false;
+};
+
+// Atmosphere-relative velocity, Mach, and angle of attack (body axis taken from
+// the thrust direction; alpha = 0 while coasting).
+AeroFlow compute_aero_flow(const ForceModelContext& context,
+                           const post2::integrators::ExtendedState& state)
+{
+    AeroFlow flow;
+    const double omega_radps = context.case_config->earth_rotation_rad_per_s;
+    const post2::core::Vec3 atmosphere_velocity_mps =
+        cross_product({0.0, 0.0, omega_radps}, state.motion.position_m);
+    flow.v_rel_mps =
+        state.motion.velocity_mps - atmosphere_velocity_mps - context.environment->wind_eci_mps;
+    flow.speed_mps = post2::vehicle::norm(flow.v_rel_mps);
+    if (flow.speed_mps <= 1.0e-9) {
+        return flow;
+    }
+    const double a = context.environment->speed_of_sound_mps;
+    flow.mach = a > 0.0 ? flow.speed_mps / a : 0.0;
+
+    const double thrust_mag = post2::vehicle::norm(context.thrust_acceleration_eci_mps2);
+    if (thrust_mag > 1.0e-9) {
+        flow.body_axis = scale_vec(context.thrust_acceleration_eci_mps2, 1.0 / thrust_mag);
+        flow.has_body_axis = true;
+        const post2::core::Vec3 v_hat = scale_vec(flow.v_rel_mps, 1.0 / flow.speed_mps);
+        const double c = std::max(-1.0, std::min(1.0, dot_vec(flow.body_axis, v_hat)));
+        flow.alpha_deg = std::acos(c) * (180.0 / 3.14159265358979323846);
+    }
+    return flow;
+}
+
 } // namespace
 
 ForceModelOutput PointMassGravityModel::evaluate(
@@ -89,35 +213,91 @@ ForceModelOutput AtmosphericDragModel::evaluate(
     const post2::vehicle::AeroConfig& aero = context.case_config->vehicle.aero;
     if (!aero.enabled ||
         aero.reference_area_m2 <= 0.0 ||
-        aero.cd <= 0.0 ||
         context.runtime->vehicle.total_mass_kg <= 0.0 ||
         context.environment->density_kgpm3 <= 0.0) {
         return zero_output();
     }
 
-    const double omega_radps = context.case_config->earth_rotation_rad_per_s;
-    const post2::core::Vec3 atmosphere_rotation_velocity_mps =
-        cross_product({0.0, 0.0, omega_radps}, state.motion.position_m);
-    const post2::core::Vec3 relative_velocity_mps =
-        state.motion.velocity_mps - atmosphere_rotation_velocity_mps - context.environment->wind_eci_mps;
-    const double relative_speed_mps = post2::vehicle::norm(relative_velocity_mps);
-    if (relative_speed_mps <= 1.0e-12) {
+    const AeroFlow flow = compute_aero_flow(context, state);
+    if (flow.speed_mps <= 1.0e-12) {
+        return zero_output();
+    }
+
+    double cd = aero.cd;
+    double reference_area_m2 = aero.reference_area_m2;
+    if (aero.use_table) {
+        const ActiveAeroTable active = select_active_aero_table(aero, *context.runtime);
+        const post2::aero::AeroTable* table = load_cached_aero_table(active.path);
+        if (table != nullptr) {
+            double cd_table = 0.0;
+            double cl_table = 0.0;
+            table->lookup(flow.mach, flow.alpha_deg, &cd_table, &cl_table);
+            cd = cd_table;
+            reference_area_m2 = table->reference_area_m2 > 0.0 ? table->reference_area_m2
+                                                              : active.reference_area_m2;
+        }
+    }
+    if (cd <= 0.0) {
         return zero_output();
     }
 
     const double factor =
-        -0.5 * context.environment->density_kgpm3 * aero.cd * aero.reference_area_m2 /
-        context.runtime->vehicle.total_mass_kg * relative_speed_mps;
-    return {relative_velocity_mps * factor};
+        -0.5 * context.environment->density_kgpm3 * cd * reference_area_m2 /
+        context.runtime->vehicle.total_mass_kg * flow.speed_mps;
+    return {flow.v_rel_mps * factor};
 }
 
 ForceModelOutput LiftAeroModel::evaluate(
     const ForceModelContext& context,
     const post2::integrators::ExtendedState& state) const
 {
-    (void)context;
-    (void)state;
-    return zero_output();
+    if (!context.case_config || !context.runtime || !context.environment) {
+        return zero_output();
+    }
+    const post2::vehicle::AeroConfig& aero = context.case_config->vehicle.aero;
+    if (!aero.enabled || !aero.use_table ||
+        aero.reference_area_m2 <= 0.0 ||
+        context.runtime->vehicle.total_mass_kg <= 0.0 ||
+        context.environment->density_kgpm3 <= 0.0) {
+        return zero_output();
+    }
+
+    const ActiveAeroTable active = select_active_aero_table(aero, *context.runtime);
+    const post2::aero::AeroTable* table = load_cached_aero_table(active.path);
+    if (table == nullptr) {
+        return zero_output();
+    }
+
+    const AeroFlow flow = compute_aero_flow(context, state);
+    if (flow.speed_mps <= 1.0e-12 || !flow.has_body_axis) {
+        return zero_output();  // no attitude reference -> assume zero lift
+    }
+
+    double cd_table = 0.0;
+    double cl_table = 0.0;
+    table->lookup(flow.mach, flow.alpha_deg, &cd_table, &cl_table);
+    if (std::fabs(cl_table) <= 1.0e-9) {
+        return zero_output();
+    }
+
+    // Lift acts perpendicular to v_rel, in the (v_rel, body axis) plane, toward
+    // the body axis (the side the nose is offset to).
+    const post2::core::Vec3 v_hat = scale_vec(flow.v_rel_mps, 1.0 / flow.speed_mps);
+    const double axial = dot_vec(flow.body_axis, v_hat);
+    const post2::core::Vec3 lift_dir_raw = flow.body_axis - scale_vec(v_hat, axial);
+    const double lift_dir_norm = post2::vehicle::norm(lift_dir_raw);
+    if (lift_dir_norm <= 1.0e-9) {
+        return zero_output();
+    }
+    const post2::core::Vec3 lift_dir = scale_vec(lift_dir_raw, 1.0 / lift_dir_norm);
+
+    double reference_area_m2 = aero.reference_area_m2;
+    if (table->reference_area_m2 > 0.0) {
+        reference_area_m2 = table->reference_area_m2;
+    }
+    const double q = 0.5 * context.environment->density_kgpm3 * flow.speed_mps * flow.speed_mps;
+    const double accel = q * cl_table * reference_area_m2 / context.runtime->vehicle.total_mass_kg;
+    return {scale_vec(lift_dir, accel)};
 }
 
 ForceModelOutput ThrustForceModel::evaluate(

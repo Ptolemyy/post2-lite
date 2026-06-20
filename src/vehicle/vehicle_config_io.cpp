@@ -517,6 +517,8 @@ void write_engine_extended_fields(
     output << prefix << "min_throttle=" << engine.min_throttle << '\n';
     output << prefix << "max_throttle=" << engine.max_throttle << '\n';
     output << prefix << "ignition_delay_s=" << engine.ignition_delay_s << '\n';
+    output << prefix << "spool_up_rate_per_s=" << engine.spool_up_rate_per_s << '\n';
+    output << prefix << "spool_down_rate_per_s=" << engine.spool_down_rate_per_s << '\n';
     output << prefix << "thrust_buildup_s=" << engine.thrust_buildup_s << '\n';
     output << prefix << "shutdown_delay_s=" << engine.shutdown_delay_s << '\n';
     output << prefix << "engine_count=" << engine.engine_count << '\n';
@@ -709,6 +711,8 @@ bool vehicle_config_from_text(const std::string& text, VehicleConfig* config, st
             !set_double((prefix + "min_throttle").c_str(), &engine->min_throttle) ||
             !set_double((prefix + "max_throttle").c_str(), &engine->max_throttle) ||
             !set_double((prefix + "ignition_delay_s").c_str(), &engine->ignition_delay_s) ||
+            !set_double((prefix + "spool_up_rate_per_s").c_str(), &engine->spool_up_rate_per_s) ||
+            !set_double((prefix + "spool_down_rate_per_s").c_str(), &engine->spool_down_rate_per_s) ||
             !set_double((prefix + "thrust_buildup_s").c_str(), &engine->thrust_buildup_s) ||
             !set_double((prefix + "shutdown_delay_s").c_str(), &engine->shutdown_delay_s) ||
             !set_double((prefix + "gimbal_max_rad").c_str(), &engine->gimbal_max_rad) ||
@@ -985,6 +989,20 @@ bool vehicle_config_from_text(const std::string& text, VehicleConfig* config, st
                 }
             } else if (field == "engine.ignition_delay_s") {
                 if (!parse_double(value, &stage.engine.ignition_delay_s)) {
+                    if (error) {
+                        *error = "invalid number for " + key;
+                    }
+                    return false;
+                }
+            } else if (field == "engine.spool_up_rate_per_s") {
+                if (!parse_double(value, &stage.engine.spool_up_rate_per_s)) {
+                    if (error) {
+                        *error = "invalid number for " + key;
+                    }
+                    return false;
+                }
+            } else if (field == "engine.spool_down_rate_per_s") {
+                if (!parse_double(value, &stage.engine.spool_down_rate_per_s)) {
                     if (error) {
                         *error = "invalid number for " + key;
                     }

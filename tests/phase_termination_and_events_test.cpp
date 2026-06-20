@@ -218,6 +218,45 @@ int test_altitude_termination()
     return 0;
 }
 
+int test_initially_satisfied_phase_termination()
+{
+    post2::core::CaseConfig config = make_base_case();
+    auto phase = make_default_phase(config);
+    phase.inherit_initial_state = false;
+    phase.force_models.thrust = false;
+    phase.force_models.normal_force = false;
+    phase.force_models.aerodynamic = false;
+
+    const double orbit_altitude_m = 200000.0;
+    const double radius_m = config.earth_radius_m + orbit_altitude_m;
+    const double circular_speed_mps = std::sqrt(config.earth_mu_m3s2 / radius_m);
+    phase.initial_state_eci = post2::core::State{
+        {radius_m, 0.0, 0.0},
+        {0.0, circular_speed_mps, 0.0},
+    };
+    phase.termination = {"periapsis_altitude_m", ">=", 170000.0};
+    config.phases.push_back(phase);
+
+    post2::core::LocalTrajectoryService service;
+    const auto result = service.simulate(config);
+    if (!result.ok) {
+        std::cerr << "initially satisfied termination simulation failed: "
+                  << result.error << '\n';
+        return 1;
+    }
+    if (result.state_log.size() != 1) {
+        std::cerr << "initially satisfied termination should stop at the initial entry, got "
+                  << result.state_log.size() << " entries\n";
+        return 1;
+    }
+    if (std::abs(result.state_log.back().time_s) > 1.0e-9) {
+        std::cerr << "initially satisfied termination advanced to t="
+                  << result.state_log.back().time_s << '\n';
+        return 1;
+    }
+    return 0;
+}
+
 int test_mission_event_fires_and_deactivates_stage()
 {
     post2::core::CaseConfig config = make_base_case();
@@ -439,12 +478,129 @@ int test_phase_continuity_reanchors_throttle_and_steering()
 
 } // namespace
 
+// The engine spool transient (ignition dead-time + first-order spool) and the
+// "thrust_fraction" termination must survive a JSON round-trip.
+int test_spool_and_thrust_fraction_json_roundtrip()
+{
+    post2::core::CaseConfig config = make_base_case();
+    config.vehicle.stages[0].engine.ignition_delay_s = 1.0;
+    config.vehicle.stages[0].engine.spool_up_rate_per_s = 5.0;
+    config.vehicle.stages[0].engine.spool_down_rate_per_s = 4.0;
+    config.vehicle.engine = config.vehicle.stages[0].engine;
+    auto phase = make_default_phase(config);
+    phase.termination = {"thrust_fraction", ">=", 0.95};
+    config.phases.push_back(phase);
+
+    const std::string json = post2::core::case_config_to_json(config);
+    post2::core::CaseConfig reloaded;
+    std::string error;
+    if (!post2::core::case_config_from_json(json, &reloaded, &error)) {
+        std::cerr << "spool/thrust_fraction reload failed: " << error << '\n';
+        return 1;
+    }
+    if (reloaded.phases.size() != 1 ||
+        reloaded.phases[0].termination.type != "thrust_fraction" ||
+        std::abs(reloaded.phases[0].termination.value - 0.95) > 1.0e-9) {
+        std::cerr << "thrust_fraction termination did not survive roundtrip\n";
+        return 1;
+    }
+    const auto& e = reloaded.vehicle.stages[0].engine;
+    if (std::abs(e.ignition_delay_s - 1.0) > 1.0e-9 ||
+        std::abs(e.spool_up_rate_per_s - 5.0) > 1.0e-9 ||
+        std::abs(e.spool_down_rate_per_s - 4.0) > 1.0e-9) {
+        std::cerr << "engine spool fields did not survive roundtrip\n";
+        return 1;
+    }
+    return 0;
+}
+
+// A clamped ignition phase: thrust must be zero through the ignition dead-time,
+// spool up, and the "thrust_fraction" termination must release the phase once
+// actual thrust reaches 95% of the commanded steady thrust. With
+// ignition_delay = 1.0 s and spool_up_rate = 5.0 /s, the 0.95 crossing is at
+// t = 1.0 + ln(1/0.05)/5 ≈ 1.6 s.
+int test_thrust_fraction_termination_ends_on_spool()
+{
+    post2::core::CaseConfig config = make_base_case();
+    config.step_s = 0.1;  // resolve the ignition dead-time with sub-second samples
+    config.vehicle.stages[0].engine.ignition_delay_s = 1.0;
+    config.vehicle.stages[0].engine.spool_up_rate_per_s = 5.0;
+    config.vehicle.stages[0].engine.spool_down_rate_per_s = 5.0;
+    config.vehicle.engine = config.vehicle.stages[0].engine;
+
+    auto phase = make_default_phase(config);
+    phase.hold_down_clamp_initial_active = true;
+    phase.force_models.normal_force = true;
+    phase.force_models.thrust = true;
+    phase.throttle_model.type = "poly";
+    phase.throttle_model.c0 = 1.0;
+    post2::core::PhaseAction ignite;
+    ignite.time_s = 0.0;
+    ignite.type = "set_engine_enabled";
+    ignite.value = true;
+    phase.actions.push_back(ignite);
+    phase.termination = {"thrust_fraction", ">=", 0.95};
+    config.phases.push_back(phase);
+
+    post2::core::LocalTrajectoryService service;
+    const auto result = service.simulate(config);
+    if (!result.ok) {
+        std::cerr << "thrust_fraction simulation failed: " << result.error << '\n';
+        return 1;
+    }
+    if (result.state_log.empty()) {
+        std::cerr << "thrust_fraction produced empty state log\n";
+        return 1;
+    }
+
+    // During the ignition dead-time (t < 1.0 s) there is no thrust and the
+    // vehicle stays clamped at the pad.
+    bool saw_deadtime = false;
+    for (const auto& entry : result.state_log.entries()) {
+        if (entry.time_s > 0.2 && entry.time_s < 0.9) {
+            saw_deadtime = true;
+            if (entry.runtime.engine.actual_thrust_n > 1.0) {
+                std::cerr << "thrust during ignition dead-time: "
+                          << entry.runtime.engine.actual_thrust_n << " at t=" << entry.time_s << '\n';
+                return 1;
+            }
+            if (!entry.hold_down_clamp_active) {
+                std::cerr << "clamp released during dead-time at t=" << entry.time_s << '\n';
+                return 1;
+            }
+        }
+    }
+    if (!saw_deadtime) {
+        std::cerr << "no log entries inside the ignition dead-time window\n";
+        return 1;
+    }
+
+    // The phase ends when thrust is established, near t ≈ 1.6 s and well before
+    // any runaway, with actual thrust at ~95% of the commanded steady thrust.
+    const auto& last = result.state_log.back();
+    if (last.time_s < 1.4 || last.time_s > 2.0) {
+        std::cerr << "thrust established at unexpected time t=" << last.time_s << '\n';
+        return 1;
+    }
+    const double commanded = last.runtime.engine.commanded_thrust_n;
+    const double actual = last.runtime.engine.actual_thrust_n;
+    if (commanded <= 0.0 || actual / commanded < 0.95 || actual / commanded > 0.99) {
+        std::cerr << "thrust fraction at termination out of range: "
+                  << (commanded > 0.0 ? actual / commanded : 0.0) << '\n';
+        return 1;
+    }
+    return 0;
+}
+
 int main()
 {
     int failures = 0;
     failures += test_trigger_and_event_json_roundtrip();
+    failures += test_spool_and_thrust_fraction_json_roundtrip();
+    failures += test_thrust_fraction_termination_ends_on_spool();
     failures += test_legacy_duration_s_synthesises_termination();
     failures += test_altitude_termination();
+    failures += test_initially_satisfied_phase_termination();
     failures += test_mission_event_fires_and_deactivates_stage();
     failures += test_continuity_flags_json_roundtrip();
     failures += test_phase_continuity_reanchors_throttle_and_steering();

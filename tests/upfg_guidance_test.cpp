@@ -277,6 +277,80 @@ bool test_upfg_reaches_orbit()
     return true;
 }
 
+bool test_upfg_flameout_stops_non_time_phase()
+{
+    post2::vehicle::VehicleConfig vehicle;
+    vehicle.name = "upfg-underfueled";
+    post2::vehicle::StageConfig stage;
+    stage.name = "upper";
+    stage.active = true;
+    stage.attached = true;
+    stage.dry_mass_kg = 10000.0;
+    stage.engine.enabled = true;
+    stage.engine.thrust_vac_n = 1.2e6;
+    stage.engine.isp_vac_s = 340.0;
+    stage.engine.engine_count = 1;
+    stage.engine.feed_tanks = {{"upper", "main"}};
+    stage.tanks = {{"main", "lox", 1000.0, 1000.0}};
+    vehicle.stages = {stage};
+    post2::vehicle::sync_legacy_vehicle_fields_from_first_stage(&vehicle);
+
+    post2::core::CaseConfig case_config;
+    case_config.name = "upfg-underfueled";
+    case_config.earth_radius_m = kRe;
+    case_config.earth_mu_m3s2 = kMu;
+    case_config.earth_rotation_rad_per_s = 0.0;
+    case_config.step_s = 0.5;
+    case_config.vehicle = vehicle;
+
+    post2::core::PhaseConfig phase;
+    phase.name = "upfg insert";
+    phase.inherit_initial_state = false;
+    phase.initial_state_eci = post2::core::State{{kRe + 100000.0, 0.0, 0.0}, {200.0, 3000.0, 0.0}};
+    phase.termination.type = "periapsis_altitude_m";
+    phase.termination.comparison = ">=";
+    phase.termination.value = 250000.0;
+    phase.integrator = "dopri5";
+    phase.tolerances.rtol = 1.0e-7;
+    phase.force_models.gravity = true;
+    phase.force_models.thrust = true;
+    phase.force_models.normal_force = false;
+    phase.force_models.aerodynamic = false;
+    phase.force_models.gravity_model.type = "point_mass";
+    phase.throttle_model.type = "poly";
+    phase.throttle_model.c0 = 1.0;
+    phase.steering_model.type = "upfg";
+    phase.steering_model.upfg.periapsis_km = 300.0;
+    phase.steering_model.upfg.apoapsis_km = 300.0;
+    phase.steering_model.upfg.inclination_deg = 0.0;
+    post2::core::PhaseAction enable_engine;
+    enable_engine.time_s = 0.0;
+    enable_engine.type = "set_engine_enabled";
+    enable_engine.value = true;
+    phase.actions.push_back(enable_engine);
+    case_config.phases = {phase};
+
+    post2::core::LocalTrajectoryService service;
+    const auto result = service.simulate(case_config);
+    if (!result.ok) {
+        return fail("upfg-flameout: simulation failed: " + result.error);
+    }
+    if (result.state_log.empty()) {
+        return fail("upfg-flameout: empty state log");
+    }
+    const auto& last = result.state_log.back();
+    if (last.time_s > 100.0) {
+        std::cerr << "upfg-flameout: coasted after flameout to t=" << last.time_s << " s\n";
+        return false;
+    }
+    if (last.propellant_mass_kg > 1.0) {
+        std::cerr << "upfg-flameout: stopped before propellant was depleted, remaining "
+                  << last.propellant_mass_kg << " kg\n";
+        return false;
+    }
+    return true;
+}
+
 } // namespace
 
 int main()
@@ -291,6 +365,9 @@ int main()
         return 1;
     }
     if (!test_upfg_reaches_orbit()) {
+        return 1;
+    }
+    if (!test_upfg_flameout_stops_non_time_phase()) {
         return 1;
     }
     return 0;

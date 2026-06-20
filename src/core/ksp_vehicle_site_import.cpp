@@ -199,6 +199,8 @@ struct KspPart {
     double wet_mass_kg = 0.0;
     double current_mass_kg = 0.0;
     bool has_engine = false;
+    bool has_position = false;
+    double position_m[3] = {0.0, 0.0, 0.0};
     std::vector<std::string> module_names;
     std::vector<KspResource> resources;
     KspEngine engine;
@@ -344,6 +346,13 @@ post2::vehicle::StageConfig stage_config_from_accum(const StageAccum& accum, boo
             : stage.engine.isp_vac_s;
         stage.engine.engine_count = 1;
         stage.engine.direction_body = {1.0, 0.0, 0.0};
+        // Transient thrust defaults derived from the KSP engine spool capture:
+        // a ~2.4 s ignition dead-time then a ~3.5 throttle-fraction/s first-order
+        // spool, which together reproduce the ~3.7 s cold-start build to full
+        // thrust. Applied to every imported stage (same parameters for now).
+        stage.engine.ignition_delay_s = 2.4;
+        stage.engine.spool_up_rate_per_s = 3.5;
+        stage.engine.spool_down_rate_per_s = 3.5;
         if (stage.tanks.empty()) {
             post2::vehicle::TankConfig tank;
             tank.name = "main";
@@ -438,6 +447,13 @@ KspPart parse_part(const JsonValue& value)
     }
     read_bool(value, "has_engine", &part.has_engine);
 
+    if (const JsonValue* pos = member(value, "position_m")) {
+        const bool x = read_number(*pos, "x", &part.position_m[0]);
+        const bool y = read_number(*pos, "y", &part.position_m[1]);
+        const bool z = read_number(*pos, "z", &part.position_m[2]);
+        part.has_position = x || y || z;
+    }
+
     if (const JsonValue* modules = member(value, "module_names")) {
         part.module_names = parse_string_array(*modules);
     }
@@ -469,6 +485,52 @@ std::vector<KspPart> parse_parts(const JsonValue& root)
         parts.push_back(parse_part(part_value));
     }
     return parts;
+}
+
+// Length, taken as the largest extent among the three position axes, over the
+// parts for which keep(part) is true (the long/thrust axis dominates for a
+// stacked vehicle).
+template <typename Pred>
+double length_from_parts(const std::vector<KspPart>& parts, Pred keep)
+{
+    bool any = false;
+    double lo[3] = {0.0, 0.0, 0.0};
+    double hi[3] = {0.0, 0.0, 0.0};
+    for (const auto& part : parts) {
+        if (!part.has_position || !keep(part)) {
+            continue;
+        }
+        for (int axis = 0; axis < 3; ++axis) {
+            if (!any) {
+                lo[axis] = hi[axis] = part.position_m[axis];
+            } else {
+                lo[axis] = std::min(lo[axis], part.position_m[axis]);
+                hi[axis] = std::max(hi[axis], part.position_m[axis]);
+            }
+        }
+        any = true;
+    }
+    if (!any) {
+        return 0.0;
+    }
+    double span = 0.0;
+    for (int axis = 0; axis < 3; ++axis) {
+        span = std::max(span, hi[axis] - lo[axis]);
+    }
+    return span;
+}
+
+double vehicle_length_from_parts(const std::vector<KspPart>& parts)
+{
+    return length_from_parts(parts, [](const KspPart&) { return true; });
+}
+
+// Upper stack = everything that is not classified as booster.
+double upper_length_from_parts(const std::vector<KspPart>& parts)
+{
+    return length_from_parts(parts, [](const KspPart& part) {
+        return !contains_case_insensitive(part.physical_stage_name, "booster");
+    });
 }
 
 KspHints parse_hints(const JsonValue& root)
@@ -767,6 +829,16 @@ bool ksp_vehicle_site_import_from_json(
     StageAccum upper;
     StageAccum payload;
     const std::vector<KspPart> parts = parse_parts(root);
+    const double vehicle_length_m = vehicle_length_from_parts(parts);
+    if (vehicle_length_m > 0.0) {
+        imported.vehicle_length_m = vehicle_length_m;
+        imported.has_vehicle_length = true;
+    }
+    const double upper_length_m = upper_length_from_parts(parts);
+    if (upper_length_m > 0.0) {
+        imported.upper_length_m = upper_length_m;
+        imported.has_upper_length = true;
+    }
     if (!parts.empty()) {
         build_from_parts(root, parts, &booster, &upper, &payload);
     } else if (!parse_stage_summaries(root, &booster, &upper, error)) {

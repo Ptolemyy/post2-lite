@@ -166,7 +166,7 @@
         "aerodynamic": true,
         "atmosphere_model": {
           "table_path": "",
-          "type": "us_standard_1976"
+          "type": "exponential"
         },
         "gravity": true,
         "gravity_model": {
@@ -286,7 +286,7 @@
         "aerodynamic": true,
         "atmosphere_model": {
           "table_path": "",
-          "type": "us_standard_1976"
+          "type": "exponential"
         },
         "gravity": true,
         "gravity_model": {
@@ -406,7 +406,7 @@
         "aerodynamic": true,
         "atmosphere_model": {
           "table_path": "",
-          "type": "us_standard_1976"
+          "type": "exponential"
         },
         "gravity": true,
         "gravity_model": {
@@ -434,8 +434,8 @@
         },
         "elevation": {
           "c0": 90,
-          "c1": -0.55000000000000004,
-          "c2": 0.0001,
+          "c1": -0.43435824045149324,
+          "c2": 0.00021371075508112543,
           "continuity": false
         },
         "fixed_direction_eci": [
@@ -500,15 +500,15 @@
           "segments": [
             {
               "coefficients": [
-                1
+                0.83620816823931765
               ],
               "start_time_s": 0
             },
             {
               "coefficients": [
-                1
+                0.82698945977282912
               ],
-              "start_time_s": 40
+              "start_time_s": 40.433978973289761
             },
             {
               "coefficients": [
@@ -569,10 +569,10 @@
         "aero_model": {
           "type": "none"
         },
-        "aerodynamic": true,
+        "aerodynamic": false,
         "atmosphere_model": {
           "table_path": "",
-          "type": "us_standard_1976"
+          "type": "exponential"
         },
         "gravity": true,
         "gravity_model": {
@@ -679,38 +679,19 @@
   "step_s": 1,
   "vehicle": {
     "aero": {
-      "aero_table_path": "C:\\Users\\32796\\Desktop\\post2-lite\\cases\\aero_table_full.csv",
-      "base_diameter_m": 3.6600000000000001,
-      "body_length_m": 49.800227489300894,
+      "aero_table_path": "",
+      "base_diameter_m": 0,
+      "body_length_m": 0,
       "cd": 0.5,
       "cl": 0,
       "enabled": true,
-      "nose_length_m": 8.9640409480741603,
-      "ref_diameter_m": 5.2000000000000002,
-      "reference_area_m2": 21.237166338267002,
-      "stage_tables": [
-        {
-          "activate_at_min_attached_stage": 0,
-          "base_diameter_m": 3.6600000000000001,
-          "body_length_m": 49.800227489300894,
-          "nose_length_m": 8.9640409480741603,
-          "ref_diameter_m": 5.2000000000000002,
-          "reference_area_m2": 21.237166338267002,
-          "table_path": "C:\\Users\\32796\\Desktop\\post2-lite\\cases\\aero_table_full.csv"
-        },
-        {
-          "activate_at_min_attached_stage": 1,
-          "base_diameter_m": 3.6600000000000001,
-          "body_length_m": 19.920090995720358,
-          "nose_length_m": 8.9640409480741603,
-          "ref_diameter_m": 5.2000000000000002,
-          "reference_area_m2": 21.237166338267002,
-          "table_path": "C:\\Users\\32796\\Desktop\\post2-lite\\cases\\aero_table_stage2.csv"
-        }
-      ],
-      "use_table": true
+      "nose_length_m": 0,
+      "ref_diameter_m": 0,
+      "reference_area_m2": 10.5,
+      "stage_tables": [],
+      "use_table": false
     },
-    "dry_mass_kg": 16226.195623050444,
+    "dry_mass_kg": 16226.195623,
     "engine": {
       "direction_body": [
         1,
@@ -834,7 +815,7 @@
       {
         "active": false,
         "attached": true,
-        "dry_mass_kg": 947.63620290905237,
+        "dry_mass_kg": 947.63620300000002,
         "engine": {
           "direction_body": [
             1,
@@ -861,7 +842,14 @@
           "thrust_vac_n": 0
         },
         "name": "payload",
-        "tanks": []
+        "tanks": [
+          {
+            "capacity_kg": 0,
+            "initial_kg": 0,
+            "name": "main",
+            "propellant": "generic"
+          }
+        ]
       }
     ],
     "tank_to_tank_connections": [],

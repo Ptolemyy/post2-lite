@@ -157,6 +157,8 @@ JsonValue engine_to_json(const post2::vehicle::EngineConfig& engine)
         {"max_throttle", number(engine.max_throttle)},
         {"throttle_curve", throttle_curve_to_json(engine.throttle_curve)},
         {"ignition_delay_s", number(engine.ignition_delay_s)},
+        {"spool_up_rate_per_s", number(engine.spool_up_rate_per_s)},
+        {"spool_down_rate_per_s", number(engine.spool_down_rate_per_s)},
         {"thrust_buildup_s", number(engine.thrust_buildup_s)},
         {"shutdown_delay_s", number(engine.shutdown_delay_s)},
         {"engine_count", number(static_cast<double>(engine.engine_count))},
@@ -181,6 +183,7 @@ JsonValue atmosphere_model_to_json(const AtmosphereModelConfig& model)
 {
     return JsonValue::object({
         {"type", string(model.type)},
+        {"table_path", string(model.table_path)},
     });
 }
 
@@ -193,12 +196,32 @@ JsonValue aero_model_to_json(const AeroModelConfig& model)
 
 JsonValue aero_to_json(const post2::vehicle::AeroConfig& aero)
 {
+    JsonValue::Array stage_tables;
+    stage_tables.reserve(aero.stage_tables.size());
+    for (const auto& entry : aero.stage_tables) {
+        stage_tables.push_back(JsonValue::object({
+            {"activate_at_min_attached_stage",
+             number(static_cast<double>(entry.activate_at_min_attached_stage))},
+            {"table_path", string(entry.table_path)},
+            {"reference_area_m2", number(entry.reference_area_m2)},
+            {"ref_diameter_m", number(entry.ref_diameter_m)},
+            {"body_length_m", number(entry.body_length_m)},
+            {"nose_length_m", number(entry.nose_length_m)},
+            {"base_diameter_m", number(entry.base_diameter_m)},
+        }));
+    }
     return JsonValue::object({
         {"enabled", boolean(aero.enabled)},
         {"reference_area_m2", number(aero.reference_area_m2)},
         {"cd", number(aero.cd)},
         {"cl", number(aero.cl)},
         {"aero_table_path", string(aero.aero_table_path)},
+        {"use_table", boolean(aero.use_table)},
+        {"ref_diameter_m", number(aero.ref_diameter_m)},
+        {"body_length_m", number(aero.body_length_m)},
+        {"nose_length_m", number(aero.nose_length_m)},
+        {"base_diameter_m", number(aero.base_diameter_m)},
+        {"stage_tables", JsonValue::array(std::move(stage_tables))},
     });
 }
 
@@ -871,7 +894,8 @@ bool parse_atmosphere_model(const JsonValue& value, AtmosphereModelConfig* targe
     }
 
     AtmosphereModelConfig parsed = *target;
-    if (!read_string(value, "type", &parsed.type, error)) {
+    if (!read_string(value, "type", &parsed.type, error) ||
+        !read_string(value, "table_path", &parsed.table_path, error)) {
         return false;
     }
     *target = parsed;
@@ -915,8 +939,38 @@ bool parse_vehicle_aero(const JsonValue& value, post2::vehicle::AeroConfig* targ
         !read_number(value, "reference_area_m2", &parsed.reference_area_m2, error) ||
         !read_number(value, "cd", &parsed.cd, error) ||
         !read_number(value, "cl", &parsed.cl, error) ||
-        !read_string(value, "aero_table_path", &parsed.aero_table_path, error)) {
+        !read_string(value, "aero_table_path", &parsed.aero_table_path, error) ||
+        !read_bool(value, "use_table", &parsed.use_table, error) ||
+        !read_number(value, "ref_diameter_m", &parsed.ref_diameter_m, error) ||
+        !read_number(value, "body_length_m", &parsed.body_length_m, error) ||
+        !read_number(value, "nose_length_m", &parsed.nose_length_m, error) ||
+        !read_number(value, "base_diameter_m", &parsed.base_diameter_m, error)) {
         return false;
+    }
+    if (const JsonValue* tables = find_member(value, "stage_tables")) {
+        if (!tables->is_array()) {
+            return fail(error, "vehicle.aero.stage_tables must be an array");
+        }
+        parsed.stage_tables.clear();
+        parsed.stage_tables.reserve(tables->array_value.size());
+        for (const JsonValue& item : tables->array_value) {
+            if (!item.is_object()) {
+                return fail(error, "vehicle.aero.stage_tables entries must be objects");
+            }
+            post2::vehicle::AeroStageTable entry;
+            double activate = 0.0;
+            if (!read_number(item, "activate_at_min_attached_stage", &activate, error) ||
+                !read_string(item, "table_path", &entry.table_path, error) ||
+                !read_number(item, "reference_area_m2", &entry.reference_area_m2, error) ||
+                !read_number(item, "ref_diameter_m", &entry.ref_diameter_m, error) ||
+                !read_number(item, "body_length_m", &entry.body_length_m, error) ||
+                !read_number(item, "nose_length_m", &entry.nose_length_m, error) ||
+                !read_number(item, "base_diameter_m", &entry.base_diameter_m, error)) {
+                return false;
+            }
+            entry.activate_at_min_attached_stage = static_cast<int>(activate);
+            parsed.stage_tables.push_back(std::move(entry));
+        }
     }
     *target = std::move(parsed);
     return true;
@@ -999,6 +1053,8 @@ bool parse_vehicle(const JsonValue& value, post2::vehicle::VehicleConfig* target
             !read_number(engine, "min_throttle", &engine_config->min_throttle, error) ||
             !read_number(engine, "max_throttle", &engine_config->max_throttle, error) ||
             !read_number(engine, "ignition_delay_s", &engine_config->ignition_delay_s, error) ||
+            !read_number(engine, "spool_up_rate_per_s", &engine_config->spool_up_rate_per_s, error) ||
+            !read_number(engine, "spool_down_rate_per_s", &engine_config->spool_down_rate_per_s, error) ||
             !read_number(engine, "thrust_buildup_s", &engine_config->thrust_buildup_s, error) ||
             !read_number(engine, "shutdown_delay_s", &engine_config->shutdown_delay_s, error) ||
             !read_number(engine, "gimbal_max_rad", &engine_config->gimbal_max_rad, error) ||
@@ -1479,7 +1535,8 @@ bool parse_trigger_condition(const JsonValue& value, TriggerCondition* target, s
         parsed.type != "apoapsis_altitude_m" &&
         parsed.type != "periapsis_altitude_m" &&
         parsed.type != "orbital_energy" &&
-        parsed.type != "sma_m") {
+        parsed.type != "sma_m" &&
+        parsed.type != "thrust_fraction") {
         return fail(error, "trigger.type unrecognised: " + parsed.type);
     }
     if (parsed.comparison != ">=" && parsed.comparison != "<=") {

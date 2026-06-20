@@ -290,6 +290,9 @@ bool set_stage_active(VehicleRuntimeState* runtime, std::size_t stage_index, boo
         runtime->stages[stage_index].engine.commanded_thrust_n = 0.0;
         runtime->stages[stage_index].engine.actual_thrust_n = 0.0;
         runtime->stages[stage_index].engine.mass_flow_kgps = 0.0;
+        // Reset the spool transient so a later re-ignition starts from rest.
+        runtime->stages[stage_index].engine.spool_throttle = 0.0;
+        runtime->stages[stage_index].engine.ignition_time_s = -1.0;
     }
     refresh_vehicle_masses(runtime);
     return true;
@@ -308,6 +311,8 @@ bool set_stage_attached(VehicleRuntimeState* runtime, std::size_t stage_index, b
         runtime->stages[stage_index].engine.commanded_thrust_n = 0.0;
         runtime->stages[stage_index].engine.actual_thrust_n = 0.0;
         runtime->stages[stage_index].engine.mass_flow_kgps = 0.0;
+        runtime->stages[stage_index].engine.spool_throttle = 0.0;
+        runtime->stages[stage_index].engine.ignition_time_s = -1.0;
     }
     refresh_vehicle_masses(runtime);
     return true;

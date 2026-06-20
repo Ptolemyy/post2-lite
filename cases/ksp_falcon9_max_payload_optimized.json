@@ -17,48 +17,68 @@
     "latitude_deg": 28.60838508605957,
     "longitude_deg": -80.599754333496094
   },
-  "name": "Falcon 9 ascent - minimize max-Q (UPFG upper stage, epsilon-constraint)",
+  "name": "Falcon 9 ascent - maximize payload (UPFG upper stage to 200 km LEO)",
   "optimization": {
     "constraint_tolerance": -1,
     "continuation": {
-      "direction": "decrease",
+      "direction": "increase",
       "enabled": true,
-      "mode": "objective",
+      "mode": "variable",
       "multistart_count": 2,
       "multistart_enabled": false,
       "steps": 16,
-      "variable_path": ""
+      "variable_path": "vehicle.stages[2].dry_mass_kg"
     },
     "envelope_search": {
       "enabled": false,
       "sample_count": 16,
       "seed": 1
     },
-    "fd_mode": "forward",
-    "feasibility_tolerance": 0.01,
+    "fd_mode": "auto",
+    "feasibility_tolerance": -1,
     "initial_step_fraction": 0.050000000000000003,
-    "max_iterations": 40,
+    "max_iterations": 100,
     "max_restoration_iterations": 8,
     "mode": "optimize",
     "objective": {
-      "direction": "minimize",
+      "direction": "maximize",
       "enabled": true,
-      "metric": "max_q_pa",
+      "metric": "payload_mass_kg",
       "weight": 1
     },
     "objectives": [
       {
-        "direction": "minimize",
+        "direction": "maximize",
         "enabled": true,
-        "metric": "max_q_pa",
+        "metric": "payload_mass_kg",
         "weight": 1
       }
     ],
     "optimizer": "sqp",
     "parallel_fd": true,
-    "qp_solver": "kkt-fallback",
+    "qp_solver": "active-set",
     "stationarity_tolerance": -1,
     "targets": [
+      {
+        "max_value": 202000,
+        "metric": "phases[3].periapsis_altitude_m",
+        "min_value": 198000,
+        "mode": "range",
+        "phase_index": -1,
+        "scope": "terminal",
+        "value": 200000,
+        "weight": 2
+      },
+      {
+        "max_value": 205000,
+        "metric": "phases[3].apoapsis_altitude_m",
+        "min_value": 195000,
+        "mode": "range",
+        "phase_index": -1,
+        "scope": "terminal",
+        "value": 200000,
+        "weight": 1
+      },
       {
         "max_value": 28.800000000000001,
         "metric": "phases[3].inclination_deg",
@@ -68,83 +88,63 @@
         "scope": "terminal",
         "value": 28.600000000000001,
         "weight": 1
-      },
-      {
-        "max_value": 205000,
-        "metric": "phases[3].periapsis_altitude_m",
-        "min_value": 195000,
-        "mode": "range",
-        "phase_index": -1,
-        "scope": "terminal",
-        "value": 200000,
-        "weight": 3
-      },
-      {
-        "max_value": 210000,
-        "metric": "phases[3].apoapsis_altitude_m",
-        "min_value": 190000,
-        "mode": "range",
-        "phase_index": -1,
-        "scope": "terminal",
-        "value": 200000,
-        "weight": 1
       }
     ],
     "tolerance": 0.01,
     "variables": [
       {
         "enabled": true,
-        "max_value": -0.10000000000000001,
+        "max_value": 40000,
+        "min_value": 10000,
+        "path": "vehicle.stages[2].dry_mass_kg"
+      },
+      {
+        "enabled": true,
+        "max_value": 65,
+        "min_value": 30,
+        "path": "phases[2].steering_model.segmented_poly.segments[1].start_time_s"
+      },
+      {
+        "enabled": true,
+        "max_value": 130,
+        "min_value": 90,
+        "path": "phases[2].steering_model.segmented_poly.segments[2].start_time_s"
+      },
+      {
+        "enabled": true,
+        "max_value": -0.050000000000000003,
+        "min_value": -0.69999999999999996,
+        "path": "phases[2].steering_model.segmented_poly.segments[0].elevation.c1"
+      },
+      {
+        "enabled": true,
+        "max_value": 0.01,
+        "min_value": -0.01,
+        "path": "phases[2].steering_model.segmented_poly.segments[0].elevation.c2"
+      },
+      {
+        "enabled": true,
+        "max_value": 0.10000000000000001,
         "min_value": -0.80000000000000004,
-        "path": "phases[2].steering_model.elevation.c1"
+        "path": "phases[2].steering_model.segmented_poly.segments[1].elevation.c1"
       },
       {
         "enabled": true,
-        "max_value": 0.002,
-        "min_value": -0.002,
-        "path": "phases[2].steering_model.elevation.c2"
+        "max_value": 0.01,
+        "min_value": -0.01,
+        "path": "phases[2].steering_model.segmented_poly.segments[1].elevation.c2"
       },
       {
         "enabled": true,
-        "max_value": 1,
-        "min_value": 0.20000000000000001,
-        "path": "phases[2].throttle_model.segmented_poly.segments[0].c0"
+        "max_value": 0.10000000000000001,
+        "min_value": -0.59999999999999998,
+        "path": "phases[2].steering_model.segmented_poly.segments[2].elevation.c1"
       },
       {
         "enabled": true,
-        "max_value": 50,
-        "min_value": 20,
-        "path": "phases[2].throttle_model.segmented_poly.segments[1].start_time_s"
-      },
-      {
-        "enabled": true,
-        "max_value": 1,
-        "min_value": 0.20000000000000001,
-        "path": "phases[2].throttle_model.segmented_poly.segments[1].c0"
-      },
-      {
-        "enabled": true,
-        "max_value": 95,
-        "min_value": 55,
-        "path": "phases[2].throttle_model.segmented_poly.segments[2].start_time_s"
-      },
-      {
-        "enabled": true,
-        "max_value": 1,
-        "min_value": 0.20000000000000001,
-        "path": "phases[2].throttle_model.segmented_poly.segments[2].c0"
-      },
-      {
-        "enabled": true,
-        "max_value": 140,
-        "min_value": 100,
-        "path": "phases[2].throttle_model.segmented_poly.segments[3].start_time_s"
-      },
-      {
-        "enabled": true,
-        "max_value": 1,
-        "min_value": 0.20000000000000001,
-        "path": "phases[2].throttle_model.segmented_poly.segments[3].c0"
+        "max_value": 0.01,
+        "min_value": -0.01,
+        "path": "phases[2].steering_model.segmented_poly.segments[2].elevation.c2"
       }
     ]
   },
@@ -166,7 +166,7 @@
         "aerodynamic": true,
         "atmosphere_model": {
           "table_path": "",
-          "type": "us_standard_1976"
+          "type": "exponential"
         },
         "gravity": true,
         "gravity_model": {
@@ -286,7 +286,7 @@
         "aerodynamic": true,
         "atmosphere_model": {
           "table_path": "",
-          "type": "us_standard_1976"
+          "type": "exponential"
         },
         "gravity": true,
         "gravity_model": {
@@ -406,7 +406,7 @@
         "aerodynamic": true,
         "atmosphere_model": {
           "table_path": "",
-          "type": "us_standard_1976"
+          "type": "exponential"
         },
         "gravity": true,
         "gravity_model": {
@@ -434,9 +434,9 @@
         },
         "elevation": {
           "c0": 90,
-          "c1": -0.55000000000000004,
-          "c2": 0.0001,
-          "continuity": false
+          "c1": -0.34999999999999998,
+          "c2": 0,
+          "continuity": true
         },
         "fixed_direction_eci": [
           1,
@@ -458,8 +458,48 @@
         },
         "segmented_poly": {
           "continuity": true,
-          "order": 1,
-          "segments": []
+          "order": 2,
+          "segments": [
+            {
+              "azimuth": [
+                90,
+                0,
+                0
+              ],
+              "elevation": [
+                90,
+                -0.69999999999999996,
+                -0.01
+              ],
+              "start_time_s": 0
+            },
+            {
+              "azimuth": [
+                90,
+                0,
+                0
+              ],
+              "elevation": [
+                56.550033999999997,
+                -0.76657184644237986,
+                0.0046121597251392536
+              ],
+              "start_time_s": 32.601749977348973
+            },
+            {
+              "azimuth": [
+                90,
+                0,
+                0
+              ],
+              "elevation": [
+                24.696877000000001,
+                -0.0064019186680148721,
+                0.0036582978557469885
+              ],
+              "start_time_s": 115.92508722369585
+            }
+          ]
         },
         "segments": [],
         "tangent": {
@@ -470,7 +510,7 @@
           "continuity": false,
           "t_offset_s": 0
         },
-        "type": "generic_poly",
+        "type": "segmented_poly",
         "upfg": {
           "apoapsis_km": 200,
           "inclination_deg": 28.5,
@@ -495,37 +535,12 @@
         "continuity": false,
         "points": [],
         "segmented_poly": {
-          "continuity": false,
-          "order": 0,
-          "segments": [
-            {
-              "coefficients": [
-                1
-              ],
-              "start_time_s": 0
-            },
-            {
-              "coefficients": [
-                1
-              ],
-              "start_time_s": 40
-            },
-            {
-              "coefficients": [
-                1
-              ],
-              "start_time_s": 75
-            },
-            {
-              "coefficients": [
-                1
-              ],
-              "start_time_s": 115
-            }
-          ]
+          "continuity": true,
+          "order": 1,
+          "segments": []
         },
         "target_t2w": 1,
-        "type": "segmented_poly"
+        "type": "poly"
       },
       "tolerances": {
         "atol_position_m": 0.001,
@@ -569,10 +584,10 @@
         "aero_model": {
           "type": "none"
         },
-        "aerodynamic": true,
+        "aerodynamic": false,
         "atmosphere_model": {
           "table_path": "",
-          "type": "us_standard_1976"
+          "type": "exponential"
         },
         "gravity": true,
         "gravity_model": {
@@ -679,38 +694,19 @@
   "step_s": 1,
   "vehicle": {
     "aero": {
-      "aero_table_path": "C:\\Users\\32796\\Desktop\\post2-lite\\cases\\aero_table_full.csv",
-      "base_diameter_m": 3.6600000000000001,
-      "body_length_m": 49.800227489300894,
+      "aero_table_path": "",
+      "base_diameter_m": 0,
+      "body_length_m": 0,
       "cd": 0.5,
       "cl": 0,
       "enabled": true,
-      "nose_length_m": 8.9640409480741603,
-      "ref_diameter_m": 5.2000000000000002,
-      "reference_area_m2": 21.237166338267002,
-      "stage_tables": [
-        {
-          "activate_at_min_attached_stage": 0,
-          "base_diameter_m": 3.6600000000000001,
-          "body_length_m": 49.800227489300894,
-          "nose_length_m": 8.9640409480741603,
-          "ref_diameter_m": 5.2000000000000002,
-          "reference_area_m2": 21.237166338267002,
-          "table_path": "C:\\Users\\32796\\Desktop\\post2-lite\\cases\\aero_table_full.csv"
-        },
-        {
-          "activate_at_min_attached_stage": 1,
-          "base_diameter_m": 3.6600000000000001,
-          "body_length_m": 19.920090995720358,
-          "nose_length_m": 8.9640409480741603,
-          "ref_diameter_m": 5.2000000000000002,
-          "reference_area_m2": 21.237166338267002,
-          "table_path": "C:\\Users\\32796\\Desktop\\post2-lite\\cases\\aero_table_stage2.csv"
-        }
-      ],
-      "use_table": true
+      "nose_length_m": 0,
+      "ref_diameter_m": 0,
+      "reference_area_m2": 10.5,
+      "stage_tables": [],
+      "use_table": false
     },
-    "dry_mass_kg": 16226.195623050444,
+    "dry_mass_kg": 16226.195623,
     "engine": {
       "direction_body": [
         1,
@@ -834,7 +830,7 @@
       {
         "active": false,
         "attached": true,
-        "dry_mass_kg": 947.63620290905237,
+        "dry_mass_kg": 29455.880105495453,
         "engine": {
           "direction_body": [
             1,
@@ -861,7 +857,14 @@
           "thrust_vac_n": 0
         },
         "name": "payload",
-        "tanks": []
+        "tanks": [
+          {
+            "capacity_kg": 0,
+            "initial_kg": 0,
+            "name": "main",
+            "propellant": "generic"
+          }
+        ]
       }
     ],
     "tank_to_tank_connections": [],

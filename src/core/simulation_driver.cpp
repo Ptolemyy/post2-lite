@@ -61,6 +61,7 @@ int max_phase_integration_steps(double duration_s, double nominal_step_s)
 // Upper-bound time horizon for non-time terminations (24h). Phases whose
 // termination event has not fired by then are stopped by the budget guard.
 constexpr double kMaxPhaseTimeS = 86400.0;
+constexpr double kStandardGravityMps2 = 9.80665;
 
 // Returns true iff the trigger condition's quantity is one that depends only
 // on integrator-state (i.e. can be evaluated by an EventFunction).
@@ -74,6 +75,7 @@ bool trigger_uses_event_path(const TriggerCondition& trigger)
         trigger.type == "periapsis_altitude_m" ||
         trigger.type == "orbital_energy" ||
         trigger.type == "sma_m" ||
+        trigger.type == "thrust_fraction" ||
         trigger.type == "time";
 }
 
@@ -232,9 +234,58 @@ post2::integrators::EventFunction make_trigger_event(
         return ev;
     }
 
-    // Unknown type: degenerate to a never-firing event so callers don't crash.
+    // "thrust_fraction" depends on engine spool state, which is not part of the
+    // integrated ExtendedState, so it cannot drive an integrator event. It is
+    // handled out-of-band by trigger_condition_is_satisfied at step boundaries;
+    // here we degenerate to a never-firing event (same as unknown types).
     ev.g = [](double, const post2::integrators::ExtendedState&) { return -1.0; };
     return ev;
+}
+
+// Current thrust-establishment fraction: aggregate actual (spooled) thrust over
+// aggregate steady (commanded) thrust. 0 when nothing is commanded to fire.
+// Used by the "thrust_fraction" termination, which the integrator cannot
+// evaluate (it depends on engine spool state, not the integrated motion/mass).
+double current_thrust_fraction(const post2::vehicle::VehicleRuntimeState& runtime)
+{
+    const double commanded = runtime.engine.commanded_thrust_n;
+    if (commanded <= 0.0) {
+        return 0.0;
+    }
+    return std::max(0.0, runtime.engine.actual_thrust_n) / commanded;
+}
+
+bool trigger_condition_is_satisfied(
+    const TriggerCondition& trigger,
+    const post2::vehicle::VehicleRuntimeState& runtime,
+    double mu_m3s2,
+    double earth_radius_m,
+    double time_base_s)
+{
+    if (trigger.type == "thrust_fraction") {
+        const double fraction = current_thrust_fraction(runtime);
+        return trigger.comparison == ">=" ? fraction >= trigger.value
+                                          : fraction <= trigger.value;
+    }
+
+    post2::integrators::EventFunction probe = make_trigger_event(
+        trigger,
+        runtime,
+        mu_m3s2,
+        earth_radius_m,
+        time_base_s,
+        /*terminating=*/false,
+        "trigger_probe");
+    if (!probe.g) {
+        return false;
+    }
+
+    const post2::integrators::ExtendedState state{
+        runtime.vehicle.motion,
+        post2::vehicle::read_tank_masses_flat(runtime),
+    };
+    const double g = probe.g(runtime.time_s, state);
+    return g >= 0.0;
 }
 
 // Per-mission-event runtime tracking. prev_g_sign is the sign of g at the
@@ -299,15 +350,45 @@ post2::propagation::EnvironmentState make_environment_state(
     environment.altitude_m = geo.altitude_m;
     environment.latitude_rad = geo.latitude_rad;
     environment.longitude_rad = geo.longitude_rad;
-    if (phase.force_models.atmosphere_model.type == "exponential") {
-        const post2::environment::ExponentialAtmosphereModel atmosphere(config.earth_radius_m);
-        const post2::environment::AtmosphereSample sample =
-            atmosphere.sample(time_s, motion.position_m, motion.velocity_mps);
-        environment.density_kgpm3 = sample.density_kgpm3;
-        environment.pressure_pa = sample.pressure_pa;
-        environment.temperature_k = sample.temperature_k;
-        environment.speed_of_sound_mps = sample.speed_of_sound_mps;
-        environment.wind_ecef_mps = sample.wind_ecef_mps;
+    {
+        const std::string& atmo_type = phase.force_models.atmosphere_model.type;
+        post2::environment::AtmosphereSample sample;
+        bool sampled = false;
+        if (atmo_type == "us_standard_1976") {
+            const post2::environment::UsStandardAtmosphere1976Model atmosphere(config.earth_radius_m);
+            sample = atmosphere.sample(time_s, motion.position_m, motion.velocity_mps);
+            sampled = true;
+        } else if (atmo_type == "table") {
+            // Load once and cache by path (this runs every integration step).
+            static std::string cached_path;
+            static post2::environment::TabulatedAtmosphereModel cached_model(
+                config.earth_radius_m, {}, {});
+            static bool cached_ok = false;
+            const std::string& path = phase.force_models.atmosphere_model.table_path;
+            if (path != cached_path) {
+                cached_path = path;
+                std::string err;
+                cached_ok = post2::environment::TabulatedAtmosphereModel::load_csv(
+                    path, config.earth_radius_m, &cached_model, &err);
+            }
+            if (cached_ok) {
+                sample = cached_model.sample(time_s, motion.position_m, motion.velocity_mps);
+                sampled = true;
+            }
+        }
+        if (!sampled && (atmo_type == "exponential" || atmo_type == "us_standard_1976" ||
+                         atmo_type == "table")) {
+            const post2::environment::ExponentialAtmosphereModel atmosphere(config.earth_radius_m);
+            sample = atmosphere.sample(time_s, motion.position_m, motion.velocity_mps);
+            sampled = true;
+        }
+        if (sampled) {
+            environment.density_kgpm3 = sample.density_kgpm3;
+            environment.pressure_pa = sample.pressure_pa;
+            environment.temperature_k = sample.temperature_k;
+            environment.speed_of_sound_mps = sample.speed_of_sound_mps;
+            environment.wind_ecef_mps = sample.wind_ecef_mps;
+        }
     }
     environment.wind_eci_mps = frames::ecef_to_eci_position(environment.wind_ecef_mps, theta_rad);
     return environment;
@@ -358,7 +439,8 @@ bool supported_gravity_model_type(const std::string& type)
 
 bool supported_atmosphere_model_type(const std::string& type)
 {
-    return type == "none" || type == "exponential";
+    return type == "none" || type == "exponential" ||
+           type == "us_standard_1976" || type == "table";
 }
 
 bool validate_gravity_model_config(
@@ -391,7 +473,8 @@ bool validate_atmosphere_model_config(
     std::string* error)
 {
     if (!supported_atmosphere_model_type(atmosphere_model.type)) {
-        *error = prefix + ".type must be \"none\" or \"exponential\"";
+        *error = prefix +
+            ".type must be \"none\", \"exponential\", \"us_standard_1976\", or \"table\"";
         return false;
     }
     return true;
@@ -565,6 +648,12 @@ bool validate_case_config(const CaseConfig& config, std::string* error)
                 " termination.comparison must be \">=\" or \"<=\"";
             return false;
         }
+        if (phase.termination.type == "thrust_fraction" &&
+            (phase.termination.value <= 0.0 || phase.termination.value > 1.0)) {
+            *error = "phase " + std::to_string(i) +
+                " termination.value must be in (0, 1] for thrust_fraction";
+            return false;
+        }
         if (!validate_gravity_model_config(
                 phase.force_models.gravity_model,
                 "phase " + std::to_string(i) + " force_models.gravity_model",
@@ -661,6 +750,53 @@ struct RuntimeControl {
 struct TimedAction {
     PhaseAction action;
 };
+
+bool is_powered_upfg_phase(
+    const PhaseConfig& phase,
+    const RuntimeControl& control,
+    const std::vector<TimedAction>& actions)
+{
+    return lowercase(phase.steering_model.type) == "upfg" &&
+        phase.force_models.thrust &&
+        control.engine_enabled &&
+        control.next_action_index >= actions.size();
+}
+
+double active_propulsive_burn_time_s(
+    const CaseConfig& case_config,
+    const post2::vehicle::VehicleRuntimeState& runtime)
+{
+    const std::vector<post2::vehicle::StageConfig> stage_configs =
+        post2::vehicle::effective_stage_configs(case_config.vehicle);
+    double propellant_kg = 0.0;
+    double mdot_kgps = 0.0;
+    for (std::size_t i = 0; i < stage_configs.size() && i < runtime.stages.size(); ++i) {
+        const auto& stage_rt = runtime.stages[i];
+        const auto& stage_cfg = stage_configs[i];
+        if (!stage_rt.attached ||
+            !stage_rt.active ||
+            !stage_rt.engine.enabled ||
+            !stage_cfg.engine.enabled ||
+            stage_cfg.engine.thrust_vac_n <= 0.0 ||
+            stage_cfg.engine.isp_vac_s <= 0.0) {
+            continue;
+        }
+        const double thrust_n =
+            std::max(0, stage_cfg.engine.engine_count) * stage_cfg.engine.thrust_vac_n;
+        const double stage_mdot_kgps =
+            thrust_n / (stage_cfg.engine.isp_vac_s * kStandardGravityMps2);
+        if (stage_mdot_kgps <= 0.0) {
+            continue;
+        }
+        propellant_kg += post2::vehicle::stage_propellant_kg(stage_rt);
+        mdot_kgps += stage_mdot_kgps;
+    }
+
+    if (propellant_kg <= 0.0 || mdot_kgps <= 0.0) {
+        return 0.0;
+    }
+    return propellant_kg / mdot_kgps;
+}
 
 bool is_segmented_poly_type(const std::string& type)
 {
@@ -868,7 +1004,11 @@ StateLog propagate_phase(
     while (time_s < phase_end_time_s) {
         ++step_count;
         if (step_count > max_step_count) {
-            throw std::runtime_error("integrator exceeded phase step budget");
+            std::ostringstream msg;
+            msg << "integrator exceeded phase step budget in phase " << phase_index
+                << " (\"" << phase.name << "\") at t=" << time_s
+                << " s, phase_t=" << (time_s - phase_start_time_s) << " s";
+            throw std::runtime_error(msg.str());
         }
 
         const double phase_time_s = time_s - phase_start_time_s;
@@ -876,6 +1016,26 @@ StateLog propagate_phase(
         apply_due_actions(actions, phase_time_s, simulation_config, &control, &runtime);
         if (control.next_action_index != action_index_before_step) {
             suggested_step_s = case_config.step_s;
+        }
+        // The integrator events localize crossings inside the next step; this
+        // covers phase/action boundaries where the condition is already true.
+        if (!time_terminated &&
+            trigger_condition_is_satisfied(
+                phase.termination,
+                runtime,
+                case_config.earth_mu_m3s2,
+                case_config.earth_radius_m,
+                phase_start_time_s)) {
+            break;
+        }
+        const bool powered_upfg =
+            !time_terminated && is_powered_upfg_phase(phase, control, actions);
+        const double burnout_margin_s = std::max(1.0e-3, min_effective_step_s);
+        const double burn_time_remaining_s = powered_upfg
+            ? active_propulsive_burn_time_s(case_config, runtime)
+            : std::numeric_limits<double>::infinity();
+        if (powered_upfg && burn_time_remaining_s <= burnout_margin_s) {
+            break;
         }
 
         const double next_action_absolute_s = phase_start_time_s + next_action_time_s(actions, control);
@@ -887,8 +1047,26 @@ StateLog propagate_phase(
         if (next_action_absolute_s > time_s && next_action_absolute_s < time_s + step_s) {
             step_s = next_action_absolute_s - time_s;
         }
+        if (powered_upfg && burn_time_remaining_s < step_s + burnout_margin_s) {
+            step_s = burn_time_remaining_s - burnout_margin_s;
+        }
         if (step_s <= 1.0e-12) {
             step_s = std::min(case_config.step_s, phase_end_time_s - time_s);
+        }
+        if (powered_upfg && step_s > burn_time_remaining_s - burnout_margin_s) {
+            break;
+        }
+        // While clamped, if an engine is still spooling up toward its commanded
+        // thrust (the ignition transient), cap the step so the forward-Euler
+        // clamp branch resolves the buildup and the "thrust established" crossing
+        // finely. Engines with no transient reach commanded thrust immediately
+        // (actual == commanded) and keep their normal step, as do clamp holds
+        // once thrust is fully established.
+        if (control.hold_down_clamp_active &&
+            runtime.engine.commanded_thrust_n > 0.0 &&
+            runtime.engine.actual_thrust_n < 0.999 * runtime.engine.commanded_thrust_n) {
+            constexpr double kClampSpoolSubstepS = 0.05;
+            step_s = std::min(step_s, kClampSpoolSubstepS);
         }
 
         const State current_state = runtime.vehicle.motion;

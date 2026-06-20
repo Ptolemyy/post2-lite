@@ -1,0 +1,19 @@
+META,Falcon 9 ascent - minimize max-Q (UPFG upper stage  epsilon-constraint),398600435436096,6371000,7.292114605661506e-05,4.8949612128205615,28.60838508605957,-80.599754333496094,144.89578654523939
+STAGE,0,booster,8429489.8681640625,3059.6748498467168,2755.0279954049242,407246.22164361161,9768.2196627138183
+STAGE,1,upper_stack,949119.9951171875,3412.7143405926959,278.11293310659897,92668.40254944982,5510.3397574275732
+STAGE,2,payload,0,0,0,0,947.63620300000002
+PHASE,0,pad hold (ignition),generic_poly,thrust_fraction,>=,0.94999999999999996,poly,1,0,0,1
+POLY,0,90,0,0,90,0,0,0,0,0
+ACTION,0,0,set_engine_enabled,1,-1,
+PHASE,1,tower clearance vertical ascent,generic_poly,altitude_m,>=,194.89578654523939,poly,0.99360957693779062,0,0,0
+POLY,1,90,0,0,90,0,0,0,0,0
+ACTION,1,0,set_engine_enabled,1,-1,
+PHASE,2,ascent first stage,generic_poly,propellant_mass_kg,<=,10,segmented_poly,0,0,0,0
+POLY,2,90,0,0,90,-0.55000000000000004,0.0001,0,0,0
+ACTION,2,0,set_engine_enabled,1,-1,
+PHASE,3,upfg ascent to orbit,upfg,periapsis_altitude_m,>=,199900,poly,1,0,0,0
+UPFG,3,200,200,28.600000000000001
+ACTION,3,0,set_stage_active,0,0,booster
+ACTION,3,0,set_stage_attached,0,0,booster
+ACTION,3,0,set_stage_active,1,1,upper_stack
+ACTION,3,0,set_engine_enabled,1,-1,

@@ -5,6 +5,7 @@ out/
 *.suo
 *.ninja
 .claude/
+build-vcpkg/
 
 trajectory.csv
 trajectory.svg

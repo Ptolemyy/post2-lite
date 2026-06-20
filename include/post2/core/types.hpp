@@ -60,7 +60,11 @@ struct GravityModelConfig {
 };
 
 struct AtmosphereModelConfig {
+    // "exponential" (default), "us_standard_1976", or "table".
     std::string type = "exponential";
+    // CSV path when type == "table": altitude_m,density_kgpm3,pressure_pa,
+    // temperature_k[,speed_of_sound_mps].
+    std::string table_path;
 };
 
 struct AeroModelConfig {

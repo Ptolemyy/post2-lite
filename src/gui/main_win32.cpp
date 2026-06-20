@@ -1,3 +1,6 @@
+#include "post2/aero/aero_model.hpp"
+#include "post2/aero/aero_table.hpp"
+#include "post2/core/aero_table_build.hpp"
 #include "post2/core/case_config_io.hpp"
 #include "post2/core/frames.hpp"
 #include "post2/core/io.hpp"
@@ -13,8 +16,10 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <cmath>
 #include <cstdlib>
 #include <filesystem>
+#include <iomanip>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -27,6 +32,7 @@
 #include <commdlg.h>
 #include <windows.h>
 #include <windowsx.h>
+#include <GL/gl.h>
 
 namespace {
 
@@ -109,10 +115,11 @@ constexpr int kVehicleStageDelete = 1415;
 constexpr int kVehicleStageEdit = 1416;
 constexpr int kVehicleStageActive = 1417;
 constexpr int kVehicleAeroEnabled = 1418;
-constexpr int kVehicleAeroAreaEdit = 1419;
-constexpr int kVehicleAeroCdEdit = 1420;
-constexpr int kVehicleAeroClEdit = 1421;
-constexpr int kVehicleAeroTableEdit = 1422;
+constexpr int kVehicleAeroTableList = 1419;
+constexpr int kVehicleAeroTableImport = 1420;
+constexpr int kVehicleAeroTableView = 1421;
+constexpr int kVehicleAeroTableEditStage = 1422;
+constexpr int kVehicleAeroTableDelete = 1423;
 constexpr int kLaunchLatitudeEdit = 1701;
 constexpr int kLaunchLongitudeEdit = 1702;
 constexpr int kLaunchAltitudeEdit = 1703;
@@ -381,14 +388,13 @@ struct VehicleSettingsDialogState {
     HWND name_edit = nullptr;
     HWND dry_mass_edit = nullptr;
     HWND aero_enabled = nullptr;
-    HWND aero_area_edit = nullptr;
-    HWND aero_cd_edit = nullptr;
-    HWND aero_cl_edit = nullptr;
-    HWND aero_table_edit = nullptr;
+    HWND aero_table_list = nullptr;
+    HWND gl_preview = nullptr;  // embedded OpenGL vehicle preview child window
     HWND stage_list = nullptr;
     post2::vehicle::VehicleConfig config;
     post2::core::OptimizationConfig optimization;
     int selected_stage_index = 0;
+    int selected_aero_table_index = 0;
     bool accepted = false;
 };
 
@@ -1368,6 +1374,351 @@ HWND create_edit(HWND parent, int id, int x, int y, int width, const std::wstrin
     return edit;
 }
 
+// Short human label for one aero table row: its activation level (which staging
+// configuration it applies to), reference area, and the table file name.
+std::wstring format_aero_table_label(const post2::vehicle::AeroStageTable& table)
+{
+    const auto slash = table.table_path.find_last_of("/\\");
+    const std::string file = slash != std::string::npos
+        ? table.table_path.substr(slash + 1) : table.table_path;
+    std::wostringstream label;
+    label << L"L" << table.activate_at_min_attached_stage << L"  S="
+          << std::fixed << std::setprecision(2) << table.reference_area_m2 << L" m2  "
+          << widen(file.empty() ? std::string("(no file)") : file);
+    return label.str();
+}
+
+// Repopulate the aero-table listbox from config.aero.stage_tables and restore the
+// selection. Tables are kept ascending by activation level.
+void refresh_vehicle_aero_table_list(VehicleSettingsDialogState* state)
+{
+    if (!state || !state->aero_table_list) {
+        return;
+    }
+    auto& tables = state->config.aero.stage_tables;
+    std::sort(tables.begin(), tables.end(),
+              [](const post2::vehicle::AeroStageTable& a, const post2::vehicle::AeroStageTable& b) {
+                  return a.activate_at_min_attached_stage < b.activate_at_min_attached_stage;
+              });
+    SendMessageW(state->aero_table_list, LB_RESETCONTENT, 0, 0);
+    for (const auto& table : tables) {
+        SendMessageW(state->aero_table_list, LB_ADDSTRING, 0,
+                     reinterpret_cast<LPARAM>(format_aero_table_label(table).c_str()));
+    }
+    if (!tables.empty()) {
+        if (state->selected_aero_table_index < 0 ||
+            static_cast<std::size_t>(state->selected_aero_table_index) >= tables.size()) {
+            state->selected_aero_table_index = 0;
+        }
+        SendMessageW(state->aero_table_list, LB_SETCURSEL,
+                     static_cast<WPARAM>(state->selected_aero_table_index), 0);
+    }
+    if (state->gl_preview) {
+        InvalidateRect(state->gl_preview, nullptr, FALSE);
+    }
+}
+
+// ---- Increment 3: embedded OpenGL vehicle preview ---------------------------
+//
+// A child window with its own GL context that draws the whole rocket as a stack
+// of immediate-mode primitives (a core cylinder + a fairing/nose cone) sized from
+// the aero table geometry. It is read-only: it reflects whatever geometry the
+// aero tables carry and is repainted when the table list changes.
+
+constexpr double kPreviewPi = 3.14159265358979323846;
+
+struct VehiclePreviewState {
+    HGLRC glrc = nullptr;
+    const post2::vehicle::AeroConfig* aero = nullptr;  // owned by the dialog state
+    double yaw_deg = 30.0;
+    double pitch_deg = 12.0;
+    double zoom = 1.0;
+    bool dragging = false;
+    POINT last = {};
+};
+
+// Pick the geometry to draw: the full-stack table (lowest activation level) that
+// carries a positive length, falling back to the legacy aero geometry fields.
+// Returns false when nothing has usable dimensions.
+bool resolve_preview_geometry(const post2::vehicle::AeroConfig& aero,
+                              double* length, double* nose, double* core_r, double* fairing_r)
+{
+    const post2::vehicle::AeroStageTable* best = nullptr;
+    for (const auto& t : aero.stage_tables) {
+        if (t.body_length_m <= 0.0) {
+            continue;
+        }
+        if (!best || t.activate_at_min_attached_stage < best->activate_at_min_attached_stage) {
+            best = &t;
+        }
+    }
+    double len = best ? best->body_length_m : aero.body_length_m;
+    double nose_len = best ? best->nose_length_m : aero.nose_length_m;
+    double core_d = best ? best->base_diameter_m : aero.base_diameter_m;
+    double fairing_d = best ? best->ref_diameter_m : aero.ref_diameter_m;
+    if (len <= 0.0) {
+        // No table / geometry: fall back to a representative body sized from the
+        // reference area (diameter = sqrt(4 S / pi)) with a default slenderness,
+        // so a constant-CD case still shows its caliber instead of a blank view.
+        if (aero.reference_area_m2 > 0.0) {
+            const double diameter = std::sqrt(4.0 * aero.reference_area_m2 / kPreviewPi);
+            core_d = diameter;
+            fairing_d = diameter;
+            len = 12.0 * diameter;
+            nose_len = 0.0;  // filled in below
+        } else {
+            return false;
+        }
+    }
+    if (nose_len <= 0.0 || nose_len >= len) {
+        nose_len = 0.15 * len;
+    }
+    if (core_d <= 0.0) {
+        core_d = fairing_d > 0.0 ? fairing_d : 0.1 * len;
+    }
+    if (fairing_d <= 0.0) {
+        fairing_d = core_d;
+    }
+    *length = len;
+    *nose = nose_len;
+    *core_r = 0.5 * core_d;
+    *fairing_r = 0.5 * fairing_d;
+    return true;
+}
+
+// Truncated cone (frustum) from radius r0 at y0 to radius r1 at y1, about the Y
+// axis. r1 == r0 gives a cylinder; r1 == 0 gives a cone. Normals point outward
+// with the correct slope (rely on GL_NORMALIZE so they need not be unit length).
+void preview_draw_frustum(double r0, double r1, double y0, double y1, int segments)
+{
+    const double dy = y1 - y0;
+    const double dr = r0 - r1;
+    const double slope = std::sqrt(dy * dy + dr * dr) > 1.0e-9 ? dr / std::abs(dy) : 0.0;
+    glBegin(GL_QUAD_STRIP);
+    for (int i = 0; i <= segments; ++i) {
+        const double a = 2.0 * kPreviewPi * i / segments;
+        const double c = std::cos(a);
+        const double s = std::sin(a);
+        glNormal3d(c, slope, s);
+        glVertex3d(r0 * c, y0, r0 * s);
+        glVertex3d(r1 * c, y1, r1 * s);
+    }
+    glEnd();
+}
+
+void preview_draw_annulus(double r_inner, double r_outer, double y, double normal_y, int segments)
+{
+    glBegin(GL_QUAD_STRIP);
+    for (int i = 0; i <= segments; ++i) {
+        const double a = 2.0 * kPreviewPi * i / segments;
+        const double c = std::cos(a);
+        const double s = std::sin(a);
+        glNormal3d(0.0, normal_y, 0.0);
+        glVertex3d(r_inner * c, y, r_inner * s);
+        glVertex3d(r_outer * c, y, r_outer * s);
+    }
+    glEnd();
+}
+
+void render_vehicle_preview(HWND hwnd, VehiclePreviewState* state)
+{
+    if (!state || !state->glrc) {
+        return;
+    }
+    RECT rc;
+    GetClientRect(hwnd, &rc);
+    const int w = std::max<int>(1, rc.right);
+    const int h = std::max<int>(1, rc.bottom);
+
+    HDC dc = GetDC(hwnd);
+    wglMakeCurrent(dc, state->glrc);
+
+    glViewport(0, 0, w, h);
+    glClearColor(0.10f, 0.12f, 0.15f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    glEnable(GL_DEPTH_TEST);
+
+    double length = 0.0, nose = 0.0, core_r = 0.0, fairing_r = 0.0;
+    const bool ok = state->aero &&
+        resolve_preview_geometry(*state->aero, &length, &nose, &core_r, &fairing_r);
+
+    const double aspect = static_cast<double>(w) / static_cast<double>(h);
+    const double fov = 40.0 * kPreviewPi / 180.0;
+    const double near_p = 0.1;
+    const double top = near_p * std::tan(0.5 * fov);
+    const double right = top * aspect;
+
+    glMatrixMode(GL_PROJECTION);
+    glLoadIdentity();
+
+    if (ok) {
+        const double radius = std::max(fairing_r, 0.5 * length);
+        const double dist = length * 1.2 / std::max(0.2, state->zoom) + radius;
+        const double far_p = dist + 3.0 * length + 10.0;
+        glFrustum(-right, right, -top, top, near_p, far_p);
+
+        glMatrixMode(GL_MODELVIEW);
+        glLoadIdentity();
+        glEnable(GL_LIGHTING);
+        glEnable(GL_LIGHT0);
+        glEnable(GL_COLOR_MATERIAL);
+        glEnable(GL_NORMALIZE);
+        const GLfloat light_pos[4] = {0.4f, 1.0f, 0.8f, 0.0f};
+        glLightfv(GL_LIGHT0, GL_POSITION, light_pos);
+
+        glTranslated(0.0, 0.0, -dist);
+        glRotated(state->pitch_deg, 1.0, 0.0, 0.0);
+        glRotated(state->yaw_deg, 0.0, 1.0, 0.0);
+        glTranslated(0.0, -0.5 * length, 0.0);  // centre the rocket
+
+        const int seg = 36;
+        const double y_core_top = length - nose;  // where the nose / fairing begins
+        glColor3d(0.80, 0.82, 0.86);
+        preview_draw_frustum(core_r, core_r, 0.0, y_core_top, seg);  // core body
+        preview_draw_annulus(0.0, core_r, 0.0, -1.0, seg);           // bottom cap
+
+        glColor3d(0.93, 0.94, 0.97);
+        if (fairing_r > core_r + 1.0e-6) {
+            // Distinct fairing wider than the core: a tapered shoulder, a straight
+            // fairing barrel, then the ogive-like nose cap.
+            const double shoulder = 0.25 * nose;
+            const double barrel = 0.40 * nose;
+            const double y1 = y_core_top + shoulder;
+            const double y2 = y1 + barrel;
+            preview_draw_frustum(core_r, fairing_r, y_core_top, y1, seg);  // shoulder
+            preview_draw_frustum(fairing_r, fairing_r, y1, y2, seg);       // barrel
+            preview_draw_frustum(fairing_r, 0.0, y2, length, seg);         // nose cap
+        } else {
+            // No distinct fairing: a plain nose cone over the core.
+            preview_draw_frustum(core_r, 0.0, y_core_top, length, seg);
+        }
+        glDisable(GL_LIGHTING);
+    } else {
+        glFrustum(-right, right, -top, top, near_p, 100.0);
+    }
+
+    SwapBuffers(dc);
+    wglMakeCurrent(nullptr, nullptr);
+    ReleaseDC(hwnd, dc);
+}
+
+LRESULT CALLBACK vehicle_preview_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam)
+{
+    auto* state = reinterpret_cast<VehiclePreviewState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    switch (message) {
+    case WM_NCCREATE: {
+        auto* create = reinterpret_cast<CREATESTRUCTW*>(lparam);
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(create->lpCreateParams));
+        return TRUE;
+    }
+    case WM_CREATE: {
+        HDC dc = GetDC(hwnd);
+        PIXELFORMATDESCRIPTOR pfd = {};
+        pfd.nSize = sizeof(pfd);
+        pfd.nVersion = 1;
+        pfd.dwFlags = PFD_DRAW_TO_WINDOW | PFD_SUPPORT_OPENGL | PFD_DOUBLEBUFFER;
+        pfd.iPixelType = PFD_TYPE_RGBA;
+        pfd.cColorBits = 24;
+        pfd.cDepthBits = 24;
+        pfd.iLayerType = PFD_MAIN_PLANE;
+        const int pf = ChoosePixelFormat(dc, &pfd);
+        SetPixelFormat(dc, pf, &pfd);
+        state->glrc = wglCreateContext(dc);
+        ReleaseDC(hwnd, dc);
+        return 0;
+    }
+    case WM_ERASEBKGND:
+        return 1;  // GL clears the surface; skip the flicker-prone default erase
+    case WM_PAINT: {
+        PAINTSTRUCT ps;
+        BeginPaint(hwnd, &ps);
+        render_vehicle_preview(hwnd, state);
+        EndPaint(hwnd, &ps);
+        return 0;
+    }
+    case WM_LBUTTONDOWN:
+        state->dragging = true;
+        state->last.x = GET_X_LPARAM(lparam);
+        state->last.y = GET_Y_LPARAM(lparam);
+        SetCapture(hwnd);
+        return 0;
+    case WM_MOUSEMOVE:
+        if (state->dragging) {
+            const int x = GET_X_LPARAM(lparam);
+            const int y = GET_Y_LPARAM(lparam);
+            state->yaw_deg += 0.5 * (x - state->last.x);
+            state->pitch_deg += 0.5 * (y - state->last.y);
+            state->pitch_deg = std::max(-89.0, std::min(89.0, state->pitch_deg));
+            state->last.x = x;
+            state->last.y = y;
+            InvalidateRect(hwnd, nullptr, FALSE);
+        }
+        return 0;
+    case WM_LBUTTONUP:
+        state->dragging = false;
+        ReleaseCapture();
+        return 0;
+    case WM_MOUSEWHEEL: {
+        const int delta = GET_WHEEL_DELTA_WPARAM(wparam);
+        state->zoom *= delta > 0 ? 1.1 : 1.0 / 1.1;
+        state->zoom = std::max(0.25, std::min(4.0, state->zoom));
+        InvalidateRect(hwnd, nullptr, FALSE);
+        return 0;
+    }
+    case WM_NCDESTROY:
+        if (state) {
+            if (state->glrc) {
+                wglMakeCurrent(nullptr, nullptr);
+                wglDeleteContext(state->glrc);
+            }
+            delete state;
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+        }
+        return 0;
+    default:
+        break;
+    }
+    return DefWindowProcW(hwnd, message, wparam, lparam);
+}
+
+void register_vehicle_preview_class()
+{
+    static bool registered = false;
+    if (registered) {
+        return;
+    }
+    WNDCLASSW wc = {};
+    wc.lpfnWndProc = vehicle_preview_proc;
+    wc.hInstance = g_instance;
+    wc.lpszClassName = L"Post2VehiclePreviewWindow";
+    wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+    wc.style = CS_OWNDC;  // a stable DC for the GL context
+    RegisterClassW(&wc);
+    registered = true;
+}
+
+HWND create_vehicle_preview_window(HWND parent, post2::vehicle::AeroConfig* aero,
+                                   int x, int y, int width, int height)
+{
+    register_vehicle_preview_class();
+    auto* state = new VehiclePreviewState();
+    state->aero = aero;
+    HWND preview = CreateWindowExW(
+        WS_EX_CLIENTEDGE,
+        L"Post2VehiclePreviewWindow",
+        L"",
+        WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS,
+        x, y, width, height,
+        parent,
+        nullptr,
+        g_instance,
+        state);
+    if (!preview) {
+        delete state;
+    }
+    return preview;
+}
+
 void create_vehicle_dialog_controls(VehicleSettingsDialogState* state)
 {
     HFONT font = static_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
@@ -1388,55 +1739,56 @@ void create_vehicle_dialog_controls(VehicleSettingsDialogState* state)
         L"Aero drag",
         font);
 
-    create_label(state->hwnd, 18, 122, 90, L"Area m2", font);
-    state->aero_area_edit = create_edit(
-        state->hwnd,
-        kVehicleAeroAreaEdit,
-        118,
-        118,
-        90,
-        format_double(state->config.aero.reference_area_m2),
-        font);
-    create_label(state->hwnd, 230, 122, 28, L"Cd", font);
-    state->aero_cd_edit = create_edit(
-        state->hwnd,
-        kVehicleAeroCdEdit,
-        260,
-        118,
-        70,
-        format_double(state->config.aero.cd),
-        font);
-    create_label(state->hwnd, 350, 122, 28, L"Cl", font);
-    state->aero_cl_edit = create_edit(
-        state->hwnd,
-        kVehicleAeroClEdit,
-        380,
-        118,
-        70,
-        format_double(state->config.aero.cl),
-        font);
-
-    create_label(state->hwnd, 18, 156, 90, L"Aero table", font);
-    state->aero_table_edit = create_edit(
-        state->hwnd,
-        kVehicleAeroTableEdit,
-        118,
-        152,
-        382,
-        widen(state->config.aero.aero_table_path),
-        font);
     Button_SetCheck(state->aero_enabled, state->config.aero.enabled ? BST_CHECKED : BST_UNCHECKED);
 
-    create_label(state->hwnd, 18, 198, 90, L"Stages", font);
+    // Aero tables: one CD/CL(Mach, alpha) table per staging configuration. The
+    // reference area is a property of each table's geometry, so there is no longer
+    // a standalone area / Cd / Cl field -- those came from the table set instead.
+    create_label(state->hwnd, 18, 116, 200, L"Aero tables (per staging config)", font);
+    state->aero_table_list = CreateWindowExW(
+        WS_EX_CLIENTEDGE,
+        L"LISTBOX",
+        L"",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | LBS_NOTIFY | WS_VSCROLL | WS_HSCROLL,
+        18,
+        140,
+        482,
+        92,
+        state->hwnd,
+        control_id(kVehicleAeroTableList),
+        g_instance,
+        nullptr);
+    set_child_font(state->aero_table_list, font);
+    // Migrate a legacy single-table config (only aero_table_path set, no
+    // stage_tables) into one full-stack (L0) entry so it shows in the list.
+    if (state->config.aero.stage_tables.empty() && !state->config.aero.aero_table_path.empty()) {
+        post2::vehicle::AeroStageTable legacy;
+        legacy.activate_at_min_attached_stage = 0;
+        legacy.table_path = state->config.aero.aero_table_path;
+        legacy.reference_area_m2 = state->config.aero.reference_area_m2;
+        legacy.ref_diameter_m = state->config.aero.ref_diameter_m;
+        legacy.body_length_m = state->config.aero.body_length_m;
+        legacy.nose_length_m = state->config.aero.nose_length_m;
+        legacy.base_diameter_m = state->config.aero.base_diameter_m;
+        state->config.aero.stage_tables.push_back(legacy);
+    }
+    refresh_vehicle_aero_table_list(state);
+
+    create_button(state->hwnd, kVehicleAeroTableImport, 18, 240, 90, 26, L"Import...", font);
+    create_button(state->hwnd, kVehicleAeroTableView, 116, 240, 72, 26, L"View", font);
+    create_button(state->hwnd, kVehicleAeroTableEditStage, 196, 240, 110, 26, L"Edit stage", font);
+    create_button(state->hwnd, kVehicleAeroTableDelete, 314, 240, 72, 26, L"Delete", font);
+
+    create_label(state->hwnd, 18, 280, 90, L"Stages", font);
     state->stage_list = CreateWindowExW(
         WS_EX_CLIENTEDGE,
         L"LISTBOX",
         L"",
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | LBS_NOTIFY | WS_VSCROLL,
         18,
-        222,
+        304,
         482,
-        150,
+        104,
         state->hwnd,
         control_id(kVehicleStageList),
         g_instance,
@@ -1451,28 +1803,19 @@ void create_vehicle_dialog_controls(VehicleSettingsDialogState* state)
     }
     SendMessageW(state->stage_list, LB_SETCURSEL, static_cast<WPARAM>(state->selected_stage_index), 0);
 
-    HWND add_button = CreateWindowExW(
-        0, L"BUTTON", L"Add", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
-        18, 384, 76, 28, state->hwnd, control_id(kVehicleStageAdd), g_instance, nullptr);
-    set_child_font(add_button, font);
-    HWND edit_button = CreateWindowExW(
-        0, L"BUTTON", L"Edit", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
-        108, 384, 76, 28, state->hwnd, control_id(kVehicleStageEdit), g_instance, nullptr);
-    set_child_font(edit_button, font);
-    HWND delete_button = CreateWindowExW(
-        0, L"BUTTON", L"Delete", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
-        198, 384, 76, 28, state->hwnd, control_id(kVehicleStageDelete), g_instance, nullptr);
-    set_child_font(delete_button, font);
+    create_button(state->hwnd, kVehicleStageAdd, 18, 416, 76, 28, L"Add", font);
+    create_button(state->hwnd, kVehicleStageEdit, 108, 416, 76, 28, L"Edit", font);
+    create_button(state->hwnd, kVehicleStageDelete, 198, 416, 76, 28, L"Delete", font);
 
-    HWND ok_button = CreateWindowExW(
-        0, L"BUTTON", L"OK", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
-        334, 384, 76, 28, state->hwnd, control_id(IDOK), g_instance, nullptr);
-    set_child_font(ok_button, font);
+    // Embedded 3D vehicle preview (right column). The OpenGL child window is
+    // created and rendered in create_vehicle_preview_window; it draws the stacked
+    // rocket assembled from the aero tables' geometry.
+    create_label(state->hwnd, 520, 14, 220, L"Vehicle preview", font);
+    state->gl_preview = create_vehicle_preview_window(state->hwnd, &state->config.aero,
+                                                      520, 36, 222, 408);
 
-    HWND cancel_button = CreateWindowExW(
-        0, L"BUTTON", L"Cancel", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
-        424, 384, 76, 28, state->hwnd, control_id(IDCANCEL), g_instance, nullptr);
-    set_child_font(cancel_button, font);
+    create_button(state->hwnd, IDOK, 560, 462, 76, 28, L"OK", font);
+    create_button(state->hwnd, IDCANCEL, 650, 462, 76, 28, L"Cancel", font);
 }
 
 bool read_double_field(HWND dialog, HWND edit, const wchar_t* label, const wchar_t* title, double* value)
@@ -2229,11 +2572,21 @@ bool accept_vehicle_dialog(VehicleSettingsDialogState* state)
         return false;
     }
     config.aero.enabled = Button_GetCheck(state->aero_enabled) == BST_CHECKED;
-    config.aero.aero_table_path = narrow(get_window_text(state->aero_table_edit));
-    if (!read_double_field(state->hwnd, state->aero_area_edit, L"Aero area", &config.aero.reference_area_m2) ||
-        !read_double_field(state->hwnd, state->aero_cd_edit, L"Cd", &config.aero.cd) ||
-        !read_double_field(state->hwnd, state->aero_cl_edit, L"Cl", &config.aero.cl)) {
-        return false;
+    // The aero table set (config.aero.stage_tables) is edited in place by the
+    // Import / Edit stage / Delete handlers; reference area / Cd / Cl no longer
+    // have dialog fields (they derive from the tables). Keep the legacy primary
+    // pointer and reference area in sync with the level-0 (full-stack) table.
+    config.aero.use_table = !config.aero.stage_tables.empty();
+    for (const auto& table : config.aero.stage_tables) {
+        if (table.activate_at_min_attached_stage == 0) {
+            config.aero.aero_table_path = table.table_path;
+            config.aero.reference_area_m2 = table.reference_area_m2;
+            config.aero.ref_diameter_m = table.ref_diameter_m;
+            config.aero.body_length_m = table.body_length_m;
+            config.aero.nose_length_m = table.nose_length_m;
+            config.aero.base_diameter_m = table.base_diameter_m;
+            break;
+        }
     }
     ensure_vehicle_stages(config);
     post2::vehicle::sync_legacy_vehicle_fields_from_first_stage(&config);
@@ -2306,6 +2659,246 @@ void delete_vehicle_stage(VehicleSettingsDialogState* state)
     refresh_vehicle_stage_list(state);
 }
 
+// ---- Small modal integer prompt (used to edit an aero table's stage level) ----
+
+struct IntPromptState {
+    HWND edit = nullptr;
+    int value = 0;
+    bool accepted = false;
+};
+
+LRESULT CALLBACK int_prompt_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam)
+{
+    auto* state = reinterpret_cast<IntPromptState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    switch (message) {
+    case WM_NCCREATE: {
+        auto* create = reinterpret_cast<CREATESTRUCTW*>(lparam);
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(create->lpCreateParams));
+        return TRUE;
+    }
+    case WM_COMMAND:
+        switch (LOWORD(wparam)) {
+        case IDOK: {
+            const std::wstring text = get_window_text(state->edit);
+            try {
+                std::size_t consumed = 0;
+                const int parsed = std::stoi(text, &consumed);
+                if (consumed != text.size()) {
+                    throw std::invalid_argument("trailing characters");
+                }
+                state->value = parsed;
+                state->accepted = true;
+                DestroyWindow(hwnd);
+            } catch (const std::exception&) {
+                MessageBoxW(hwnd, L"Enter an integer.", L"Edit", MB_ICONWARNING);
+            }
+            return 0;
+        }
+        case IDCANCEL:
+            DestroyWindow(hwnd);
+            return 0;
+        default:
+            break;
+        }
+        break;
+    case WM_CLOSE:
+        DestroyWindow(hwnd);
+        return 0;
+    default:
+        break;
+    }
+    return DefWindowProcW(hwnd, message, wparam, lparam);
+}
+
+bool prompt_integer(HWND parent, const wchar_t* title, const wchar_t* label, int* value)
+{
+    static bool registered = false;
+    if (!registered) {
+        WNDCLASSW wc = {};
+        wc.lpfnWndProc = int_prompt_proc;
+        wc.hInstance = g_instance;
+        wc.lpszClassName = L"Post2IntPromptWindow";
+        wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+        wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+        RegisterClassW(&wc);
+        registered = true;
+    }
+
+    IntPromptState state;
+    state.value = *value;
+
+    RECT pr;
+    GetWindowRect(parent, &pr);
+    constexpr int w = 320;
+    constexpr int h = 156;
+    const int x = pr.left + ((pr.right - pr.left) - w) / 2;
+    const int y = pr.top + ((pr.bottom - pr.top) - h) / 2;
+
+    HWND dialog = CreateWindowExW(
+        WS_EX_DLGMODALFRAME | WS_EX_WINDOWEDGE,
+        L"Post2IntPromptWindow",
+        title,
+        WS_CAPTION | WS_SYSMENU | WS_POPUP,
+        x, y, w, h, parent, nullptr, g_instance, &state);
+    if (!dialog) {
+        return false;
+    }
+
+    HFONT font = static_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
+    create_label(dialog, 18, 16, 280, label, font);
+    state.edit = create_edit(dialog, 0, 18, 58, 280, std::to_wstring(*value), font);
+    create_button(dialog, IDOK, 140, 90, 70, 26, L"OK", font);
+    create_button(dialog, IDCANCEL, 220, 90, 70, 26, L"Cancel", font);
+
+    EnableWindow(parent, FALSE);
+    ShowWindow(dialog, SW_SHOW);
+    SetFocus(state.edit);
+
+    MSG msg;
+    while (IsWindow(dialog) && GetMessageW(&msg, nullptr, 0, 0) > 0) {
+        if (!IsDialogMessageW(dialog, &msg)) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+    }
+    EnableWindow(parent, TRUE);
+    SetForegroundWindow(parent);
+    if (state.accepted) {
+        *value = state.value;
+    }
+    return state.accepted;
+}
+
+bool choose_open_file(HWND parent, const wchar_t* title, const wchar_t* filter, std::string* path)
+{
+    std::vector<wchar_t> buffer(1024, 0);
+    OPENFILENAMEW ofn = {};
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = parent;
+    ofn.lpstrFilter = filter;
+    ofn.lpstrFile = buffer.data();
+    ofn.nMaxFile = static_cast<DWORD>(buffer.size());
+    ofn.lpstrTitle = title;
+    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+    if (!GetOpenFileNameW(&ofn)) {
+        return false;
+    }
+    *path = narrow(buffer.data());
+    return true;
+}
+
+// ---- Aero table list handlers ----
+
+// Defined below (Increment 2): in-GUI CD/CL(Mach, alpha) table viewer.
+void show_aero_table_viewer(HWND parent, const std::string& path);
+
+// Find and select the table at the given activation level after a re-sort.
+void select_aero_table_at_level(VehicleSettingsDialogState* state, int activate)
+{
+    const auto& tables = state->config.aero.stage_tables;
+    for (std::size_t i = 0; i < tables.size(); ++i) {
+        if (tables[i].activate_at_min_attached_stage == activate) {
+            state->selected_aero_table_index = static_cast<int>(i);
+            SendMessageW(state->aero_table_list, LB_SETCURSEL, static_cast<WPARAM>(i), 0);
+            return;
+        }
+    }
+}
+
+void import_aero_table(VehicleSettingsDialogState* state)
+{
+    std::string path;
+    if (!choose_open_file(state->hwnd, L"Import aero table CSV",
+            L"Aero table CSV (*.csv)\0*.csv\0All files\0*.*\0\0", &path)) {
+        return;
+    }
+    post2::aero::AeroTable table;
+    std::string err;
+    if (!post2::aero::read_aero_table_csv(path, &table, &err)) {
+        MessageBoxW(state->hwnd, widen(err).c_str(), L"Import aero table", MB_ICONWARNING);
+        return;
+    }
+
+    auto& tables = state->config.aero.stage_tables;
+    int activate = 0;
+    for (const auto& t : tables) {
+        activate = std::max(activate, t.activate_at_min_attached_stage + 1);
+    }
+    if (!prompt_integer(state->hwnd, L"Aero table stage",
+            L"Activates after this many lower stages separate (0 = full stack):", &activate)) {
+        return;
+    }
+    if (activate < 0) {
+        activate = 0;
+    }
+
+    post2::vehicle::AeroStageTable entry;
+    entry.activate_at_min_attached_stage = activate;
+    entry.table_path = path;
+    entry.reference_area_m2 = table.reference_area_m2;
+    // Replace any existing table that already claims this activation level.
+    tables.erase(std::remove_if(tables.begin(), tables.end(),
+        [&](const post2::vehicle::AeroStageTable& t) {
+            return t.activate_at_min_attached_stage == activate;
+        }), tables.end());
+    tables.push_back(entry);
+
+    state->config.aero.use_table = true;
+    state->config.aero.enabled = true;
+    Button_SetCheck(state->aero_enabled, BST_CHECKED);
+    refresh_vehicle_aero_table_list(state);
+    select_aero_table_at_level(state, activate);
+}
+
+void edit_aero_table_stage(VehicleSettingsDialogState* state)
+{
+    auto& tables = state->config.aero.stage_tables;
+    const int idx = state->selected_aero_table_index;
+    if (idx < 0 || static_cast<std::size_t>(idx) >= tables.size()) {
+        return;
+    }
+    int activate = tables[static_cast<std::size_t>(idx)].activate_at_min_attached_stage;
+    if (!prompt_integer(state->hwnd, L"Aero table stage",
+            L"Activates after this many lower stages separate (0 = full stack):", &activate)) {
+        return;
+    }
+    if (activate < 0) {
+        activate = 0;
+    }
+    tables[static_cast<std::size_t>(idx)].activate_at_min_attached_stage = activate;
+    refresh_vehicle_aero_table_list(state);
+    select_aero_table_at_level(state, activate);
+}
+
+void delete_aero_table(VehicleSettingsDialogState* state)
+{
+    auto& tables = state->config.aero.stage_tables;
+    const int idx = state->selected_aero_table_index;
+    if (idx < 0 || static_cast<std::size_t>(idx) >= tables.size()) {
+        return;
+    }
+    tables.erase(tables.begin() + idx);
+    if (state->selected_aero_table_index > 0 &&
+        static_cast<std::size_t>(state->selected_aero_table_index) >= tables.size()) {
+        state->selected_aero_table_index = static_cast<int>(tables.size()) - 1;
+    }
+    if (tables.empty()) {
+        state->config.aero.use_table = false;
+    }
+    refresh_vehicle_aero_table_list(state);
+}
+
+void view_aero_table(VehicleSettingsDialogState* state)
+{
+    auto& tables = state->config.aero.stage_tables;
+    const int idx = state->selected_aero_table_index;
+    if (idx < 0 || static_cast<std::size_t>(idx) >= tables.size()) {
+        MessageBoxW(state->hwnd, L"Select an aero table first.", L"View aero table", MB_ICONINFORMATION);
+        return;
+    }
+    show_aero_table_viewer(state->hwnd, tables[static_cast<std::size_t>(idx)].table_path);
+}
+
 LRESULT CALLBACK vehicle_settings_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam)
 {
     auto* state = reinterpret_cast<VehicleSettingsDialogState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
@@ -2338,6 +2931,27 @@ LRESULT CALLBACK vehicle_settings_proc(HWND hwnd, UINT message, WPARAM wparam, L
                 return 0;
             }
             break;
+        case kVehicleAeroTableList:
+            if (HIWORD(wparam) == LBN_SELCHANGE) {
+                const LRESULT selected = SendMessageW(state->aero_table_list, LB_GETCURSEL, 0, 0);
+                if (selected != LB_ERR) {
+                    state->selected_aero_table_index = static_cast<int>(selected);
+                }
+                return 0;
+            }
+            break;
+        case kVehicleAeroTableImport:
+            import_aero_table(state);
+            return 0;
+        case kVehicleAeroTableView:
+            view_aero_table(state);
+            return 0;
+        case kVehicleAeroTableEditStage:
+            edit_aero_table_stage(state);
+            return 0;
+        case kVehicleAeroTableDelete:
+            delete_aero_table(state);
+            return 0;
         case kVehicleStageAdd:
             add_vehicle_stage(state);
             return 0;
@@ -2359,6 +2973,150 @@ LRESULT CALLBACK vehicle_settings_proc(HWND hwnd, UINT message, WPARAM wparam, L
     }
 
     return DefWindowProcW(hwnd, message, wparam, lparam);
+}
+
+// ---- Increment 2: in-GUI aero table viewer ----------------------------------
+
+struct AeroViewerState {
+    HWND edit = nullptr;
+};
+
+LRESULT CALLBACK aero_table_viewer_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam)
+{
+    auto* state = reinterpret_cast<AeroViewerState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    switch (message) {
+    case WM_NCCREATE: {
+        auto* create = reinterpret_cast<CREATESTRUCTW*>(lparam);
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(create->lpCreateParams));
+        return TRUE;
+    }
+    case WM_SIZE:
+        if (state && state->edit) {
+            RECT rc;
+            GetClientRect(hwnd, &rc);
+            MoveWindow(state->edit, 0, 0, rc.right, rc.bottom, TRUE);
+        }
+        return 0;
+    case WM_COMMAND:
+        if (LOWORD(wparam) == IDCANCEL) {
+            DestroyWindow(hwnd);
+            return 0;
+        }
+        break;
+    case WM_CLOSE:
+        DestroyWindow(hwnd);
+        return 0;
+    default:
+        break;
+    }
+    return DefWindowProcW(hwnd, message, wparam, lparam);
+}
+
+// Render one CD/CL(Mach, alpha) table as a fixed-width text grid.
+std::wstring format_aero_table_text(const std::string& path, const post2::aero::AeroTable& table)
+{
+    std::wostringstream out;
+    out << L"File: " << widen(path) << L"\r\n";
+    out << L"Reference area: " << std::fixed << std::setprecision(3)
+        << table.reference_area_m2 << L" m2\r\n";
+    out << L"Grid: " << table.mach.size() << L" Mach x " << table.alpha_deg.size()
+        << L" alpha\r\n\r\n";
+
+    const auto block = [&](const wchar_t* name, const std::vector<double>& vals) {
+        out << name << L"  (rows = Mach, cols = alpha deg)\r\n";
+        out << L"  Mach \\ a |";
+        for (double a : table.alpha_deg) {
+            out << std::setw(8) << std::setprecision(1) << std::fixed << a;
+        }
+        out << L"\r\n";
+        for (std::size_t i = 0; i < table.mach.size(); ++i) {
+            out << std::setw(9) << std::setprecision(3) << std::fixed << table.mach[i] << L" |";
+            for (std::size_t j = 0; j < table.alpha_deg.size(); ++j) {
+                const std::size_t k = i * table.alpha_deg.size() + j;
+                out << std::setw(8) << std::setprecision(4) << std::fixed
+                    << (k < vals.size() ? vals[k] : 0.0);
+            }
+            out << L"\r\n";
+        }
+        out << L"\r\n";
+    };
+    block(L"CD", table.cd);
+    block(L"CL", table.cl);
+    return out.str();
+}
+
+void show_aero_table_viewer(HWND parent, const std::string& path)
+{
+    if (path.empty()) {
+        MessageBoxW(parent, L"This table has no file to view.", L"Aero table", MB_ICONINFORMATION);
+        return;
+    }
+    post2::aero::AeroTable table;
+    std::string err;
+    if (!post2::aero::read_aero_table_csv(path, &table, &err)) {
+        MessageBoxW(parent, widen(err).c_str(), L"Aero table", MB_ICONWARNING);
+        return;
+    }
+
+    static bool registered = false;
+    if (!registered) {
+        WNDCLASSW wc = {};
+        wc.lpfnWndProc = aero_table_viewer_proc;
+        wc.hInstance = g_instance;
+        wc.lpszClassName = L"Post2AeroTableViewerWindow";
+        wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+        wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+        RegisterClassW(&wc);
+        registered = true;
+    }
+
+    AeroViewerState state;
+    RECT pr;
+    GetWindowRect(parent, &pr);
+    constexpr int w = 660;
+    constexpr int h = 540;
+    const int x = pr.left + ((pr.right - pr.left) - w) / 2;
+    const int y = pr.top + ((pr.bottom - pr.top) - h) / 2;
+
+    HWND viewer = CreateWindowExW(
+        WS_EX_WINDOWEDGE,
+        L"Post2AeroTableViewerWindow",
+        L"Aero table",
+        WS_CAPTION | WS_SYSMENU | WS_THICKFRAME | WS_POPUP,
+        x, y, w, h, parent, nullptr, g_instance, &state);
+    if (!viewer) {
+        return;
+    }
+
+    state.edit = CreateWindowExW(
+        WS_EX_CLIENTEDGE,
+        L"EDIT",
+        format_aero_table_text(path, table).c_str(),
+        WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_HSCROLL |
+            ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | ES_AUTOHSCROLL,
+        0, 0, w, h, viewer, nullptr, g_instance, nullptr);
+    // Fixed-width font so the grid columns line up.
+    static HFONT mono = CreateFontW(-13, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY,
+        FIXED_PITCH | FF_MODERN, L"Consolas");
+    SendMessageW(state.edit, WM_SETFONT, reinterpret_cast<WPARAM>(mono), TRUE);
+
+    RECT rc;
+    GetClientRect(viewer, &rc);
+    MoveWindow(state.edit, 0, 0, rc.right, rc.bottom, TRUE);
+
+    EnableWindow(parent, FALSE);
+    ShowWindow(viewer, SW_SHOW);
+
+    MSG msg;
+    while (IsWindow(viewer) && GetMessageW(&msg, nullptr, 0, 0) > 0) {
+        if (!IsDialogMessageW(viewer, &msg)) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+    }
+    EnableWindow(parent, TRUE);
+    SetForegroundWindow(parent);
 }
 
 void register_vehicle_settings_class()
@@ -2389,8 +3147,8 @@ bool show_vehicle_settings_dialog(HWND parent)
 
     RECT parent_rect;
     GetWindowRect(parent, &parent_rect);
-    constexpr int dialog_width = 542;
-    constexpr int dialog_height = 468;
+    constexpr int dialog_width = 760;
+    constexpr int dialog_height = 540;
     const int x = parent_rect.left + ((parent_rect.right - parent_rect.left) - dialog_width) / 2;
     const int y = parent_rect.top + ((parent_rect.bottom - parent_rect.top) - dialog_height) / 2;
 
@@ -2543,6 +3301,25 @@ bool choose_ksp_vehicle_site_file(HWND parent, std::string* path)
     return true;
 }
 
+// Builds a semi-empirical CD/CL(Mach, alpha) table from the imported geometry,
+// writes it next to the source JSON, and points the case aero/atmosphere models
+// at the real lift/drag path. Geometry falls back to real Falcon-9 dimensions
+// when fields are unset; users can edit the dimensions and re-import to refine.
+void generate_aero_table_for_case(HWND hwnd,
+                                  const post2::core::KspVehicleSiteImport& imported,
+                                  const std::string& source_path)
+{
+    // Table CSVs are written next to the source JSON. Delegates to the shared
+    // core routine so the GUI and the post2_regen_aero CLI produce identical output.
+    const auto slash = source_path.find_last_of("/\\");
+    const std::string dir =
+        slash != std::string::npos ? source_path.substr(0, slash + 1) : std::string();
+    std::string error;
+    if (!post2::core::generate_case_aero_tables(&g_case, imported, dir, &error)) {
+        MessageBoxW(hwnd, widen(error).c_str(), L"Aero table generation failed", MB_ICONWARNING);
+    }
+}
+
 void import_ksp_vehicle_site(HWND hwnd)
 {
     ensure_case_initialized();
@@ -2563,6 +3340,7 @@ void import_ksp_vehicle_site(HWND hwnd)
     }
 
     post2::core::apply_ksp_vehicle_site_import(&g_case, imported);
+    generate_aero_table_for_case(hwnd, imported, path);
     sync_legacy_from_case();
     refresh_phase_list();
     load_selected_phase_controls();
@@ -3340,6 +4118,7 @@ std::string trigger_type_display_label(const std::string& type)
     if (type == "velocity_mps") return "Velocity magnitude (m/s)";
     if (type == "total_mass_kg") return "Total vehicle mass (kg)";
     if (type == "propellant_mass_kg") return "Propellant mass (kg, active stage)";
+    if (type == "thrust_fraction") return "Thrust established (fraction)";
     return type;
 }
 
@@ -3350,6 +4129,7 @@ std::string trigger_type_from_display_label(const std::string& label)
     if (label.rfind("Velocity", 0) == 0) return "velocity_mps";
     if (label.rfind("Total vehicle mass", 0) == 0) return "total_mass_kg";
     if (label.rfind("Propellant mass", 0) == 0) return "propellant_mass_kg";
+    if (label.rfind("Thrust established", 0) == 0) return "thrust_fraction";
     return label;
 }
 
@@ -3374,6 +4154,7 @@ void create_trigger_editor_controls(TriggerConditionEditorDialogState* state)
     add_combo_item(state->type_combo, L"Velocity magnitude (m/s)");
     add_combo_item(state->type_combo, L"Total vehicle mass (kg)");
     add_combo_item(state->type_combo, L"Propellant mass (kg, active stage)");
+    add_combo_item(state->type_combo, L"Thrust established (fraction)");
     select_combo_text(state->type_combo, trigger_type_display_label(state->trigger.type));
 
     create_label(state->hwnd, 18, 62, 80, L"Comparison", font);
@@ -5779,6 +6560,8 @@ void create_phase_editor_controls(HWND hwnd)
     create_label(g_phase_scroll_pane, 18, y + 4, 86, L"Atmosphere", font);
     g_phase_atmosphere_type = create_combo(g_phase_scroll_pane, kPhaseAtmosphereType, 118, y, 154, font);
     add_combo_item(g_phase_atmosphere_type, L"exponential");
+    add_combo_item(g_phase_atmosphere_type, L"us_standard_1976");
+    add_combo_item(g_phase_atmosphere_type, L"table");
     add_combo_item(g_phase_atmosphere_type, L"none");
     y += 40;
 
@@ -6311,7 +7094,7 @@ HMENU create_main_menu()
     AppendMenuW(file_menu, MF_STRING, kMenuCaseSaveAs, L"Save case as...");
     AppendMenuW(file_menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(file_menu, MF_STRING, kMenuExportCsv, L"Export CSV");
-    AppendMenuW(file_menu, MF_STRING, kMenuExportKosCsv, L"Export kOS trajectory CSV");
+    AppendMenuW(file_menu, MF_STRING, kMenuExportKosCsv, L"Export guidance script (post2_player)");
     AppendMenuW(file_menu, MF_STRING, kMenuExportSvg, L"Export SVG");
     AppendMenuW(file_menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(file_menu, MF_STRING, kMenuExit, L"Exit");
@@ -6361,131 +7144,51 @@ void export_current(HWND hwnd, bool svg)
     MessageBoxW(hwnd, widen("Wrote " + path).c_str(), L"POST2 Lite", MB_ICONINFORMATION);
 }
 
-std::filesystem::path default_kos_archive_trajectory_path()
+std::filesystem::path default_guidance_script_path()
 {
-    const char* env_dir = std::getenv("POST2_KOS_ARCHIVE_DIR");
-    if (env_dir && env_dir[0] != '\0') {
-        return std::filesystem::path(env_dir) / "post2-lite" / "gui_trajectory.csv";
-    }
-
-    const std::filesystem::path steam_x86 =
-        "C:/Program Files (x86)/Steam/steamapps/common/Kerbal Space Program/Ships/Script";
-    if (std::filesystem::exists(steam_x86)) {
-        return steam_x86 / "post2-lite" / "gui_trajectory.csv";
-    }
-
-    const std::filesystem::path steam =
-        "C:/Program Files/Steam/steamapps/common/Kerbal Space Program/Ships/Script";
-    if (std::filesystem::exists(steam)) {
-        return steam / "post2-lite" / "gui_trajectory.csv";
-    }
-
-    return std::filesystem::path("post2-lite") / "gui_trajectory.csv";
+    // The guidance script is fed to the standalone post2_player (C++/kRPC), so it
+    // belongs with the project scripts, not the KSP archive. Allow an override.
+    const char* env_dir = std::getenv("POST2_GUIDANCE_DIR");
+    const std::filesystem::path dir =
+        (env_dir && env_dir[0] != '\0') ? std::filesystem::path(env_dir)
+                                        : std::filesystem::path("scripts");
+    return dir / "guidance_script.csv";
 }
 
-std::filesystem::path executable_directory()
+void export_guidance_script(HWND hwnd)
 {
-    std::array<wchar_t, MAX_PATH> buffer = {};
-    const DWORD length = GetModuleFileNameW(nullptr, buffer.data(), static_cast<DWORD>(buffer.size()));
-    if (length == 0 || length >= buffer.size()) {
-        return std::filesystem::current_path();
-    }
-    return std::filesystem::path(buffer.data()).parent_path();
-}
-
-std::optional<std::filesystem::path> find_kos_player_script()
-{
-    const std::filesystem::path exe_dir = executable_directory();
-    const std::filesystem::path cwd = std::filesystem::current_path();
-    const std::array<std::filesystem::path, 6> candidates = {
-        cwd / "scripts" / "post2_fly_openloop.ks",
-        cwd.parent_path() / "scripts" / "post2_fly_openloop.ks",
-        cwd.parent_path().parent_path() / "scripts" / "post2_fly_openloop.ks",
-        exe_dir / "scripts" / "post2_fly_openloop.ks",
-        exe_dir.parent_path() / "scripts" / "post2_fly_openloop.ks",
-        exe_dir.parent_path().parent_path() / "scripts" / "post2_fly_openloop.ks",
-    };
-
-    for (const auto& candidate : candidates) {
-        std::error_code error;
-        if (std::filesystem::exists(candidate, error) && !error) {
-            return candidate;
-        }
-    }
-    return std::nullopt;
-}
-
-std::string copy_kos_player_script_to_archive(const std::filesystem::path& trajectory_path)
-{
-    const auto source = find_kos_player_script();
-    if (!source) {
-        return "kOS player script was not found next to the repo/build; CSV only.";
-    }
-
-    std::vector<std::filesystem::path> destinations = {
-        trajectory_path.parent_path() / "post2_fly_openloop.ks",
-    };
-    if (trajectory_path.parent_path().filename() == "post2-lite") {
-        destinations.push_back(trajectory_path.parent_path().parent_path() / "post2_fly_openloop.ks");
-    }
-
-    std::string copied;
-    for (const auto& destination : destinations) {
-        std::error_code error;
-        std::filesystem::create_directories(destination.parent_path(), error);
-        if (error) {
-            return "Failed to create kOS script directory: " + error.message();
-        }
-
-        std::filesystem::copy_file(
-            *source,
-            destination,
-            std::filesystem::copy_options::overwrite_existing,
-            error);
-        if (error) {
-            return "Failed to copy kOS script: " + error.message();
-        }
-
-        copied += "\n" + destination.string();
-    }
-
-    return "Copied kOS player script:" + copied;
-}
-
-void export_kos_trajectory(HWND hwnd)
-{
-    if (!g_result.ok || g_result.state_log.empty()) {
-        MessageBoxW(hwnd, L"No StateLog is available to export.", L"POST2 Lite", MB_ICONWARNING);
+    if (g_case.phases.empty()) {
+        MessageBoxW(hwnd, L"No case is loaded to export.", L"POST2 Lite", MB_ICONWARNING);
         return;
     }
 
-    const std::filesystem::path path = default_kos_archive_trajectory_path();
+    const std::filesystem::path path = default_guidance_script_path();
     std::error_code fs_error;
-    std::filesystem::create_directories(path.parent_path(), fs_error);
-    if (fs_error) {
-        MessageBoxW(
-            hwnd,
-            widen("Failed to create kOS archive directory: " + fs_error.message()).c_str(),
-            L"Export failed",
-            MB_ICONERROR);
-        return;
+    if (!path.parent_path().empty()) {
+        std::filesystem::create_directories(path.parent_path(), fs_error);
+        if (fs_error) {
+            MessageBoxW(
+                hwnd,
+                widen("Failed to create scripts directory: " + fs_error.message()).c_str(),
+                L"Export failed",
+                MB_ICONERROR);
+            return;
+        }
     }
 
     std::string error;
     const std::string path_text = path.string();
-    if (!post2::core::write_kos_csv_file(path_text, g_result.state_log, g_case, &error)) {
+    if (!post2::core::write_guidance_script_file(path_text, g_case, &error)) {
         MessageBoxW(hwnd, widen(error).c_str(), L"Export failed", MB_ICONERROR);
         return;
     }
 
-    const std::string script_message = copy_kos_player_script_to_archive(path);
-
     MessageBoxW(
         hwnd,
         widen(
-            "Wrote kOS trajectory CSV:\n" + path_text +
-            "\n\n" + script_message +
-            "\n\nIn kOS, run:\nrunpath(\"archive:/post2-lite/post2_fly_openloop.ks\").").c_str(),
+            "Wrote guidance script CSV:\n" + path_text +
+            "\n\nFly it with the standalone player:\n  post2_player \"" + path_text +
+            "\"\n(add --dry-run to preview offline).").c_str(),
         L"POST2 Lite",
         MB_ICONINFORMATION);
 }
@@ -6740,7 +7443,7 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
                 export_current(hwnd, false);
                 return 0;
             case kMenuExportKosCsv:
-                export_kos_trajectory(hwnd);
+                export_guidance_script(hwnd);
                 return 0;
             case kMenuExportSvg:
                 export_current(hwnd, true);
@@ -6785,7 +7488,7 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
             export_current(hwnd, false);
             return 0;
         case kMenuExportKosCsv:
-            export_kos_trajectory(hwnd);
+            export_guidance_script(hwnd);
             return 0;
         case kMenuExportSvg:
             export_current(hwnd, true);

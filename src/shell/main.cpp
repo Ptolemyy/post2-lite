@@ -51,7 +51,7 @@ struct Options {
     std::vector<PhaseOverride> phase_overrides;
     std::string csv_path = "trajectory.csv";
     std::string svg_path = "trajectory.svg";
-    std::string kos_csv_path;
+    std::string guidance_csv_path;
     std::string save_vehicle_config_path;
     std::string save_case_config_path;
     bool write_csv = true;
@@ -107,7 +107,9 @@ void print_help()
         << "  --tank-initial KG         Override first tank initial mass\n"
         << "  --csv PATH                Export CSV path (default: trajectory.csv)\n"
         << "  --svg PATH                Export SVG chart path (default: trajectory.svg)\n"
-        << "  --kos-csv PATH            Export kOS player CSV (host-computed yaw/pitch/roll)\n"
+        << "  --guidance-csv PATH       Export guidance script CSV for post2_player (per-phase\n"
+        << "                            poly params; UPFG phases marked + orbit target).\n"
+        << "                            Alias: --kos-csv\n"
         << "  --no-csv                  Do not write CSV\n"
         << "  --no-svg                  Do not write SVG\n\n"
         << "Optimize options:\n"
@@ -622,8 +624,8 @@ bool parse_options(int argc, char** argv, Options* options)
         } else if (arg == "--svg") {
             options->svg_path = value;
             options->write_svg = true;
-        } else if (arg == "--kos-csv") {
-            options->kos_csv_path = value;
+        } else if (arg == "--kos-csv" || arg == "--guidance-csv") {
+            options->guidance_csv_path = value;
         } else {
             std::cerr << "Unknown argument: " << arg << '\n';
             return false;
@@ -650,8 +652,13 @@ void sync_loaded_case_from_legacy_surface(Options* options)
     options->case_config.launch_site = options->config.launch_site;
     options->case_config.step_s = options->config.step_s;
     if (!options->case_config.phases.empty()) {
-        options->case_config.phases.front().termination =
-            {"time", ">=", options->config.duration_s};
+        // Mirror the legacy --duration only onto a time-based first phase. A case
+        // that deliberately uses a non-time first-phase termination (e.g. a pad
+        // hold that ends when thrust is established) is preserved as authored.
+        if (options->case_config.phases.front().termination.type == "time") {
+            options->case_config.phases.front().termination =
+                {"time", ">=", options->config.duration_s};
+        }
         options->case_config.phases.front().force_models.normal_force = options->config.normal_force.enabled;
         options->case_config.phases.front().force_models.aerodynamic =
             options->config.vehicle.aero.enabled;
@@ -800,15 +807,15 @@ bool write_exports(
         std::cout << "wrote_csv: " << options.csv_path << '\n';
     }
 
-    if (!options.kos_csv_path.empty()) {
-        const post2::core::CaseConfig kos_case = options.has_case_config
+    if (!options.guidance_csv_path.empty()) {
+        const post2::core::CaseConfig guidance_case = options.has_case_config
             ? options.case_config
             : post2::core::case_from_simulation_config(options.config);
-        if (!post2::core::write_kos_csv_file(options.kos_csv_path, result.state_log, kos_case, &error)) {
-            std::cerr << "kOS CSV export failed: " << error << '\n';
+        if (!post2::core::write_guidance_script_file(options.guidance_csv_path, guidance_case, &error)) {
+            std::cerr << "guidance script export failed: " << error << '\n';
             return false;
         }
-        std::cout << "wrote_kos_csv: " << options.kos_csv_path << '\n';
+        std::cout << "wrote_guidance_csv: " << options.guidance_csv_path << '\n';
     }
 
     if (options.write_svg) {

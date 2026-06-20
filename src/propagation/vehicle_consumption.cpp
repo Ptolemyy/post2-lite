@@ -3,6 +3,7 @@
 #include "post2/propagation/engine_performance.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <utility>
 
@@ -69,6 +70,48 @@ double total_attached_mass_kg(
         }
     }
     return total;
+}
+
+// Actual (spooled) throttle of an engine at eval_time_s, given the actual
+// throttle spool_at_ref sampled at ref_time_s and relaxing toward
+// command_throttle. Implements the first-order spool lag with an ignition
+// dead-time documented on EngineConfig. Closed-form (exact for a command held
+// constant over [ref_time_s, eval_time_s]), so it is correct for an arbitrary
+// step size and stable. Returns 0 before ignition / during the dead-time, and
+// the raw command when no spool rate is configured (legacy instantaneous).
+double spooled_throttle(
+    const post2::vehicle::EngineConfig& engine,
+    double ignition_time_s,
+    double spool_at_ref,
+    double ref_time_s,
+    double eval_time_s,
+    double command_throttle)
+{
+    if (ignition_time_s < 0.0) {
+        return 0.0;
+    }
+    const double up = engine.spool_up_rate_per_s;
+    const double down = engine.spool_down_rate_per_s;
+    if (up <= 0.0 && down <= 0.0) {
+        return std::max(0.0, command_throttle);  // no transient configured
+    }
+    const double active_start_s = ignition_time_s + std::max(0.0, engine.ignition_delay_s);
+    double theta = spool_at_ref;
+    double t0 = ref_time_s;
+    if (t0 < active_start_s) {
+        // Pinned at zero through the ignition dead-time.
+        theta = 0.0;
+        t0 = active_start_s;
+    }
+    if (eval_time_s <= t0) {
+        return std::max(0.0, theta);
+    }
+    const double rate = (command_throttle >= theta) ? up : down;
+    if (rate <= 0.0) {
+        return std::max(0.0, command_throttle);  // direction not configured
+    }
+    const double dt = eval_time_s - t0;
+    return std::max(0.0, command_throttle + (theta - command_throttle) * std::exp(-rate * dt));
 }
 
 } // namespace
@@ -183,14 +226,45 @@ DerivativeResult VehicleConsumptionPropagator::compute_derivatives(
                 continue;
             }
 
-            // EnginePerformanceModel produces the cluster-aggregate thrust/mdot
-            // at the commanded throttle and ambient pressure. The tank gating
+            // Steady (target) performance at the commanded throttle. This is the
+            // thrust the engine is spooling toward; it defines the denominator of
+            // the "thrust established" fraction and is reported as commanded_thrust.
+            EnginePerformanceInputs steady_in;
+            steady_in.throttle_command = throttle;
+            steady_in.ambient_pressure_pa = command.ambient_pressure_pa;
+            const EnginePerformanceOutputs steady = evaluate_engine(stage_cfg.engine, steady_in);
+
+            // Transient spool: the actual throttle lags the command. The
+            // reference point is the start of the current integration step
+            // (runtime_topology carries its spool state and time); the closed-form
+            // relaxation gives the actual throttle at this evaluation time.
+            double ignition_time_s = stage_rt.engine.ignition_time_s;
+            if (ignition_time_s < 0.0) {
+                ignition_time_s = runtime_topology.time_s;  // ignites at step start
+            }
+            const double spool_eff = spooled_throttle(
+                stage_cfg.engine,
+                ignition_time_s,
+                stage_rt.engine.spool_throttle,
+                runtime_topology.time_s,
+                time_s,
+                throttle);
+
+            engine_out.ignition_time_s = ignition_time_s;
+            engine_out.spool_throttle = spool_eff;
+            engine_out.commanded_thrust_n = steady.thrust_n;
+            result.total_commanded_thrust_n += steady.thrust_n;
+
+            // EnginePerformanceModel produces the cluster-aggregate thrust/mdot at
+            // the (spooled) actual throttle and ambient pressure. The tank gating
             // below downscales these by the propellant available this step.
             EnginePerformanceInputs perf_in;
-            perf_in.throttle_command = throttle;
+            perf_in.throttle_command = spool_eff;
             perf_in.ambient_pressure_pa = command.ambient_pressure_pa;
             const EnginePerformanceOutputs perf = evaluate_engine(stage_cfg.engine, perf_in);
             if (perf.thrust_n <= 0.0 || perf.mdot_kgps <= 0.0) {
+                // Still in ignition dead-time / below min throttle: no thrust yet.
+                engine_out.throttle = perf.effective_throttle;
                 continue;
             }
 
@@ -229,14 +303,14 @@ DerivativeResult VehicleConsumptionPropagator::compute_derivatives(
                 : 0.0;
             const double actual_thrust_n = commanded_thrust_n * flow_ratio;
 
+            // commanded_thrust_n here is the spooled (current) thrust; the steady
+            // target was already recorded as engine_out.commanded_thrust_n above.
             engine_out.throttle = perf.effective_throttle;
-            engine_out.commanded_thrust_n = commanded_thrust_n;
             engine_out.actual_thrust_n = actual_thrust_n;
             engine_out.isp_s = perf.isp_s;
             engine_out.mass_flow_kgps = actual_flow_kgps;
             engine_out.firing = actual_thrust_n > 0.0;
 
-            result.total_commanded_thrust_n += commanded_thrust_n;
             result.total_actual_thrust_n += actual_thrust_n;
             result.total_mass_flow_kgps += actual_flow_kgps;
             result.weighted_isp_s += perf.isp_s * actual_thrust_n;
@@ -281,6 +355,49 @@ post2::vehicle::VehicleRuntimeState VehicleConsumptionPropagator::commit(
         dst.mass_flow_kgps = src.mass_flow_kgps;
         dst.direction_body = src.direction_body;
     }
+
+    // Advance the per-stage transient spool state to the end of the step. This
+    // is recomputed authoritatively from the start-of-step state (previous)
+    // rather than from last_eval, whose spool sample is taken at an arbitrary
+    // sub-step time. An off->on edge stamps the ignition time; losing
+    // eligibility resets the spool to rest.
+    const std::vector<post2::vehicle::StageConfig> stage_configs =
+        post2::vehicle::effective_stage_configs(config_);
+    const double cmd_throttle = clamp(command.throttle, 0.0, 1.0);
+    double aggregate_spool = 0.0;
+    double aggregate_ignition_time_s = -1.0;
+    for (std::size_t i = 0; i < next.stages.size() && i < stage_configs.size(); ++i) {
+        const post2::vehicle::EngineState& prev_engine = previous.stages[i].engine;
+        const post2::vehicle::EngineConfig& ecfg = stage_configs[i].engine;
+        const post2::vehicle::StageRuntimeState& srt = next.stages[i];
+        const bool eligible = command.enabled && srt.active && srt.attached &&
+            ecfg.enabled && ecfg.thrust_vac_n > 0.0 && ecfg.isp_vac_s > 0.0;
+
+        double ignition_time_s = prev_engine.ignition_time_s;
+        double spool_start = prev_engine.spool_throttle;
+        if (!eligible) {
+            ignition_time_s = -1.0;
+            spool_start = 0.0;
+        } else if (ignition_time_s < 0.0) {
+            ignition_time_s = previous.time_s;  // off->on edge: ignite at step start
+            spool_start = 0.0;
+        }
+        const double spool_end = eligible
+            ? spooled_throttle(ecfg, ignition_time_s, spool_start, previous.time_s,
+                               next_time_s, cmd_throttle)
+            : 0.0;
+        next.stages[i].engine.ignition_time_s = ignition_time_s;
+        next.stages[i].engine.spool_throttle = spool_end;
+        if (eligible) {
+            aggregate_spool = std::max(aggregate_spool, spool_end);
+            if (ignition_time_s >= 0.0 &&
+                (aggregate_ignition_time_s < 0.0 || ignition_time_s < aggregate_ignition_time_s)) {
+                aggregate_ignition_time_s = ignition_time_s;
+            }
+        }
+    }
+    next.engine.spool_throttle = aggregate_spool;
+    next.engine.ignition_time_s = aggregate_ignition_time_s;
 
     // Vehicle-level aggregated engine snapshot.
     next.engine.throttle = last_eval.throttle;

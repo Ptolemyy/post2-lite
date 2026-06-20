@@ -7,6 +7,9 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 add_library(post2_core STATIC
+    src/aero/aero_table.cpp
+    src/aero/aero_model.cpp
+    src/core/aero_table_build.cpp
     src/core/case_config_io.cpp
     src/core/control_models.cpp
     src/core/io.cpp
@@ -59,6 +62,33 @@ add_executable(post2_core_server
     src/server/main.cpp
 )
 target_link_libraries(post2_core_server PRIVATE post2_core)
+
+# Headless KSP re-import + aero-table regeneration for case files.
+add_executable(post2_regen_aero
+    src/tools/regen_aero.cpp
+)
+target_link_libraries(post2_regen_aero PRIVATE post2_core)
+if(WIN32)
+    target_compile_definitions(post2_regen_aero PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+endif()
+
+# Standalone kRPC ascent-guidance player. Requires the vcpkg krpc package
+# (configure with the vcpkg toolchain, e.g. `cmake --preset vcpkg`). When krpc
+# is not available the player is skipped so the core build still works.
+find_package(krpc CONFIG QUIET)
+if(krpc_FOUND)
+    add_executable(post2_player
+        src/player/main.cpp
+        src/player/guidance_script.cpp
+    )
+    target_link_libraries(post2_player PRIVATE post2_core krpc::krpc)
+    if(WIN32)
+        target_compile_definitions(post2_player PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+    endif()
+    message(STATUS "post2_player: enabled (krpc found)")
+else()
+    message(STATUS "post2_player: skipped (krpc not found; use the vcpkg toolchain)")
+endif()
 
 if(WIN32)
     set(POST2_GUI_RESOURCE_HEADER "${CMAKE_CURRENT_SOURCE_DIR}/src/gui/resource.h")
@@ -123,6 +153,21 @@ if(BUILD_TESTING)
     )
     target_link_libraries(post2_upfg_guidance_test PRIVATE post2_core)
     add_test(NAME post2_upfg_guidance_test COMMAND post2_upfg_guidance_test)
+
+    add_executable(post2_aero_model_test
+        tests/aero_model_test.cpp
+    )
+    target_link_libraries(post2_aero_model_test PRIVATE post2_core)
+    add_test(NAME post2_aero_model_test COMMAND post2_aero_model_test)
+
+    # End-to-end (krpc-independent): core writes the guidance script, the player's
+    # parser reads it back. Compiles the player parser directly so it needs no krpc.
+    add_executable(post2_guidance_script_test
+        tests/guidance_script_test.cpp
+        src/player/guidance_script.cpp
+    )
+    target_link_libraries(post2_guidance_script_test PRIVATE post2_core)
+    add_test(NAME post2_guidance_script_test COMMAND post2_guidance_script_test)
 
     add_executable(post2_ksp_vehicle_site_import_test
         tests/ksp_vehicle_site_import_test.cpp

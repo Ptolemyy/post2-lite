@@ -86,52 +86,18 @@ void write_trajectory_csv_row(std::ostream& output, const LaunchVehicleStateLogE
         << point.phase_name;
 }
 
-std::vector<double> configured_phase_start_times(const CaseConfig& case_config)
+// Standard gravity used to turn vacuum Isp into exhaust velocity, matching
+// build_upfg_stages in control_models.cpp.
+constexpr double kStandardGravityMps2 = 9.80665;
+
+int sanitized_order(int order)
 {
-    std::vector<double> starts;
-    starts.reserve(case_config.phases.size());
-    double time_s = 0.0;
-    for (const auto& phase : case_config.phases) {
-        starts.push_back(time_s);
-        // Non-time terminations do not contribute a known duration here;
-        // callers fall back to the state-log time for actual phase boundaries.
-        if (phase.termination.type == "time") {
-            time_s += phase.termination.value;
-        }
-    }
-    return starts;
+    return std::max(0, std::min(order, 8));
 }
 
-double phase_start_time_s(
-    const LaunchVehicleStateLogEntry& point,
-    const std::vector<double>& phase_starts)
+double coefficient_or_zero(const std::vector<double>& coefficients, std::size_t index)
 {
-    if (point.phase_index >= 0 &&
-        static_cast<std::size_t>(point.phase_index) < phase_starts.size()) {
-        return phase_starts[static_cast<std::size_t>(point.phase_index)];
-    }
-    return point.time_s;
-}
-
-const PhaseConfig* phase_for_point(
-    const LaunchVehicleStateLogEntry& point,
-    const CaseConfig& case_config)
-{
-    if (point.phase_index < 0 ||
-        static_cast<std::size_t>(point.phase_index) >= case_config.phases.size()) {
-        return nullptr;
-    }
-    return &case_config.phases[static_cast<std::size_t>(point.phase_index)];
-}
-
-bool is_generic_poly_steering(const PhaseConfig& phase)
-{
-    return lowercase(phase.steering_model.type) == "generic_poly";
-}
-
-bool is_poly_throttle(const PhaseConfig& phase)
-{
-    return lowercase(phase.throttle_model.type) == "poly";
+    return index < coefficients.size() ? coefficients[index] : 0.0;
 }
 
 bool is_segmented_poly_type(const std::string& type)
@@ -142,299 +108,28 @@ bool is_segmented_poly_type(const std::string& type)
         normalized == "piecewise_poly";
 }
 
-double coefficient_or_zero(const std::vector<double>& coefficients, std::size_t index)
+bool is_tangent_type(const std::string& type)
 {
-    return index < coefficients.size() ? coefficients[index] : 0.0;
+    const std::string normalized = lowercase(type);
+    return normalized == "linear_tangent" || normalized == "bilinear_tangent";
 }
 
-Poly2Config coefficients_to_phase_poly2(
-    const std::vector<double>& coefficients,
-    double segment_start_time_s)
+bool is_rpy_type(const std::string& type)
 {
-    const double a0 = coefficient_or_zero(coefficients, 0);
-    const double a1 = coefficient_or_zero(coefficients, 1);
-    const double a2 = coefficient_or_zero(coefficients, 2);
-    Poly2Config out;
-    out.c0 = a0 - a1 * segment_start_time_s + a2 * segment_start_time_s * segment_start_time_s;
-    out.c1 = a1 - 2.0 * a2 * segment_start_time_s;
-    out.c2 = a2;
-    return out;
+    const std::string normalized = lowercase(type);
+    return normalized == "rpy_poly" || normalized == "roll_pitch_yaw_poly";
 }
 
-const SegmentedPolySegmentConfig* selected_segment(
-    const std::vector<SegmentedPolySegmentConfig>& segments,
-    double phase_time_s)
+// Free-text fields (names) are written inside a comma-delimited record, so strip
+// the delimiter and newlines to keep the row splittable on ','.
+std::string sanitize_field(std::string text)
 {
-    if (segments.empty()) {
-        return nullptr;
-    }
-    const auto* selected = &segments.front();
-    for (const auto& segment : segments) {
-        if (phase_time_s >= segment.start_time_s) {
-            selected = &segment;
+    for (char& ch : text) {
+        if (ch == ',' || ch == '\n' || ch == '\r') {
+            ch = ' ';
         }
     }
-    return selected;
-}
-
-const SegmentedSteeringPolySegmentConfig* selected_segment(
-    const std::vector<SegmentedSteeringPolySegmentConfig>& segments,
-    double phase_time_s)
-{
-    if (segments.empty()) {
-        return nullptr;
-    }
-    const auto* selected = &segments.front();
-    for (const auto& segment : segments) {
-        if (phase_time_s >= segment.start_time_s) {
-            selected = &segment;
-        }
-    }
-    return selected;
-}
-
-bool steering_poly_for_time(
-    const PhaseConfig& phase,
-    double phase_time_s,
-    Poly2Config* azimuth,
-    Poly2Config* elevation,
-    Poly2Config* roll)
-{
-    if (is_generic_poly_steering(phase)) {
-        *azimuth = phase.steering_model.azimuth_deg;
-        *elevation = phase.steering_model.elevation_deg;
-        *roll = phase.steering_model.roll_deg;
-        return true;
-    }
-    if (is_segmented_poly_type(phase.steering_model.type)) {
-        const auto* segment = selected_segment(
-            phase.steering_model.segmented_poly.segments,
-            phase_time_s);
-        if (!segment) {
-            return false;
-        }
-        *azimuth = coefficients_to_phase_poly2(
-            segment->azimuth_coefficients,
-            segment->start_time_s);
-        *elevation = coefficients_to_phase_poly2(
-            segment->elevation_coefficients,
-            segment->start_time_s);
-        *roll = {};
-        return true;
-    }
-    return false;
-}
-
-bool throttle_poly_for_time(
-    const PhaseConfig& phase,
-    double phase_time_s,
-    Poly2Config* throttle)
-{
-    if (is_poly_throttle(phase)) {
-        throttle->c0 = phase.throttle_model.c0;
-        throttle->c1 = phase.throttle_model.c1;
-        throttle->c2 = phase.throttle_model.c2;
-        return true;
-    }
-    if (is_segmented_poly_type(phase.throttle_model.type)) {
-        const auto* segment = selected_segment(
-            phase.throttle_model.segmented_poly.segments,
-            phase_time_s);
-        if (!segment) {
-            return false;
-        }
-        *throttle = coefficients_to_phase_poly2(segment->coefficients, segment->start_time_s);
-        return true;
-    }
-    return false;
-}
-
-bool is_nonzero_poly(const Poly2Config& poly)
-{
-    constexpr double kCoeffEpsilon = 1.0e-12;
-    return std::abs(poly.c0) > kCoeffEpsilon ||
-        std::abs(poly.c1) > kCoeffEpsilon ||
-        std::abs(poly.c2) > kCoeffEpsilon;
-}
-
-bool detached_stage_since(
-    const LaunchVehicleStateLogEntry& previous,
-    const LaunchVehicleStateLogEntry& current)
-{
-    const std::size_t count = std::min(previous.runtime.stages.size(), current.runtime.stages.size());
-    for (std::size_t i = 0; i < count; ++i) {
-        if (previous.runtime.stages[i].attached && !current.runtime.stages[i].attached) {
-            return true;
-        }
-    }
-    return false;
-}
-
-bool deactivated_stage_since(
-    const LaunchVehicleStateLogEntry& previous,
-    const LaunchVehicleStateLogEntry& current)
-{
-    const std::size_t count = std::min(previous.runtime.stages.size(), current.runtime.stages.size());
-    for (std::size_t i = 0; i < count; ++i) {
-        if (previous.runtime.stages[i].active && !current.runtime.stages[i].active) {
-            return true;
-        }
-    }
-    return false;
-}
-
-bool activated_stage_since(
-    const LaunchVehicleStateLogEntry& previous,
-    const LaunchVehicleStateLogEntry& current)
-{
-    const std::size_t count = std::min(previous.runtime.stages.size(), current.runtime.stages.size());
-    for (std::size_t i = 0; i < count; ++i) {
-        if (!previous.runtime.stages[i].active &&
-            current.runtime.stages[i].active &&
-            current.runtime.stages[i].attached) {
-            return true;
-        }
-    }
-    return false;
-}
-
-struct KosNavballAttitude {
-    double yaw_deg = 90.0;    // navball heading: 0 = north, 90 = east
-    double pitch_deg = 90.0;  // elevation above the local horizon: 90 = straight up
-};
-
-// Navball yaw/pitch the kOS player steers to. PITCH is reconstructed from
-// engine_direction_eci (the actual flown attitude, robust to phase-boundary
-// continuity which rewrites the stored elevation poly at runtime). AZIMUTH, for
-// poly steering, is taken DIRECTLY from the commanded azimuth polynomial, NOT
-// reconstructed: reconstructing azimuth from the thrust vector flips ~180 deg
-// whenever the commanded elevation tips past vertical (a pure artifact of
-// forcing pitch into [-90,90]) -- e.g. min-Q lofting produced yaw ~242 deg and
-// flew the vehicle west. The commanded azimuth (constant 90 = due east here) has
-// no such ambiguity. Non-poly phases fall back to reconstruction. Unsteered rows
-// (pre-launch / hold-down / coast) are skipped so their default body axis cannot
-// pollute the carry-forward that fills any remaining gaps.
-std::vector<KosNavballAttitude> compute_kos_navball_attitude(
-    const StateLog& state_log,
-    const CaseConfig& case_config)
-{
-    const auto& entries = state_log.entries();
-    const std::size_t n = entries.size();
-    std::vector<KosNavballAttitude> out(n);
-    std::vector<char> yaw_valid(n, 0);
-    std::vector<char> pitch_valid(n, 0);
-    const std::vector<double> phase_starts = configured_phase_start_times(case_config);
-
-    constexpr double kRadToDeg = 57.295779513082320876798154814105;
-    // |horizontal| below this => a reconstructed azimuth is numeric noise; carry
-    // the last good one (only used for the non-poly azimuth fallback).
-    constexpr double kHorizEps = 0.087;
-    constexpr double kMinThrottle = 1.0e-3;
-
-    for (std::size_t i = 0; i < n; ++i) {
-        const auto& point = entries[i];
-
-        // Commanded azimuth from the steering program (poly steering): explicit,
-        // unambiguous, and never flips past vertical.
-        const PhaseConfig* phase = phase_for_point(point, case_config);
-        const double phase_t = point.time_s - phase_start_time_s(point, phase_starts);
-        Poly2Config az;
-        Poly2Config el;
-        Poly2Config roll;
-        const bool poly_azimuth = phase && steering_poly_for_time(*phase, phase_t, &az, &el, &roll);
-        if (poly_azimuth) {
-            double yaw = az.c0 + az.c1 * phase_t + az.c2 * phase_t * phase_t;
-            while (yaw < 0.0) { yaw += 360.0; }
-            while (yaw >= 360.0) { yaw -= 360.0; }
-            out[i].yaw_deg = yaw;
-            yaw_valid[i] = 1;
-        }
-
-        // Pitch (and, for non-poly phases, azimuth) come from the flown thrust
-        // direction. Skip unsteered rows: pre-launch, hold-down and shutdown/coast
-        // carry a default body axis, not a real command.
-        if (point.throttle <= kMinThrottle || point.hold_down_clamp_active) {
-            continue;
-        }
-
-        // UP = normalized position (fallback +X).
-        double ux = point.state.position_m.x;
-        double uy = point.state.position_m.y;
-        double uz = point.state.position_m.z;
-        double un = std::sqrt(ux * ux + uy * uy + uz * uz);
-        if (un < 1.0e-9) { ux = 1.0; uy = 0.0; uz = 0.0; un = 1.0; }
-        ux /= un; uy /= un; uz /= un;
-
-        // EAST = normalize(Z x UP), Z = (0,0,1)  ->  (-uy, ux, 0) (fallback +Y).
-        double ex = -uy, ey = ux, ez = 0.0;
-        double en = std::sqrt(ex * ex + ey * ey + ez * ez);
-        if (en < 1.0e-9) { ex = 0.0; ey = 1.0; ez = 0.0; en = 1.0; }
-        ex /= en; ey /= en; ez /= en;
-
-        // NORTH = UP x EAST (fallback +Z).
-        double nx = uy * ez - uz * ey;
-        double ny = uz * ex - ux * ez;
-        double nz = ux * ey - uy * ex;
-        double nn = std::sqrt(nx * nx + ny * ny + nz * nz);
-        if (nn < 1.0e-9) { nx = 0.0; ny = 0.0; nz = 1.0; nn = 1.0; }
-        nx /= nn; ny /= nn; nz /= nn;
-
-        // Commanded thrust direction (fallback to UP so pitch reads vertical).
-        double dx = point.engine_direction_eci.x;
-        double dy = point.engine_direction_eci.y;
-        double dz = point.engine_direction_eci.z;
-        double dn = std::sqrt(dx * dx + dy * dy + dz * dz);
-        if (dn < 1.0e-9) { dx = ux; dy = uy; dz = uz; dn = 1.0; }
-        dx /= dn; dy /= dn; dz /= dn;
-
-        const double east_c = dx * ex + dy * ey + dz * ez;
-        const double north_c = dx * nx + dy * ny + dz * nz;
-        const double up_c = dx * ux + dy * uy + dz * uz;
-        const double horizontal = std::sqrt(east_c * east_c + north_c * north_c);
-
-        out[i].pitch_deg = std::atan2(up_c, horizontal) * kRadToDeg;
-        pitch_valid[i] = 1;
-        if (!poly_azimuth && horizontal > kHorizEps) {
-            double yaw = std::atan2(east_c, north_c) * kRadToDeg;
-            if (yaw < 0.0) {
-                yaw += 360.0;
-            }
-            out[i].yaw_deg = yaw;
-            yaw_valid[i] = 1;
-        }
-    }
-
-    // Fill invalid samples (hold-down or near-vertical) from the nearest valid
-    // one: leading invalids inherit the first good value; later invalids hold the
-    // previous good value. With no valid sample at all, fall back to the defaults
-    // (vertical, due east).
-    auto carry_forward = [&](const std::vector<char>& valid, double KosNavballAttitude::* field, double fallback) {
-        std::size_t first = n;
-        for (std::size_t i = 0; i < n; ++i) {
-            if (valid[i]) { first = i; break; }
-        }
-        if (first == n) {
-            for (std::size_t i = 0; i < n; ++i) {
-                out[i].*field = fallback;
-            }
-            return;
-        }
-        const double lead = out[first].*field;
-        for (std::size_t i = 0; i < first; ++i) {
-            out[i].*field = lead;
-        }
-        double last = lead;
-        for (std::size_t i = first; i < n; ++i) {
-            if (valid[i]) {
-                last = out[i].*field;
-            } else {
-                out[i].*field = last;
-            }
-        }
-    };
-    carry_forward(pitch_valid, &KosNavballAttitude::pitch_deg, 90.0);
-    carry_forward(yaw_valid, &KosNavballAttitude::yaw_deg, 90.0);
-    return out;
+    return text;
 }
 
 double sx(double x_m, double scale, double center_x)
@@ -461,94 +156,145 @@ std::string trajectory_to_csv(const StateLog& state_log)
     return output.str();
 }
 
-std::string kos_trajectory_to_csv(const StateLog& state_log, const CaseConfig& case_config)
+std::string guidance_script_to_csv(const CaseConfig& case_config)
 {
     std::ostringstream output;
     output << std::setprecision(17);
-    output << kTrajectoryCsvHeader
-           << ",kos_phase_start_time_s,kos_phase_time_s,"
-              "kos_steering_poly_available,"
-              "kos_azimuth_c0,kos_azimuth_c1,kos_azimuth_c2,"
-              "kos_elevation_c0,kos_elevation_c1,kos_elevation_c2,"
-              "kos_roll_available,kos_roll_c0,kos_roll_c1,kos_roll_c2,"
-              "kos_throttle_poly_available,"
-              "kos_throttle_c0,kos_throttle_c1,kos_throttle_c2,"
-              "kos_stage_command,kos_stage_plan_time_s,"
-              "kos_stage_pulse_count,kos_shutdown_before_stage,"
-              "kos_yaw_deg,kos_pitch_deg,kos_roll_deg,kos_roll_lock\n";
 
-    const std::vector<double> phase_starts = configured_phase_start_times(case_config);
-    const std::vector<KosNavballAttitude> navball = compute_kos_navball_attitude(state_log, case_config);
-    const auto& entries = state_log.entries();
-    for (std::size_t i = 0; i < entries.size(); ++i) {
-        const LaunchVehicleStateLogEntry& point = entries[i];
-        const LaunchVehicleStateLogEntry* previous = (i > 0) ? &entries[i - 1] : nullptr;
-        const double phase_start_s = phase_start_time_s(point, phase_starts);
-        const double phase_time_s = point.time_s - phase_start_s;
-        const PhaseConfig* phase = phase_for_point(point, case_config);
+    // META: body + launch-site constants so the player needs no hardcoded
+    // mu/radius (KSP body values flow through CaseConfig).
+    output << "META," << sanitize_field(case_config.name)
+           << ',' << case_config.earth_mu_m3s2
+           << ',' << case_config.earth_radius_m
+           << ',' << case_config.earth_rotation_rad_per_s
+           << ',' << case_config.earth_rotation_at_epoch_rad
+           << ',' << case_config.launch_site.latitude_deg
+           << ',' << case_config.launch_site.longitude_deg
+           << ',' << case_config.launch_site.altitude_m
+           << '\n';
 
-        Poly2Config azimuth;
-        Poly2Config elevation;
-        Poly2Config roll;
-        const bool steering_poly_available =
-            phase && steering_poly_for_time(*phase, phase_time_s, &azimuth, &elevation, &roll);
-        const bool roll_poly_available = steering_poly_available && is_nonzero_poly(roll);
-        const double roll_deg = roll_poly_available
-            ? roll.c0 + roll.c1 * phase_time_s + roll.c2 * phase_time_s * phase_time_s
-            : 0.0;
-
-        Poly2Config throttle_poly;
-        const bool throttle_poly_available =
-            phase && throttle_poly_for_time(*phase, phase_time_s, &throttle_poly);
-        double throttle_c0 = 0.0;
-        double throttle_c1 = 0.0;
-        double throttle_c2 = 0.0;
-        if (throttle_poly_available) {
-            throttle_c0 = throttle_poly.c0;
-            throttle_c1 = throttle_poly.c1;
-            throttle_c2 = throttle_poly.c2;
+    // STAGE: one row per configured stage, in burn order, carrying the
+    // propulsion params the player needs to rebuild UpfgStages (live total mass
+    // comes from KSP; mirrors build_upfg_stages in control_models.cpp).
+    for (std::size_t i = 0; i < case_config.vehicle.stages.size(); ++i) {
+        const auto& stage = case_config.vehicle.stages[i];
+        const double thrust_n =
+            static_cast<double>(stage.engine.engine_count) * stage.engine.thrust_vac_n;
+        const double exhaust_velocity_mps = stage.engine.isp_vac_s * kStandardGravityMps2;
+        const double mdot_kgps =
+            exhaust_velocity_mps > 0.0 ? thrust_n / exhaust_velocity_mps : 0.0;
+        double propellant_kg = 0.0;
+        for (const auto& tank : stage.tanks) {
+            propellant_kg += tank.initial_kg;
         }
-
-        const bool stage_command = previous && detached_stage_since(*previous, point);
-        const bool shutdown_before_stage = previous && stage_command && deactivated_stage_since(*previous, point);
-        const bool ignition_after_separation = previous && stage_command && activated_stage_since(*previous, point);
-        const int stage_pulse_count = stage_command
-            ? (ignition_after_separation ? 2 : 1)
-            : 0;
-        double stage_plan_time_s = stage_command ? point.time_s : 0.0;
-        if (stage_command && previous->phase_index != point.phase_index) {
-            stage_plan_time_s = phase_start_s;
-        }
-
-        write_trajectory_csv_row(output, point);
-        output
-            << ',' << phase_start_s
-            << ',' << phase_time_s
-            << ',' << (steering_poly_available ? 1 : 0)
-            << ',' << azimuth.c0
-            << ',' << azimuth.c1
-            << ',' << azimuth.c2
-            << ',' << elevation.c0
-            << ',' << elevation.c1
-            << ',' << elevation.c2
-            << ',' << (roll_poly_available ? 1 : 0)
-            << ',' << roll.c0
-            << ',' << roll.c1
-            << ',' << roll.c2
-            << ',' << (throttle_poly_available ? 1 : 0)
-            << ',' << throttle_c0
-            << ',' << throttle_c1
-            << ',' << throttle_c2
-            << ',' << (stage_command ? 1 : 0)
-            << ',' << stage_plan_time_s
-            << ',' << stage_pulse_count
-            << ',' << (shutdown_before_stage ? 1 : 0)
-            << ',' << navball[i].yaw_deg
-            << ',' << navball[i].pitch_deg
-            << ',' << roll_deg
-            << ',' << (roll_poly_available ? 1 : 0)
-            << '\n';
+        output << "STAGE," << i
+               << ',' << sanitize_field(stage.name)
+               << ',' << thrust_n
+               << ',' << exhaust_velocity_mps
+               << ',' << mdot_kgps
+               << ',' << propellant_kg
+               << ',' << stage.dry_mass_kg
+               << '\n';
     }
+
+    for (std::size_t i = 0; i < case_config.phases.size(); ++i) {
+        const PhaseConfig& phase = case_config.phases[i];
+        const SteeringModelConfig& steering = phase.steering_model;
+        const std::string steering_type = lowercase(steering.type);
+
+        const std::string throttle_type = lowercase(phase.throttle_model.type);
+        const bool poly_throttle = throttle_type == "poly";
+        const double thr_c0 = poly_throttle ? phase.throttle_model.c0 : 0.0;
+        const double thr_c1 = poly_throttle ? phase.throttle_model.c1 : 0.0;
+        const double thr_c2 = poly_throttle ? phase.throttle_model.c2 : 0.0;
+
+        output << "PHASE," << i
+               << ',' << sanitize_field(phase.name)
+               << ',' << steering_type
+               << ',' << phase.termination.type
+               << ',' << phase.termination.comparison
+               << ',' << phase.termination.value
+               << ',' << throttle_type
+               << ',' << thr_c0 << ',' << thr_c1 << ',' << thr_c2
+               << ',' << (phase.hold_down_clamp_initial_active ? 1 : 0)
+               << '\n';
+
+        if (steering_type == "upfg") {
+            // The only steering data a UPFG phase needs: the orbit target.
+            output << "UPFG," << i
+                   << ',' << steering.upfg.periapsis_km
+                   << ',' << steering.upfg.apoapsis_km
+                   << ',' << steering.upfg.inclination_deg
+                   << '\n';
+        } else if (is_segmented_poly_type(steering_type)) {
+            const int order = sanitized_order(steering.segmented_poly.order);
+            for (const auto& segment : steering.segmented_poly.segments) {
+                output << "SEG," << i << ',' << segment.start_time_s << ',' << order;
+                for (int k = 0; k <= order; ++k) {
+                    output << ',' << coefficient_or_zero(
+                        segment.azimuth_coefficients, static_cast<std::size_t>(k));
+                }
+                for (int k = 0; k <= order; ++k) {
+                    output << ',' << coefficient_or_zero(
+                        segment.elevation_coefficients, static_cast<std::size_t>(k));
+                }
+                output << '\n';
+            }
+        } else if (is_tangent_type(steering_type)) {
+            // Azimuth is still a poly; elevation follows the tangent law.
+            const Poly2Config& az = steering.azimuth_deg;
+            output << "POLY," << i
+                   << ',' << az.c0 << ',' << az.c1 << ',' << az.c2
+                   << ",0,0,0,0,0,0\n";
+            const LinearTangentConfig& t = steering.tangent;
+            output << "TAN," << i
+                   << ',' << t.a << ',' << t.a_dot
+                   << ',' << t.b << ',' << t.b_dot
+                   << ',' << t.t_offset_s
+                   << ',' << (steering_type == "bilinear_tangent" ? 1 : 0)
+                   << '\n';
+        } else {
+            // generic_poly / rpy_poly / default: emit az/el/roll polynomials.
+            const bool rpy = is_rpy_type(steering_type);
+            const Poly2Config& az = rpy ? steering.yaw_deg : steering.azimuth_deg;
+            const Poly2Config& el = rpy ? steering.pitch_deg : steering.elevation_deg;
+            const Poly2Config& roll = steering.roll_deg;
+            output << "POLY," << i
+                   << ',' << az.c0 << ',' << az.c1 << ',' << az.c2
+                   << ',' << el.c0 << ',' << el.c1 << ',' << el.c2
+                   << ',' << roll.c0 << ',' << roll.c1 << ',' << roll.c2
+                   << '\n';
+        }
+
+        for (const auto& action : phase.actions) {
+            output << "ACTION," << i
+                   << ',' << action.time_s
+                   << ',' << action.type
+                   << ',' << (action.value ? 1 : 0)
+                   << ',' << action.stage_index
+                   << ',' << sanitize_field(action.stage_name)
+                   << '\n';
+        }
+    }
+
+    for (const auto& event : case_config.events) {
+        if (!event.enabled) {
+            continue;
+        }
+        output << "EVENT," << sanitize_field(event.name)
+               << ',' << event.trigger.type
+               << ',' << event.trigger.comparison
+               << ',' << event.trigger.value;
+        for (const auto& action : event.actions) {
+            output << ',' << action.time_s
+                   << ',' << action.type
+                   << ',' << (action.value ? 1 : 0)
+                   << ',' << action.stage_index
+                   << ',' << sanitize_field(action.stage_name);
+        }
+        output << '\n';
+    }
+
     return output.str();
 }
 
@@ -666,21 +412,20 @@ bool write_csv_file(const std::string& path, const StateLog& state_log, std::str
     return true;
 }
 
-bool write_kos_csv_file(
+bool write_guidance_script_file(
     const std::string& path,
-    const StateLog& state_log,
     const CaseConfig& case_config,
     std::string* error)
 {
     std::ofstream output(path, std::ios::binary);
     if (!output) {
         if (error) {
-            *error = "failed to open kOS CSV file: " + path;
+            *error = "failed to open guidance script file: " + path;
         }
         return false;
     }
 
-    output << kos_trajectory_to_csv(state_log, case_config);
+    output << guidance_script_to_csv(case_config);
     return true;
 }
 

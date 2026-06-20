@@ -14,6 +14,14 @@ struct KspVehicleSiteImport {
     double earth_radius_m = kEarthRadiusM;
     double earth_mu_m3s2 = kEarthMuM3S2;
     double earth_rotation_rad_per_s = kEarthRotationRadPerS;
+
+    // Overall vehicle length from the part positions (0 if positions absent).
+    double vehicle_length_m = 0.0;
+    bool has_vehicle_length = false;
+    // Length of the upper stack only (non-booster parts) for the post-staging
+    // aerodynamic configuration (0 if unavailable).
+    double upper_length_m = 0.0;
+    bool has_upper_length = false;
     bool has_earth_radius_m = false;
     bool has_earth_mu_m3s2 = false;
     bool has_earth_rotation_rad_per_s = false;
