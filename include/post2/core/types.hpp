@@ -231,8 +231,59 @@ struct SteeringModelConfig {
     SegmentedSteeringPolyConfig segmented_poly;
 };
 
+// Per-phase dynamics degrees-of-freedom. The simulation today integrates a
+// full 3-DOF translational point mass (3 position + 3 velocity) regardless of
+// phase. This enum is the seam that lets individual phases select a reduced /
+// alternative model later without touching every call site.
+//
+//   ThreeDof        - 3-DOF translational point mass (current, default).
+//   OnePointFiveDof - "1.5-DOF": planar (2D) translation plus a commanded
+//                     pitch attitude. Motion is constrained to the launch /
+//                     orbital plane and steering reduces to pitch-in-plane.
+//                     RESERVED INTERFACE -- not yet implemented (see
+//                     kOnePointFiveDofEnabled). Selecting it is rejected at
+//                     config validation until the dynamics are filled in.
+enum class DynamicsDof {
+    ThreeDof,
+    OnePointFiveDof,
+};
+
+// Master switch for the reserved 1.5-DOF path. Flip to true once the planar +
+// pitch dynamics are implemented; until then validation refuses any phase that
+// requests it so cases cannot silently run with the wrong model.
+inline constexpr bool kOnePointFiveDofEnabled = false;
+
+inline const char* dynamics_dof_to_string(DynamicsDof dof)
+{
+    switch (dof) {
+        case DynamicsDof::OnePointFiveDof:
+            return "1.5dof";
+        case DynamicsDof::ThreeDof:
+        default:
+            return "3dof";
+    }
+}
+
+// Maps a config token to the enum. Returns false for unrecognised tokens; the
+// caller is expected to surface a validation error in that case.
+inline bool dynamics_dof_from_string(const std::string& token, DynamicsDof* out)
+{
+    if (token == "3dof") {
+        *out = DynamicsDof::ThreeDof;
+        return true;
+    }
+    if (token == "1.5dof") {
+        *out = DynamicsDof::OnePointFiveDof;
+        return true;
+    }
+    return false;
+}
+
 struct PhaseConfig {
     std::string name = "default";
+    // Dynamics model for this phase: "3dof" (default) or the reserved "1.5dof"
+    // (planar + pitch) interface. See DynamicsDof / kOnePointFiveDofEnabled.
+    std::string dynamics_dof = "3dof";
     // Polymorphic termination condition. For type == "time" the value is the
     // phase duration in seconds (phase-relative). For altitude/velocity/mass
     // types, the phase ends when the comparison first becomes true.

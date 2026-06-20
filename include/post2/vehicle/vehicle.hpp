@@ -130,10 +130,20 @@ struct T2TConnection {
     std::optional<double> end_time_s;
 };
 
-// One aerodynamic table for a particular staging configuration. It becomes
-// active once the lowest still-attached stage index reaches
-// activate_at_min_attached_stage (i.e. all lower stages have separated). The
-// full stack uses 0; the configuration after the first stage drops uses 1; etc.
+// One aerodynamic table for a particular staging configuration. Each table
+// describes the contiguous range of still-attached stage indices it represents:
+//   * activate_at_min_attached_stage = the LOWEST still-attached stage index.
+//   * max_attached_stage             = the HIGHEST still-attached stage index,
+//     or -1 meaning "open to the top of the stack".
+//
+// Two families are generated (see generate_case_aero_tables):
+//   * Upper-stack / full tables (max_attached_stage == -1): the configurations
+//     the ascending vehicle flies through as lower stages separate. The full
+//     stack is [0, top]; after stage k separates the stack is [k, top]. These
+//     are selected whenever the topmost stage is still attached.
+//   * Single-stage tables (max_attached_stage == activate_at_min_attached_stage):
+//     one separated stage flying on its own (booster recovery / flyback), built
+//     from that stage's own geometry with no fairing.
 struct AeroStageTable {
     int activate_at_min_attached_stage = 0;
     std::string table_path;
@@ -143,6 +153,10 @@ struct AeroStageTable {
     double body_length_m = 0.0;
     double nose_length_m = 0.0;
     double base_diameter_m = 0.0;
+    // Highest still-attached stage index this table represents; -1 == open to
+    // the top of the stack. Appended last to keep aggregate initialisers that
+    // predate this field valid (they default it to -1 = open-top).
+    int max_attached_stage = -1;
 };
 
 struct AeroConfig {
@@ -159,6 +173,13 @@ struct AeroConfig {
 
     // Per-configuration tables, ascending by activate_at_min_attached_stage.
     std::vector<AeroStageTable> stage_tables;
+
+    // Aerodynamic table for the first stage flying on its own (booster-only
+    // geometry). Retained for tooling / back-compat; it now mirrors the
+    // first-stage single-stage entry that also lives in stage_tables (with
+    // max_attached_stage == 0), which is what the force model actually selects.
+    // table_path empty means "not generated".
+    AeroStageTable first_stage_table;
 
     // Geometry the offline generator used / will use to (re)build the level-0
     // (full-stack) table. Zero means "unset" (generator falls back to defaults

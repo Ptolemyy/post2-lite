@@ -89,16 +89,27 @@ const post2::aero::AeroTable* load_cached_aero_table(const std::string& path)
     return stored.ok ? &stored.table : nullptr;
 }
 
-// Index of the lowest stage still attached (== the current staging
-// configuration). All-attached -> 0; after the booster separates -> 1; etc.
-int current_min_attached_stage(const post2::vehicle::VehicleRuntimeState& runtime)
+// Lowest/highest still-attached stage indices (the currently-attached
+// configuration). Returns false when no stage is attached.
+bool attached_stage_range(const post2::vehicle::VehicleRuntimeState& runtime,
+                          int* lo, int* hi)
 {
+    int first = -1;
+    int last = -1;
     for (std::size_t i = 0; i < runtime.stages.size(); ++i) {
         if (runtime.stages[i].attached) {
-            return static_cast<int>(i);
+            if (first < 0) {
+                first = static_cast<int>(i);
+            }
+            last = static_cast<int>(i);
         }
     }
-    return runtime.stages.empty() ? 0 : static_cast<int>(runtime.stages.size()) - 1;
+    if (first < 0) {
+        return false;
+    }
+    *lo = first;
+    *hi = last;
+    return true;
 }
 
 struct ActiveAeroTable {
@@ -106,8 +117,16 @@ struct ActiveAeroTable {
     double reference_area_m2 = 0.0;
 };
 
-// Picks the table whose activate_at_min_attached_stage is the largest value not
-// exceeding the current configuration. Falls back to the single legacy table.
+// Picks the aero table matching the vehicle's currently-attached components.
+// The attached stages form a contiguous range [lo, hi]:
+//   * If the topmost stage is still attached (the normal ascending vehicle),
+//     use the open-top upper-stack table for the lowest attached stage (the
+//     full stack when lo == 0).
+//   * Otherwise the vehicle is a separated stage / sub-stack flying alone -- use
+//     the bounded table whose [lo, hi] matches exactly (e.g. a recovered
+//     booster).
+// Falls back to the single legacy table, then the nearest lower activation
+// level, so older configs and partial table sets still resolve to something.
 ActiveAeroTable select_active_aero_table(const post2::vehicle::AeroConfig& aero,
                                          const post2::vehicle::VehicleRuntimeState& runtime)
 {
@@ -117,13 +136,50 @@ ActiveAeroTable select_active_aero_table(const post2::vehicle::AeroConfig& aero,
         result.reference_area_m2 = aero.reference_area_m2;
         return result;
     }
-    const int key = current_min_attached_stage(runtime);
+
+    const int stage_count = static_cast<int>(runtime.stages.size());
+    int lo = 0;
+    int hi = stage_count > 0 ? stage_count - 1 : 0;
+    const bool any_attached = attached_stage_range(runtime, &lo, &hi);
+    if (!any_attached) {
+        lo = 0;
+        hi = stage_count > 0 ? stage_count - 1 : 0;
+    }
+    const bool top_attached = stage_count == 0 || hi == stage_count - 1;
+
     const post2::vehicle::AeroStageTable* best = nullptr;
+
+    // 1) Exact bounded match: a separated stage / sub-stack flying on its own.
     for (const auto& entry : aero.stage_tables) {
-        if (entry.activate_at_min_attached_stage <= key &&
-            (best == nullptr ||
-             entry.activate_at_min_attached_stage > best->activate_at_min_attached_stage)) {
+        if (entry.max_attached_stage >= 0 &&
+            entry.activate_at_min_attached_stage == lo &&
+            entry.max_attached_stage == hi) {
             best = &entry;
+            break;
+        }
+    }
+
+    // 2) Open-top upper-stack table for the ascending vehicle: the largest
+    //    activation level not exceeding the lowest attached stage.
+    if (best == nullptr && top_attached) {
+        for (const auto& entry : aero.stage_tables) {
+            if (entry.max_attached_stage < 0 &&
+                entry.activate_at_min_attached_stage <= lo &&
+                (best == nullptr ||
+                 entry.activate_at_min_attached_stage > best->activate_at_min_attached_stage)) {
+                best = &entry;
+            }
+        }
+    }
+
+    // 3) Generic fallback: nearest table at or below the lowest attached stage.
+    if (best == nullptr) {
+        for (const auto& entry : aero.stage_tables) {
+            if (entry.activate_at_min_attached_stage <= lo &&
+                (best == nullptr ||
+                 entry.activate_at_min_attached_stage > best->activate_at_min_attached_stage)) {
+                best = &entry;
+            }
         }
     }
     if (best == nullptr) {

@@ -418,7 +418,9 @@ void append_entry_with_environment(
     state_log->append(entry);
 }
 
-post2::integrators::ExtendedDerivative phase_extended_dynamics(
+// 3-DOF translational derivative: d(position) = velocity, d(velocity) = sum of
+// all force-model accelerations.
+post2::integrators::ExtendedDerivative three_dof_extended_dynamics(
     const post2::propagation::ForceModelSet& force_models,
     const post2::propagation::ForceModelContext& force_context,
     const post2::integrators::ExtendedState& state,
@@ -431,6 +433,34 @@ post2::integrators::ExtendedDerivative phase_extended_dynamics(
         {state.motion.velocity_mps, force_output.acceleration_eci_mps2},
         std::move(tank_mass_dots_kgps),
     };
+}
+
+// Dispatch seam for per-phase dynamics models. Today only 3-DOF is wired; the
+// 1.5-DOF (2D + pitch) branch is the reserved extension point. validate_case_
+// config rejects 1.5dof while kOnePointFiveDofEnabled is false, so the stub
+// below is unreachable in normal operation -- it exists to mark where the
+// planar + pitch equations of motion will be implemented and to fail loudly if
+// the feature flag is flipped before the dynamics are filled in.
+post2::integrators::ExtendedDerivative phase_extended_dynamics(
+    DynamicsDof dof,
+    const post2::propagation::ForceModelSet& force_models,
+    const post2::propagation::ForceModelContext& force_context,
+    const post2::integrators::ExtendedState& state,
+    std::vector<double> tank_mass_dots_kgps)
+{
+    switch (dof) {
+        case DynamicsDof::OnePointFiveDof:
+            // TODO(dynamics): planar translation constrained to the launch /
+            // orbital plane with a commanded pitch attitude (steering reduced
+            // to pitch-in-plane). Project force-model accelerations onto the
+            // 2D plane and integrate the pitch DOF here.
+            throw std::logic_error(
+                "1.5DOF (2D + pitch) dynamics is reserved and not yet implemented");
+        case DynamicsDof::ThreeDof:
+        default:
+            return three_dof_extended_dynamics(
+                force_models, force_context, state, std::move(tank_mass_dots_kgps));
+    }
 }
 
 bool supported_gravity_model_type(const std::string& type)
@@ -631,6 +661,17 @@ bool validate_case_config(const CaseConfig& config, std::string* error)
             phase.integrator != "dop853") {
             *error = "phase " + std::to_string(i) +
                 " integrator must be \"rk4\", \"dopri5\", \"dop853\", or legacy \"ode\"";
+            return false;
+        }
+        DynamicsDof phase_dof = DynamicsDof::ThreeDof;
+        if (!dynamics_dof_from_string(phase.dynamics_dof, &phase_dof)) {
+            *error = "phase " + std::to_string(i) +
+                " dynamics_dof must be \"3dof\" or \"1.5dof\"";
+            return false;
+        }
+        if (phase_dof == DynamicsDof::OnePointFiveDof && !kOnePointFiveDofEnabled) {
+            *error = "phase " + std::to_string(i) +
+                " dynamics_dof \"1.5dof\" (2D + pitch) is reserved and not yet enabled";
             return false;
         }
         if (phase.tolerances.rtol <= 0.0 ||
@@ -956,6 +997,10 @@ StateLog propagate_phase(
     const bool time_terminated = phase.termination.type == "time";
     const double phase_horizon_s = time_terminated ? phase.termination.value : kMaxPhaseTimeS;
     const double phase_end_time_s = phase_start_time_s + phase_horizon_s;
+    // Resolve the dynamics model once; validate_case_config has already
+    // guaranteed the token is recognised and (for now) that it is 3-DOF.
+    DynamicsDof phase_dof = DynamicsDof::ThreeDof;
+    dynamics_dof_from_string(phase.dynamics_dof, &phase_dof);
     const SimulationConfig simulation_config =
         make_phase_simulation_config(case_config, phase, phase_end_time_s);
     post2::propagation::VehicleConsumptionPropagator vehicle_propagator(case_config.vehicle);
@@ -1229,6 +1274,7 @@ StateLog propagate_phase(
                         eval.thrust_acceleration_mps2,
                     };
                     auto deriv = phase_extended_dynamics(
+                        phase_dof,
                         force_models,
                         force_context,
                         dynamics_state,
@@ -1436,13 +1482,15 @@ StateLog GravityPropagator::propagate(const SimulationConfig& config, const Stat
     auto last_cmd = std::make_shared<post2::propagation::EngineCommand>();
     const CaseConfig case_config = case_from_simulation_config(config);
     const PhaseConfig& phase = case_config.phases.front();
+    DynamicsDof phase_dof = DynamicsDof::ThreeDof;
+    dynamics_dof_from_string(phase.dynamics_dof, &phase_dof);
     const post2::propagation::ForceModelSet force_models =
         post2::propagation::make_force_model_set(case_config, phase);
 
     return integrator.integrate(
         state_log,
         termination,
-        [&config, &case_config, &phase, &force_models, &vehicle_propagator, &current_runtime, last_eval, last_cmd](
+        [&config, &case_config, &phase, phase_dof, &force_models, &vehicle_propagator, &current_runtime, last_eval, last_cmd](
             double time_s, const post2::integrators::ExtendedState& state) {
             const post2::propagation::EnvironmentState environment =
                 make_environment_state(config, phase, time_s, state.motion);
@@ -1463,6 +1511,7 @@ StateLog GravityPropagator::propagate(const SimulationConfig& config, const Stat
                 eval.thrust_acceleration_mps2,
             };
             auto deriv = phase_extended_dynamics(
+                phase_dof,
                 force_models,
                 force_context,
                 state,

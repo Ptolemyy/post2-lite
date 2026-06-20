@@ -194,21 +194,28 @@ JsonValue aero_model_to_json(const AeroModelConfig& model)
     });
 }
 
+JsonValue aero_stage_table_to_json(const post2::vehicle::AeroStageTable& entry)
+{
+    return JsonValue::object({
+        {"activate_at_min_attached_stage",
+         number(static_cast<double>(entry.activate_at_min_attached_stage))},
+        {"table_path", string(entry.table_path)},
+        {"reference_area_m2", number(entry.reference_area_m2)},
+        {"ref_diameter_m", number(entry.ref_diameter_m)},
+        {"body_length_m", number(entry.body_length_m)},
+        {"nose_length_m", number(entry.nose_length_m)},
+        {"base_diameter_m", number(entry.base_diameter_m)},
+        {"max_attached_stage",
+         number(static_cast<double>(entry.max_attached_stage))},
+    });
+}
+
 JsonValue aero_to_json(const post2::vehicle::AeroConfig& aero)
 {
     JsonValue::Array stage_tables;
     stage_tables.reserve(aero.stage_tables.size());
     for (const auto& entry : aero.stage_tables) {
-        stage_tables.push_back(JsonValue::object({
-            {"activate_at_min_attached_stage",
-             number(static_cast<double>(entry.activate_at_min_attached_stage))},
-            {"table_path", string(entry.table_path)},
-            {"reference_area_m2", number(entry.reference_area_m2)},
-            {"ref_diameter_m", number(entry.ref_diameter_m)},
-            {"body_length_m", number(entry.body_length_m)},
-            {"nose_length_m", number(entry.nose_length_m)},
-            {"base_diameter_m", number(entry.base_diameter_m)},
-        }));
+        stage_tables.push_back(aero_stage_table_to_json(entry));
     }
     return JsonValue::object({
         {"enabled", boolean(aero.enabled)},
@@ -222,6 +229,7 @@ JsonValue aero_to_json(const post2::vehicle::AeroConfig& aero)
         {"nose_length_m", number(aero.nose_length_m)},
         {"base_diameter_m", number(aero.base_diameter_m)},
         {"stage_tables", JsonValue::array(std::move(stage_tables))},
+        {"first_stage_table", aero_stage_table_to_json(aero.first_stage_table)},
     });
 }
 
@@ -432,6 +440,7 @@ JsonValue phase_to_json(const PhaseConfig& phase)
         {"optimize_enabled", boolean(phase.optimize_enabled)},
         {"inherit_initial_state", boolean(phase.inherit_initial_state)},
         {"hold_down_clamp_initial_active", boolean(phase.hold_down_clamp_initial_active)},
+        {"dynamics_dof", string(phase.dynamics_dof)},
         {"integrator", string(phase.integrator)},
         {"tolerances", JsonValue::object({
             {"rtol", number(phase.tolerances.rtol)},
@@ -928,6 +937,30 @@ bool read_aero_model(const JsonValue& object, const char* key, AeroModelConfig* 
     return !value || parse_aero_model(*value, target, error);
 }
 
+bool parse_aero_stage_table(const JsonValue& item, post2::vehicle::AeroStageTable* entry,
+                            std::string* error)
+{
+    if (!item.is_object()) {
+        return fail(error, "vehicle.aero stage table entries must be objects");
+    }
+    double activate = 0.0;
+    double max_attached = static_cast<double>(entry->max_attached_stage);
+    if (!read_number(item, "activate_at_min_attached_stage", &activate, error) ||
+        !read_string(item, "table_path", &entry->table_path, error) ||
+        !read_number(item, "reference_area_m2", &entry->reference_area_m2, error) ||
+        !read_number(item, "ref_diameter_m", &entry->ref_diameter_m, error) ||
+        !read_number(item, "body_length_m", &entry->body_length_m, error) ||
+        !read_number(item, "nose_length_m", &entry->nose_length_m, error) ||
+        !read_number(item, "base_diameter_m", &entry->base_diameter_m, error) ||
+        // Optional; defaults to -1 (open-top) when absent for back-compat.
+        !read_number(item, "max_attached_stage", &max_attached, error)) {
+        return false;
+    }
+    entry->activate_at_min_attached_stage = static_cast<int>(activate);
+    entry->max_attached_stage = static_cast<int>(max_attached);
+    return true;
+}
+
 bool parse_vehicle_aero(const JsonValue& value, post2::vehicle::AeroConfig* target, std::string* error)
 {
     if (!value.is_object()) {
@@ -954,22 +987,16 @@ bool parse_vehicle_aero(const JsonValue& value, post2::vehicle::AeroConfig* targ
         parsed.stage_tables.clear();
         parsed.stage_tables.reserve(tables->array_value.size());
         for (const JsonValue& item : tables->array_value) {
-            if (!item.is_object()) {
-                return fail(error, "vehicle.aero.stage_tables entries must be objects");
-            }
             post2::vehicle::AeroStageTable entry;
-            double activate = 0.0;
-            if (!read_number(item, "activate_at_min_attached_stage", &activate, error) ||
-                !read_string(item, "table_path", &entry.table_path, error) ||
-                !read_number(item, "reference_area_m2", &entry.reference_area_m2, error) ||
-                !read_number(item, "ref_diameter_m", &entry.ref_diameter_m, error) ||
-                !read_number(item, "body_length_m", &entry.body_length_m, error) ||
-                !read_number(item, "nose_length_m", &entry.nose_length_m, error) ||
-                !read_number(item, "base_diameter_m", &entry.base_diameter_m, error)) {
+            if (!parse_aero_stage_table(item, &entry, error)) {
                 return false;
             }
-            entry.activate_at_min_attached_stage = static_cast<int>(activate);
             parsed.stage_tables.push_back(std::move(entry));
+        }
+    }
+    if (const JsonValue* first = find_member(value, "first_stage_table")) {
+        if (!parse_aero_stage_table(*first, &parsed.first_stage_table, error)) {
+            return false;
         }
     }
     *target = std::move(parsed);
@@ -1588,6 +1615,7 @@ bool parse_phase(const JsonValue& value, PhaseConfig* target, std::string* error
         !read_bool(value, "optimize_enabled", &parsed.optimize_enabled, error) ||
         !read_bool(value, "inherit_initial_state", &parsed.inherit_initial_state, error) ||
         !read_bool(value, "hold_down_clamp_initial_active", &parsed.hold_down_clamp_initial_active, error) ||
+        !read_string(value, "dynamics_dof", &parsed.dynamics_dof, error) ||
         !read_string(value, "integrator", &parsed.integrator, error)) {
         return false;
     }

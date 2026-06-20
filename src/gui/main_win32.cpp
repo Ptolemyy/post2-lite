@@ -92,6 +92,7 @@ constexpr int kPhaseActionValue = 1927;
 constexpr int kPhaseActionStage = 1928;
 constexpr int kPhaseScrollPane = 1930;
 constexpr int kPhaseAtmosphereType = 1931;
+constexpr int kPhaseDynamicsDof = 1932;
 constexpr int kSidebarWidth = 326;
 constexpr int kRemoteHostEdit = 1201;
 constexpr int kRemotePortEdit = 1202;
@@ -266,6 +267,7 @@ HWND g_phase_thrust = nullptr;
 HWND g_phase_normal_force = nullptr;
 HWND g_phase_aero = nullptr;
 HWND g_phase_atmosphere_type = nullptr;
+HWND g_phase_dynamics_dof = nullptr;
 HWND g_phase_throttle_type = nullptr;
 HWND g_phase_throttle_c0 = nullptr;
 HWND g_phase_throttle_c1 = nullptr;
@@ -348,6 +350,7 @@ void clear_phase_editor_handles()
     g_phase_normal_force = nullptr;
     g_phase_aero = nullptr;
     g_phase_atmosphere_type = nullptr;
+    g_phase_dynamics_dof = nullptr;
     g_phase_throttle_type = nullptr;
     g_phase_throttle_c0 = nullptr;
     g_phase_throttle_c1 = nullptr;
@@ -1382,9 +1385,16 @@ std::wstring format_aero_table_label(const post2::vehicle::AeroStageTable& table
     const std::string file = slash != std::string::npos
         ? table.table_path.substr(slash + 1) : table.table_path;
     std::wostringstream label;
-    label << L"L" << table.activate_at_min_attached_stage << L"  S="
-          << std::fixed << std::setprecision(2) << table.reference_area_m2 << L" m2  "
-          << widen(file.empty() ? std::string("(no file)") : file);
+    label << L"[" << table.activate_at_min_attached_stage << L"..";
+    if (table.max_attached_stage < 0) {
+        label << L"top]";  // open-top: full stack / upper-stack after staging
+    } else if (table.max_attached_stage == table.activate_at_min_attached_stage) {
+        label << table.max_attached_stage << L"] only";  // single stage alone
+    } else {
+        label << table.max_attached_stage << L"]";  // bounded sub-stack
+    }
+    label << L"  S=" << std::fixed << std::setprecision(2) << table.reference_area_m2
+          << L" m2  " << widen(file.empty() ? std::string("(no file)") : file);
     return label.str();
 }
 
@@ -2578,7 +2588,9 @@ bool accept_vehicle_dialog(VehicleSettingsDialogState* state)
     // pointer and reference area in sync with the level-0 (full-stack) table.
     config.aero.use_table = !config.aero.stage_tables.empty();
     for (const auto& table : config.aero.stage_tables) {
-        if (table.activate_at_min_attached_stage == 0) {
+        // Full stack = lowest attached stage 0 and open to the top (max < 0);
+        // the stage-0-only table also has activate 0 but bounds the top.
+        if (table.activate_at_min_attached_stage == 0 && table.max_attached_stage < 0) {
             config.aero.aero_table_path = table.table_path;
             config.aero.reference_area_m2 = table.reference_area_m2;
             config.aero.ref_diameter_m = table.ref_diameter_m;
@@ -6369,6 +6381,7 @@ void load_selected_phase_controls()
     Button_SetCheck(g_phase_aero, phase->force_models.aerodynamic ? BST_CHECKED : BST_UNCHECKED);
 
     select_combo_text(g_phase_atmosphere_type, phase->force_models.atmosphere_model.type);
+    select_combo_text(g_phase_dynamics_dof, phase->dynamics_dof);
     select_combo_text(g_phase_throttle_type, phase->throttle_model.type);
     select_combo_text(g_phase_steering_type, phase->steering_model.type);
     load_phase_numeric_rows_from_case();
@@ -6403,6 +6416,7 @@ bool apply_phase_controls(HWND hwnd)
     edited.force_models.normal_force = Button_GetCheck(g_phase_normal_force) == BST_CHECKED;
     edited.force_models.aerodynamic = Button_GetCheck(g_phase_aero) == BST_CHECKED;
     edited.force_models.atmosphere_model.type = get_combo_text(g_phase_atmosphere_type);
+    edited.dynamics_dof = get_combo_text(g_phase_dynamics_dof);
 
     edited.throttle_model.type = get_combo_text(g_phase_throttle_type);
     edited.steering_model.type = get_combo_text(g_phase_steering_type);
@@ -6563,6 +6577,15 @@ void create_phase_editor_controls(HWND hwnd)
     add_combo_item(g_phase_atmosphere_type, L"us_standard_1976");
     add_combo_item(g_phase_atmosphere_type, L"table");
     add_combo_item(g_phase_atmosphere_type, L"none");
+    y += 40;
+
+    // Dynamics model (degrees of freedom). "3dof" is the standard translational
+    // point mass; "1.5dof" (2D + pitch) is a reserved interface and is rejected
+    // at validation until enabled (see DynamicsDof / kOnePointFiveDofEnabled).
+    create_label(g_phase_scroll_pane, 18, y + 4, 86, L"Dynamics", font);
+    g_phase_dynamics_dof = create_combo(g_phase_scroll_pane, kPhaseDynamicsDof, 118, y, 154, font);
+    add_combo_item(g_phase_dynamics_dof, L"3dof");
+    add_combo_item(g_phase_dynamics_dof, L"1.5dof");
     y += 40;
 
     // Phase termination — summary + Edit... opens TriggerCondition editor.

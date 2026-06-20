@@ -70,8 +70,13 @@ int main(int argc, char** argv)
         std::cout << case_path << ": " << config.vehicle.aero.stage_tables.size()
                   << " aero table(s)";
         for (const auto& t : config.vehicle.aero.stage_tables) {
-            std::cout << "  [L" << t.activate_at_min_attached_stage << " S="
-                      << t.reference_area_m2 << " m2]";
+            std::cout << "  [" << t.activate_at_min_attached_stage << "..";
+            if (t.max_attached_stage < 0) {
+                std::cout << "top";  // open-top upper-stack / full table
+            } else {
+                std::cout << t.max_attached_stage;  // bounded single-stage / sub-stack
+            }
+            std::cout << " S=" << t.reference_area_m2 << " m2]";
         }
         std::cout << "\n";
     }

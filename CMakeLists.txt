@@ -160,6 +160,12 @@ if(BUILD_TESTING)
     target_link_libraries(post2_aero_model_test PRIVATE post2_core)
     add_test(NAME post2_aero_model_test COMMAND post2_aero_model_test)
 
+    add_executable(post2_aero_stage_table_test
+        tests/aero_stage_table_test.cpp
+    )
+    target_link_libraries(post2_aero_stage_table_test PRIVATE post2_core)
+    add_test(NAME post2_aero_stage_table_test COMMAND post2_aero_stage_table_test)
+
     # End-to-end (krpc-independent): core writes the guidance script, the player's
     # parser reads it back. Compiles the player parser directly so it needs no krpc.
     add_executable(post2_guidance_script_test

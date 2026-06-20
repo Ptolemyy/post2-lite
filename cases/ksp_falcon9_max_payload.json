@@ -700,6 +700,15 @@
       "cd": 0.5,
       "cl": 0,
       "enabled": true,
+      "first_stage_table": {
+        "activate_at_min_attached_stage": 0,
+        "base_diameter_m": 3.6600000000000001,
+        "body_length_m": 29.880136493580537,
+        "nose_length_m": 8.9640409480741603,
+        "ref_diameter_m": 3.6600000000000001,
+        "reference_area_m2": 10.520879637606859,
+        "table_path": "C:\\Users\\32796\\Desktop\\post2-lite\\cases\\aero_table_stage1.csv"
+      },
       "nose_length_m": 8.9640409480741603,
       "ref_diameter_m": 5.2000000000000002,
       "reference_area_m2": 21.237166338267002,
@@ -849,7 +858,7 @@
       {
         "active": false,
         "attached": true,
-        "dry_mass_kg": 18000.0,
+        "dry_mass_kg": 947.63620290905237,
         "engine": {
           "direction_body": [
             1,
