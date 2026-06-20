@@ -241,7 +241,8 @@ struct PhaseConfig {
     bool inherit_initial_state = true;
     std::optional<State> initial_state_eci;
     bool hold_down_clamp_initial_active = false;
-    // "rk4" (fixed step), "dopri5" (adaptive 5/4), or legacy "ode" alias for rk4.
+    // "rk4" (fixed step), "dopri5" (adaptive 5/4), "dop853" (adaptive 8),
+    // or legacy "ode" alias for rk4.
     std::string integrator = "rk4";
     post2::integrators::IntegratorTolerances tolerances;
     ForceModelSwitches force_models;

@@ -29,11 +29,14 @@ struct IntegratorTolerances {
 };
 
 // A continuous event: integrator watches the sign of g(t, state) along the
-// trajectory and roots it as it crosses zero. terminating events halt the
-// step on detection (subsequent events of higher t are ignored).
+// trajectory and roots it as it crosses zero. `direction` filters crossings:
+// 0 = either direction, +1 = negative-to-positive, -1 = positive-to-negative.
+// terminating events halt the step on detection (subsequent events of higher
+// t are ignored).
 struct EventFunction {
     std::function<double(double t_s, const ExtendedState&)> g;
     bool terminating = true;
+    int direction = 0;
     std::string name;
 };
 
@@ -73,8 +76,9 @@ public:
         const std::vector<EventFunction>& events) = 0;
 };
 
-// Factory. Recognized types: "rk4" (fixed step), "dopri5" (adaptive).
-// "ode" is accepted as a legacy alias for "rk4".
+// Factory. Recognized types: "rk4" (fixed step), "dopri5" (adaptive 5/4),
+// and "dop853" (adaptive 8th-order). "ode" is accepted as a legacy alias
+// for "rk4".
 std::unique_ptr<IIntegrator> make_integrator(
     const std::string& type,
     double step_s,

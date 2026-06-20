@@ -155,6 +155,7 @@ post2::integrators::EventFunction make_trigger_event(
     post2::integrators::EventFunction ev;
     ev.name = name;
     ev.terminating = terminating;
+    ev.direction = +1;
 
     if (trigger.type == "time") {
         ev.g = [wrap, time_base_s](double t, const post2::integrators::ExtendedState&) {
@@ -626,9 +627,10 @@ bool validate_case_config(const CaseConfig& config, std::string* error)
         }
         if (phase.integrator != "ode" &&
             phase.integrator != "rk4" &&
-            phase.integrator != "dopri5") {
+            phase.integrator != "dopri5" &&
+            phase.integrator != "dop853") {
             *error = "phase " + std::to_string(i) +
-                " integrator must be \"rk4\", \"dopri5\", or legacy \"ode\"";
+                " integrator must be \"rk4\", \"dopri5\", \"dop853\", or legacy \"ode\"";
             return false;
         }
         if (phase.tolerances.rtol <= 0.0 ||
@@ -994,7 +996,8 @@ StateLog propagate_phase(
             &state_log, runtime, env_initial, simulation_config.earth_rotation_rad_per_s);
     }
 
-    const bool use_adaptive_step_suggestions = phase.integrator == "dopri5";
+    const bool use_adaptive_step_suggestions =
+        phase.integrator == "dopri5" || phase.integrator == "dop853";
     const double min_effective_step_s = minimum_effective_step_s(case_config.step_s);
     const int max_step_count =
         max_phase_integration_steps(phase_horizon_s, case_config.step_s);
@@ -1130,6 +1133,7 @@ StateLog propagate_phase(
                     post2::integrators::EventFunction ev;
                     ev.name = "tank_empty_" + std::to_string(i);
                     ev.terminating = true;
+                    ev.direction = -1;
                     const std::size_t flat = i;
                     ev.g = [flat](double, const post2::integrators::ExtendedState& s) {
                         return (flat < s.tank_masses_kg.size() ? s.tank_masses_kg[flat] : 0.0)
@@ -1330,7 +1334,11 @@ StateLog propagate_phase(
                     /*time_base_s=*/0.0,
                     /*terminating=*/false,
                     "mission_event_probe");
-                mission_events->runtimes[k].prev_g = probe.g(next_time_s, eval_state);
+                double g = probe.g(next_time_s, eval_state);
+                if (k == fired_mission_event_index && g == 0.0) {
+                    g = 1.0e-12;
+                }
+                mission_events->runtimes[k].prev_g = g;
             }
         }
         {
@@ -1616,6 +1624,141 @@ StateLog SimulationDriver::integrateOneEvent(
     return event.executeEvent(config, state_log);
 }
 
+StateLog CoastPropagator::propagate(
+    const CaseConfig& case_config,
+    const StateLog& source_log,
+    double horizon_s,
+    int sample_count) const
+{
+    StateLog out(case_config.earth_radius_m, case_config.vehicle);
+    if (source_log.empty() || horizon_s <= 0.0 || sample_count <= 0) {
+        return out;
+    }
+
+    const LaunchVehicleStateLogEntry& last = source_log.back();
+    PhaseConfig phase;
+    phase.name = "predicted orbit";
+    phase.inherit_initial_state = false;
+    phase.optimize_enabled = false;
+    phase.hold_down_clamp_initial_active = false;
+    phase.integrator = "dop853";
+    phase.tolerances = case_config.phases.empty()
+        ? post2::integrators::IntegratorTolerances{}
+        : case_config.phases.back().tolerances;
+    phase.force_models = case_config.phases.empty()
+        ? ForceModelSwitches{}
+        : case_config.phases.back().force_models;
+    phase.force_models.gravity = true;
+    phase.force_models.thrust = false;
+    phase.force_models.normal_force = false;
+    phase.throttle_model = ThrottleModelConfig{};
+    phase.throttle_model.c0 = 0.0;
+    phase.steering_model = SteeringModelConfig{};
+    phase.termination = TriggerCondition{"time", ">=", horizon_s};
+
+    const SimulationConfig simulation_config =
+        make_phase_simulation_config(case_config, phase, last.time_s + horizon_s);
+    const post2::propagation::ForceModelSet force_models =
+        post2::propagation::make_force_model_set(case_config, phase);
+
+    post2::vehicle::VehicleRuntimeState coast_runtime = last.runtime;
+    coast_runtime.time_s = last.time_s;
+    coast_runtime.vehicle.motion = last.state;
+    coast_runtime.engine.enabled = false;
+    coast_runtime.engine.firing = false;
+    coast_runtime.engine.throttle = 0.0;
+    coast_runtime.engine.commanded_thrust_n = 0.0;
+    coast_runtime.engine.actual_thrust_n = 0.0;
+    coast_runtime.engine.mass_flow_kgps = 0.0;
+    for (auto& stage : coast_runtime.stages) {
+        stage.engine.firing = false;
+        stage.engine.throttle = 0.0;
+        stage.engine.commanded_thrust_n = 0.0;
+        stage.engine.actual_thrust_n = 0.0;
+        stage.engine.mass_flow_kgps = 0.0;
+    }
+
+    out.set_phase_metadata(last.phase_index + 1, "predicted orbit");
+    {
+        const auto env = make_environment_state(
+            simulation_config, phase, coast_runtime.time_s, coast_runtime.vehicle.motion);
+        append_entry_with_environment(
+            &out, coast_runtime, env, simulation_config.earth_rotation_rad_per_s);
+    }
+
+    post2::integrators::ExtendedState state{
+        coast_runtime.vehicle.motion,
+        post2::vehicle::read_tank_masses_flat(coast_runtime),
+    };
+    post2::integrators::Dop853Integrator integrator(phase.tolerances);
+
+    auto derivative = [&](double t_s, const post2::integrators::ExtendedState& eval_state) {
+        post2::vehicle::VehicleRuntimeState eval_runtime = coast_runtime;
+        eval_runtime.time_s = t_s;
+        eval_runtime.vehicle.motion = eval_state.motion;
+        const post2::propagation::EnvironmentState environment =
+            make_environment_state(simulation_config, phase, t_s, eval_state.motion);
+        const post2::propagation::ForceModelContext force_context{
+            &case_config,
+            &phase,
+            &eval_runtime,
+            &environment,
+            {0.0, 0.0, 0.0},
+        };
+        const post2::propagation::ForceModelOutput force_output =
+            force_models.evaluate_all(force_context, eval_state);
+        post2::integrators::ExtendedDerivative d;
+        d.motion_dot = {eval_state.motion.velocity_mps, force_output.acceleration_eci_mps2};
+        d.tank_mass_dots_kgps.assign(eval_state.tank_masses_kg.size(), 0.0);
+        return d;
+    };
+
+    const int samples = std::max(2, sample_count);
+    double t_s = last.time_s;
+    double suggested_h = horizon_s / static_cast<double>(samples);
+    const double end_t_s = last.time_s + horizon_s;
+    for (int sample = 1; sample <= samples; ++sample) {
+        const double target_t_s = last.time_s + horizon_s * static_cast<double>(sample) /
+            static_cast<double>(samples);
+        while (t_s < target_t_s - 1.0e-10) {
+            const double h = std::min(
+                (std::isfinite(suggested_h) && suggested_h > 1.0e-12) ? suggested_h : target_t_s - t_s,
+                target_t_s - t_s);
+            const post2::integrators::StepResult step =
+                integrator.step(state, t_s, h, derivative, {});
+            if (!step.accepted || step.h_used <= 1.0e-12) {
+                throw std::runtime_error("coast DOP853 integrator failed to make progress");
+            }
+            state = step.state_end;
+            t_s = step.t_end;
+            suggested_h =
+                (std::isfinite(step.h_next_suggested) && step.h_next_suggested > 1.0e-12)
+                    ? step.h_next_suggested
+                    : h;
+            if (t_s > end_t_s + 1.0e-9) {
+                break;
+            }
+        }
+
+        coast_runtime.time_s = t_s;
+        coast_runtime.vehicle.motion = state.motion;
+        const auto env = make_environment_state(
+            simulation_config, phase, t_s, coast_runtime.vehicle.motion);
+        if (env.altitude_m < 0.0) {
+            throw std::runtime_error("coast trajectory impacted Earth");
+        }
+        const auto d = derivative(t_s, state);
+        append_entry_with_environment(
+            &out,
+            coast_runtime,
+            env,
+            simulation_config.earth_rotation_rad_per_s,
+            d.motion_dot.d_velocity_mps2);
+    }
+
+    return out;
+}
+
 StateLog predict_orbit_path(
     const CaseConfig& case_config,
     const StateLog& source_log,
@@ -1647,42 +1790,12 @@ StateLog predict_orbit_path(
     const double period_s = 2.0 * kPi * std::sqrt((a * a * a) / mu);
     const double horizon_s = period_s * 1.02;
 
-    // Coast the final state forward under the case's gravity model with the
-    // engine off. Re-anchor the Earth's epoch orientation so coast-time 0 lines
-    // up with the source state's mission time (keeps J2 and geodetic altitude
-    // consistent with where the vehicle actually is).
-    CaseConfig coast = case_config;
-    coast.events.clear();
-    coast.optimization = OptimizationConfig{};
-    coast.earth_rotation_at_epoch_rad =
-        case_config.earth_rotation_at_epoch_rad +
-        case_config.earth_rotation_rad_per_s * last.time_s;
-
-    PhaseConfig phase;
-    phase.name = "predicted orbit";
-    phase.inherit_initial_state = false;
-    phase.initial_state_eci = last.state;
-    phase.hold_down_clamp_initial_active = false;
-    phase.optimize_enabled = false;
-    phase.integrator = "dopri5";
-    phase.force_models = case_config.phases.empty()
-        ? ForceModelSwitches{}
-        : case_config.phases.back().force_models;
-    phase.force_models.thrust = false;
-    phase.force_models.normal_force = false;
-    phase.throttle_model = ThrottleModelConfig{};
-    phase.throttle_model.c0 = 0.0;
-    phase.steering_model = SteeringModelConfig{};
-    phase.termination = TriggerCondition{"time", ">=", horizon_s};
-    coast.phases = {phase};
     const int samples = std::max(60, sample_count);
-    coast.step_s = horizon_s / static_cast<double>(samples);
-
-    const SimulationResult result = SimulationDriver{}.run(coast);
-    if (!result.ok) {
+    try {
+        return CoastPropagator{}.propagate(case_config, source_log, horizon_s, samples);
+    } catch (const std::exception&) {
         return empty;
     }
-    return result.state_log;
 }
 
 } // namespace post2::core

@@ -18,6 +18,7 @@ post2::integrators::EventFunction altitude_zero_event(bool terminating)
     post2::integrators::EventFunction ev;
     ev.name = "altitude_zero";
     ev.terminating = terminating;
+    ev.direction = -1;
     ev.g = [](double, const post2::integrators::ExtendedState& s) {
         return post2::core::frames::ecef_to_geodetic(s.motion.position_m).altitude_m;
     };
@@ -40,6 +41,7 @@ post2::integrators::EventFunction periapsis_event(bool terminating)
     post2::integrators::EventFunction ev;
     ev.name = "periapsis";
     ev.terminating = terminating;
+    ev.direction = +1;
     ev.g = [](double, const post2::integrators::ExtendedState& s) {
         return radial_velocity(s);
     };
@@ -51,6 +53,7 @@ post2::integrators::EventFunction apoapsis_event(bool terminating)
     post2::integrators::EventFunction ev;
     ev.name = "apoapsis";
     ev.terminating = terminating;
+    ev.direction = -1;
     ev.g = [](double, const post2::integrators::ExtendedState& s) {
         return radial_velocity(s);
     };

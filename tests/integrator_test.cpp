@@ -9,6 +9,7 @@
 namespace {
 
 using post2::integrators::Dopri5Integrator;
+using post2::integrators::Dop853Integrator;
 using post2::integrators::EventFunction;
 using post2::integrators::ExtendedDerivative;
 using post2::integrators::ExtendedState;
@@ -119,6 +120,32 @@ void test_dopri5_event_detection()
     }
 }
 
+void test_event_direction_filtering()
+{
+    IntegratorTolerances tol;
+    Dopri5Integrator integ(tol);
+
+    EventFunction falling;
+    falling.name = "wrong direction";
+    falling.direction = -1;
+    falling.g = [](double /*t*/, const ExtendedState& s) {
+        return s.motion.position_m.x - 1.0;
+    };
+    ExtendedState s = pack_scalar(0.0);
+    StepResult res = integ.step(s, 0.0, 2.0, linear_dynamics, {falling});
+    check_true("falling event ignored on rising crossing", !res.event.has_value());
+    check_close("falling-filter full step", res.t_end, 2.0, 1.0e-9);
+
+    EventFunction rising = falling;
+    rising.name = "right direction";
+    rising.direction = +1;
+    res = integ.step(s, 0.0, 2.0, linear_dynamics, {rising});
+    check_true("rising event accepted", res.event.has_value());
+    if (res.event.has_value()) {
+        check_close("rising-filter event time", res.event->t_s, 1.0, 1.0e-9);
+    }
+}
+
 void test_rk4_adapter_event_detection()
 {
     Rk4IntegratorAdapter integ;
@@ -185,14 +212,43 @@ void test_dopri5_energy_conservation()
     check_close("oscillator energy conservation", e_final, e0, 1.0e-7);
 }
 
+void test_dop853_decay_accuracy()
+{
+    IntegratorTolerances tol;
+    tol.rtol = 1.0e-11;
+    tol.atol_position_m = 1.0e-13;
+    Dop853Integrator integ(tol);
+
+    ExtendedState s = pack_scalar(1.0);
+    double t = 0.0;
+    double h = 0.5;
+    const double t_final = 10.0;
+    while (t < t_final - 1.0e-12) {
+        const double h_attempt = std::min(h, t_final - t);
+        const StepResult res = integ.step(s, t, h_attempt, decay_dynamics, {});
+        if (!res.accepted) {
+            std::cerr << "dop853 step rejected unexpectedly\n";
+            ++g_failures;
+            break;
+        }
+        s = res.state_end;
+        t = res.t_end;
+        h = res.h_next_suggested;
+    }
+
+    check_close("dop853 exp(-10) accuracy", unpack_scalar(s), std::exp(-10.0), 1.0e-11);
+}
+
 void test_factory_dispatch()
 {
     IntegratorTolerances tol;
     auto rk4 = make_integrator("rk4", 1.0, tol);
     auto dopri5 = make_integrator("dopri5", 1.0, tol);
+    auto dop853 = make_integrator("dop853", 1.0, tol);
     auto legacy = make_integrator("ode", 1.0, tol);
     check_true("factory rk4 not null", rk4 != nullptr);
     check_true("factory dopri5 not null", dopri5 != nullptr);
+    check_true("factory dop853 not null", dop853 != nullptr);
     check_true("factory ode-alias not null", legacy != nullptr);
 }
 
@@ -244,7 +300,9 @@ int main()
 {
     test_dopri5_decay_accuracy();
     test_dopri5_event_detection();
+    test_event_direction_filtering();
     test_rk4_adapter_event_detection();
+    test_dop853_decay_accuracy();
     test_dopri5_energy_conservation();
     test_factory_dispatch();
     test_builtin_altitude_events();

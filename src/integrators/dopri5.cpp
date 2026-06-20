@@ -1,7 +1,9 @@
 #include "post2/integrators/dopri5.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <limits>
 
 namespace post2::integrators {
 
@@ -64,17 +66,189 @@ constexpr double kFacMin = 0.2;
 constexpr double kFacMax = 5.0;
 constexpr double kOrderInv = 1.0 / 5.0;
 
-ExtendedDerivative scale_derivative(const ExtendedDerivative& d, double s)
-{
-    ExtendedDerivative out;
-    out.motion_dot.d_position_mps = d.motion_dot.d_position_mps * s;
-    out.motion_dot.d_velocity_mps2 = d.motion_dot.d_velocity_mps2 * s;
-    out.tank_mass_dots_kgps.resize(d.tank_mass_dots_kgps.size());
-    for (std::size_t i = 0; i < d.tank_mass_dots_kgps.size(); ++i) {
-        out.tank_mass_dots_kgps[i] = d.tank_mass_dots_kgps[i] * s;
-    }
-    return out;
-}
+// Dormand-Prince RK45 quartic dense-output matrix. Interpolation is:
+// y(theta) = y0 + h * sum_j theta^(j+1) * sum_i P[i][j] * k_i.
+constexpr std::array<std::array<double, 4>, 7> kDopri5DenseP{{
+    {{1.0,
+      -8048581381.0 / 2820520608.0,
+      8663915743.0 / 2820520608.0,
+      -12715105075.0 / 11282082432.0}},
+    {{0.0, 0.0, 0.0, 0.0}},
+    {{0.0,
+      131558114200.0 / 32700410799.0,
+      -68118460800.0 / 10900136933.0,
+      87487479700.0 / 32700410799.0}},
+    {{0.0,
+      -1754552775.0 / 470086768.0,
+      14199869525.0 / 1410260304.0,
+      -10690763975.0 / 1880347072.0}},
+    {{0.0,
+      127303824393.0 / 49829197408.0,
+      -318862633887.0 / 49829197408.0,
+      701980252875.0 / 199316789632.0}},
+    {{0.0,
+      -282668133.0 / 205662961.0,
+      2019193451.0 / 616988883.0,
+      -1453857185.0 / 822651844.0}},
+    {{0.0,
+      40617522.0 / 29380423.0,
+      -110615467.0 / 29380423.0,
+      69997945.0 / 29380423.0}},
+}};
+
+constexpr int kDop853Stages = 12;
+constexpr int kDop853StagesExtended = 16;
+constexpr int kDop853InterpolatorPower = 7;
+constexpr double kDop853OrderInv = 1.0 / 8.0;
+
+constexpr std::array<double, kDop853StagesExtended> kDop853C{{
+    0.0,
+    0.526001519587677318785587544488e-01,
+    0.789002279381515978178381316732e-01,
+    0.118350341907227396726757197510,
+    0.281649658092772603273242802490,
+    0.333333333333333333333333333333,
+    0.25,
+    0.307692307692307692307692307692,
+    0.651282051282051282051282051282,
+    0.6,
+    0.857142857142857142857142857142,
+    1.0,
+    1.0,
+    0.1,
+    0.2,
+    0.777777777777777777777777777778,
+}};
+
+constexpr std::array<std::array<double, kDop853StagesExtended>, kDop853StagesExtended> kDop853A{{
+    {{0.0}},
+    {{5.26001519587677318785587544488e-2}},
+    {{1.97250569845378994544595329183e-2, 5.91751709536136983633785987549e-2}},
+    {{2.95875854768068491816892993775e-2, 0.0, 8.87627564304205475450678981324e-2}},
+    {{2.41365134159266685502369798665e-1, 0.0, -8.84549479328286085344864962717e-1,
+      9.24834003261792003115737966543e-1}},
+    {{3.7037037037037037037037037037e-2, 0.0, 0.0, 1.70828608729473871279604482173e-1,
+      1.25467687566822425016691814123e-1}},
+    {{3.7109375e-2, 0.0, 0.0, 1.70252211019544039314978060272e-1,
+      6.02165389804559606850219397283e-2, -1.7578125e-2}},
+    {{3.70920001185047927108779319836e-2, 0.0, 0.0, 1.70383925712239993810214054705e-1,
+      1.07262030446373284651809199168e-1, -1.53194377486244017527936158236e-2,
+      8.27378916381402288758473766002e-3}},
+    {{6.24110958716075717114429577812e-1, 0.0, 0.0, -3.36089262944694129406857109825,
+      -8.68219346841726006818189891453e-1, 2.75920996994467083049415600797e1,
+      2.01540675504778934086186788979e1, -4.34898841810699588477366255144e1}},
+    {{4.77662536438264365890433908527e-1, 0.0, 0.0, -2.48811461997166764192642586468,
+      -5.90290826836842996371446475743e-1, 2.12300514481811942347288949897e1,
+      1.52792336328824235832596922938e1, -3.32882109689848629194453265587e1,
+      -2.03312017085086261358222928593e-2}},
+    {{-9.3714243008598732571704021658e-1, 0.0, 0.0, 5.18637242884406370830023853209,
+      1.09143734899672957818500254654, -8.14978701074692612513997267357,
+      -1.85200656599969598641566180701e1, 2.27394870993505042818970056734e1,
+      2.49360555267965238987089396762, -3.0467644718982195003823669022}},
+    {{2.27331014751653820792359768449, 0.0, 0.0, -1.05344954667372501984066689879e1,
+      -2.00087205822486249909675718444, -1.79589318631187989172765950534e1,
+      2.79488845294199600508499808837e1, -2.85899827713502369474065508674,
+      -8.87285693353062954433549289258, 1.23605671757943030647266201528e1,
+      6.43392746015763530355970484046e-1}},
+    {{5.42937341165687622380535766363e-2, 0.0, 0.0, 0.0, 0.0,
+      4.45031289275240888144113950566, 1.89151789931450038304281599044,
+      -5.8012039600105847814672114227, 3.1116436695781989440891606237e-1,
+      -1.52160949662516078556178806805e-1, 2.01365400804030348374776537501e-1,
+      4.47106157277725905176885569043e-2}},
+    {{5.61675022830479523392909219681e-2, 0.0, 0.0, 0.0, 0.0, 0.0,
+      2.53500210216624811088794765333e-1, -2.46239037470802489917441475441e-1,
+      -1.24191423263816360469010140626e-1, 1.5329179827876569731206322685e-1,
+      8.20105229563468988491666602057e-3, 7.56789766054569976138603589584e-3,
+      -8.298e-3}},
+    {{3.18346481635021405060768473261e-2, 0.0, 0.0, 0.0, 0.0,
+      2.83009096723667755288322961402e-2, 5.35419883074385676223797384372e-2,
+      -5.49237485713909884646569340306e-2, 0.0, 0.0,
+      -1.08347328697249322858509316994e-4, 3.82571090835658412954920192323e-4,
+      -3.40465008687404560802977114492e-4, 1.41312443674632500278074618366e-1}},
+    {{-4.28896301583791923408573538692e-1, 0.0, 0.0, 0.0, 0.0,
+      -4.69762141536116384314449447206, 7.68342119606259904184240953878,
+      4.06898981839711007970213554331, 3.56727187455281109270669543021e-1,
+      0.0, 0.0, 0.0, -1.39902416515901462129418009734e-3,
+      2.9475147891527723389556272149, -9.15095847217987001081870187138}},
+}};
+
+constexpr std::array<double, kDop853Stages> kDop853B{{
+    5.42937341165687622380535766363e-2,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    4.45031289275240888144113950566,
+    1.89151789931450038304281599044,
+    -5.8012039600105847814672114227,
+    3.1116436695781989440891606237e-1,
+    -1.52160949662516078556178806805e-1,
+    2.01365400804030348374776537501e-1,
+    4.47106157277725905176885569043e-2,
+}};
+
+constexpr std::array<double, kDop853Stages + 1> kDop853E3{{
+    5.42937341165687622380535766363e-2 - 0.244094488188976377952755905512,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    4.45031289275240888144113950566,
+    1.89151789931450038304281599044,
+    -5.8012039600105847814672114227,
+    3.1116436695781989440891606237e-1 - 0.733846688281611857341361741547,
+    -1.52160949662516078556178806805e-1,
+    2.01365400804030348374776537501e-1,
+    4.47106157277725905176885569043e-2 - 0.220588235294117647058823529412e-1,
+    0.0,
+}};
+
+constexpr std::array<double, kDop853Stages + 1> kDop853E5{{
+    0.1312004499419488073250102996e-1,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    -0.1225156446376204440720569753e+1,
+    -0.4957589496572501915214079952,
+    0.1664377182454986536961530415e+1,
+    -0.3503288487499736816886487290,
+    0.3341791187130174790297318841,
+    0.8192320648511571246570742613e-1,
+    -0.2235530786388629525884427845e-1,
+    0.0,
+}};
+
+constexpr std::array<std::array<double, kDop853StagesExtended>, kDop853InterpolatorPower - 3> kDop853D{{
+    {{-0.84289382761090128651353491142e+1, 0.0, 0.0, 0.0, 0.0,
+      0.56671495351937776962531783590, -0.30689499459498916912797304727e+1,
+      0.23846676565120698287728149680e+1, 0.21170345824450282767155149946e+1,
+      -0.87139158377797299206789907490, 0.22404374302607882758541771650e+1,
+      0.63157877876946881815570249290, -0.88990336451333310820698117400e-1,
+      0.18148505520854727256656404962e+2, -0.91946323924783554000451984436e+1,
+      -0.44360363875948939664310572000e+1}},
+    {{0.10427508642579134603413151009e+2, 0.0, 0.0, 0.0, 0.0,
+      0.24228349177525818288430175319e+3, 0.16520045171727028198505394887e+3,
+      -0.37454675472269020279518312152e+3, -0.22113666853125306036270938578e+2,
+      0.77334326684722638389603898808e+1, -0.30674084731089398182061213626e+2,
+      -0.93321305264302278729567221706e+1, 0.15697238121770843886131091075e+2,
+      -0.31139403219565177677282850411e+2, -0.93529243588444783865713862664e+1,
+      0.35816841486394083752465898540e+2}},
+    {{0.19985053242002433820987653617e+2, 0.0, 0.0, 0.0, 0.0,
+      -0.38703730874935176555105901742e+3, -0.18917813819516756882830838328e+3,
+      0.52780815920542364900561016686e+3, -0.11573902539959630126141871134e+2,
+      0.68812326946963000169666922661e+1, -0.10006050966910838403183860980e+1,
+      0.77771377980534432092869265740, -0.27782057523535084065932004339e+1,
+      -0.60196695231264120758267380846e+2, 0.84320405506677161018159903784e+2,
+      0.11992291136182789328035130030e+2}},
+    {{-0.25693933462703749003312586129e+2, 0.0, 0.0, 0.0, 0.0,
+      -0.15418974869023643374053993627e+3, -0.23152937917604549567536039109e+3,
+      0.35763911791061412378285349910e+3, 0.93405324183624310003907691704e+2,
+      -0.37458323136451633156875139351e+2, 0.10409964950896230045147246184e+3,
+      0.29840293426660503123344363579e+2, -0.43533456590011143754432175058e+2,
+      0.96324553959188282948394950600e+2, -0.39177261675615439165231486172e+2,
+      -0.14972683625798562581422125276e+3}},
+}};
 
 ExtendedState add_state_scaled_derivative(
     const ExtendedState& s, const ExtendedDerivative& d, double scale)
@@ -118,37 +292,135 @@ ExtendedState combine_stages(
     return out;
 }
 
-// Hermite cubic interpolation between (t_n, y_n, k1) and (t_n+h, y_new, k7)
-// at fractional position theta in [0, 1]. k7 here uses FSAL: it's f at the
-// end-of-step state, which equals next-step's k1.
-ExtendedState hermite_interpolate(
+ExtendedState zero_state_like(const ExtendedState& ref)
+{
+    ExtendedState out;
+    out.tank_masses_kg.assign(ref.tank_masses_kg.size(), 0.0);
+    return out;
+}
+
+ExtendedState state_delta(const ExtendedState& a, const ExtendedState& b)
+{
+    ExtendedState out;
+    out.motion.position_m = a.motion.position_m - b.motion.position_m;
+    out.motion.velocity_mps = a.motion.velocity_mps - b.motion.velocity_mps;
+    out.tank_masses_kg.assign(b.tank_masses_kg.size(), 0.0);
+    for (std::size_t i = 0; i < out.tank_masses_kg.size(); ++i) {
+        const double av = i < a.tank_masses_kg.size() ? a.tank_masses_kg[i] : 0.0;
+        out.tank_masses_kg[i] = av - b.tank_masses_kg[i];
+    }
+    return out;
+}
+
+void add_scaled_state_in_place(ExtendedState* out, const ExtendedState& delta, double scale)
+{
+    out->motion.position_m = out->motion.position_m + delta.motion.position_m * scale;
+    out->motion.velocity_mps = out->motion.velocity_mps + delta.motion.velocity_mps * scale;
+    const std::size_t n = std::min(out->tank_masses_kg.size(), delta.tank_masses_kg.size());
+    for (std::size_t i = 0; i < n; ++i) {
+        out->tank_masses_kg[i] += delta.tank_masses_kg[i] * scale;
+    }
+}
+
+void scale_state_in_place(ExtendedState* out, double scale)
+{
+    out->motion.position_m = out->motion.position_m * scale;
+    out->motion.velocity_mps = out->motion.velocity_mps * scale;
+    for (double& mass : out->tank_masses_kg) {
+        mass *= scale;
+    }
+}
+
+ExtendedState derivative_delta(
+    const ExtendedDerivative& derivative,
+    double scale,
+    const ExtendedState& ref)
+{
+    ExtendedState out = zero_state_like(ref);
+    out.motion.position_m = derivative.motion_dot.d_position_mps * scale;
+    out.motion.velocity_mps = derivative.motion_dot.d_velocity_mps2 * scale;
+    const std::size_t n = std::min(out.tank_masses_kg.size(), derivative.tank_mass_dots_kgps.size());
+    for (std::size_t i = 0; i < n; ++i) {
+        out.tank_masses_kg[i] = derivative.tank_mass_dots_kgps[i] * scale;
+    }
+    return out;
+}
+
+ExtendedState weighted_derivative_delta(
+    const std::array<ExtendedDerivative, kDop853StagesExtended>& ks,
+    const std::array<double, kDop853StagesExtended>& coefs,
+    std::size_t n_stages,
+    double scale,
+    const ExtendedState& ref)
+{
+    ExtendedState out = zero_state_like(ref);
+    for (std::size_t s = 0; s < n_stages; ++s) {
+        if (coefs[s] == 0.0) {
+            continue;
+        }
+        add_scaled_state_in_place(&out, derivative_delta(ks[s], scale, ref), coefs[s]);
+    }
+    return out;
+}
+
+ExtendedState dopri5_dense_interpolate(
     const ExtendedState& y_n,
-    const ExtendedState& y_new,
-    const ExtendedDerivative& k1,
-    const ExtendedDerivative& k7,
     double h,
+    const std::array<ExtendedDerivative, 7>& ks,
     double theta)
 {
-    const double a1 = 1.0 - 3.0 * theta * theta + 2.0 * theta * theta * theta;
-    const double a2 = 3.0 * theta * theta - 2.0 * theta * theta * theta;
-    const double a3 = (theta - 2.0 * theta * theta + theta * theta * theta) * h;
-    const double a4 = (-theta * theta + theta * theta * theta) * h;
-
-    ExtendedState out;
-    out.motion.position_m =
-        y_n.motion.position_m * a1 + y_new.motion.position_m * a2 +
-        k1.motion_dot.d_position_mps * a3 + k7.motion_dot.d_position_mps * a4;
-    out.motion.velocity_mps =
-        y_n.motion.velocity_mps * a1 + y_new.motion.velocity_mps * a2 +
-        k1.motion_dot.d_velocity_mps2 * a3 + k7.motion_dot.d_velocity_mps2 * a4;
-    out.tank_masses_kg.resize(y_n.tank_masses_kg.size());
-    for (std::size_t i = 0; i < y_n.tank_masses_kg.size(); ++i) {
-        const double y0 = y_n.tank_masses_kg[i];
-        const double y1 = i < y_new.tank_masses_kg.size() ? y_new.tank_masses_kg[i] : y0;
-        const double d0 = i < k1.tank_mass_dots_kgps.size() ? k1.tank_mass_dots_kgps[i] : 0.0;
-        const double d1 = i < k7.tank_mass_dots_kgps.size() ? k7.tank_mass_dots_kgps[i] : 0.0;
-        out.tank_masses_kg[i] = y0 * a1 + y1 * a2 + d0 * a3 + d1 * a4;
+    double powers[4];
+    powers[0] = theta;
+    for (int i = 1; i < 4; ++i) {
+        powers[i] = powers[i - 1] * theta;
     }
+
+    double coefs[7] = {};
+    for (std::size_t stage = 0; stage < ks.size(); ++stage) {
+        for (int j = 0; j < 4; ++j) {
+            coefs[stage] += kDopri5DenseP[stage][j] * powers[j];
+        }
+    }
+    return combine_stages(y_n, h, ks.data(), coefs, ks.size());
+}
+
+std::array<ExtendedState, kDop853InterpolatorPower> make_dop853_dense_coefficients(
+    const ExtendedState& y_n,
+    const ExtendedState& y_new,
+    double h,
+    const std::array<ExtendedDerivative, kDop853StagesExtended>& ks)
+{
+    std::array<ExtendedState, kDop853InterpolatorPower> f;
+    const ExtendedState delta_y = state_delta(y_new, y_n);
+    f[0] = delta_y;
+
+    f[1] = derivative_delta(ks[0], h, y_n);
+    add_scaled_state_in_place(&f[1], delta_y, -1.0);
+
+    f[2] = delta_y;
+    scale_state_in_place(&f[2], 2.0);
+    add_scaled_state_in_place(&f[2], derivative_delta(ks[0], h, y_n), -1.0);
+    add_scaled_state_in_place(&f[2], derivative_delta(ks[12], h, y_n), -1.0);
+
+    for (std::size_t i = 0; i < kDop853D.size(); ++i) {
+        f[3 + i] = weighted_derivative_delta(
+            ks, kDop853D[i], kDop853StagesExtended, h, y_n);
+    }
+    return f;
+}
+
+ExtendedState dop853_dense_interpolate(
+    const ExtendedState& y_n,
+    const std::array<ExtendedState, kDop853InterpolatorPower>& f,
+    double theta)
+{
+    ExtendedState y = zero_state_like(y_n);
+    for (int rev = kDop853InterpolatorPower - 1, count = 0; rev >= 0; --rev, ++count) {
+        add_scaled_state_in_place(&y, f[static_cast<std::size_t>(rev)], 1.0);
+        scale_state_in_place(&y, (count % 2 == 0) ? theta : (1.0 - theta));
+    }
+    ExtendedState out = y_n;
+    add_scaled_state_in_place(&out, y, 1.0);
     return out;
 }
 
@@ -206,37 +478,166 @@ double error_norm(
     return std::sqrt(sum_sq / static_cast<double>(count));
 }
 
-// Bisection root-finder for g(theta) on theta in [0, 1].
+double dop853_error_norm(
+    const ExtendedState& y,
+    const ExtendedState& y_new,
+    const std::array<ExtendedDerivative, kDop853StagesExtended>& ks,
+    double h,
+    const IntegratorTolerances& tol)
+{
+    auto scale = [](double atol, double rtol, double a, double b) {
+        return atol + rtol * std::max(std::abs(a), std::abs(b));
+    };
+    auto accum_vec = [&ks](const std::array<double, kDop853Stages + 1>& coefs, bool velocity) {
+        post2::vehicle::Vec3 out;
+        for (std::size_t i = 0; i < coefs.size(); ++i) {
+            const post2::vehicle::Vec3 v = velocity
+                ? ks[i].motion_dot.d_velocity_mps2
+                : ks[i].motion_dot.d_position_mps;
+            out = out + v * coefs[i];
+        }
+        return out;
+    };
+    auto add_component = [](double e5, double e3, double sc, double* e5_sq, double* e3_sq) {
+        const double a = e5 / sc;
+        const double b = e3 / sc;
+        *e5_sq += a * a;
+        *e3_sq += b * b;
+    };
+
+    double err5_sq = 0.0;
+    double err3_sq = 0.0;
+    std::size_t count = 0;
+
+    const post2::vehicle::Vec3 pos5 = accum_vec(kDop853E5, false);
+    const post2::vehicle::Vec3 pos3 = accum_vec(kDop853E3, false);
+    add_component(pos5.x, pos3.x,
+        scale(tol.atol_position_m, tol.rtol, y.motion.position_m.x, y_new.motion.position_m.x),
+        &err5_sq, &err3_sq);
+    add_component(pos5.y, pos3.y,
+        scale(tol.atol_position_m, tol.rtol, y.motion.position_m.y, y_new.motion.position_m.y),
+        &err5_sq, &err3_sq);
+    add_component(pos5.z, pos3.z,
+        scale(tol.atol_position_m, tol.rtol, y.motion.position_m.z, y_new.motion.position_m.z),
+        &err5_sq, &err3_sq);
+    count += 3;
+
+    const post2::vehicle::Vec3 vel5 = accum_vec(kDop853E5, true);
+    const post2::vehicle::Vec3 vel3 = accum_vec(kDop853E3, true);
+    add_component(vel5.x, vel3.x,
+        scale(tol.atol_velocity_mps, tol.rtol, y.motion.velocity_mps.x, y_new.motion.velocity_mps.x),
+        &err5_sq, &err3_sq);
+    add_component(vel5.y, vel3.y,
+        scale(tol.atol_velocity_mps, tol.rtol, y.motion.velocity_mps.y, y_new.motion.velocity_mps.y),
+        &err5_sq, &err3_sq);
+    add_component(vel5.z, vel3.z,
+        scale(tol.atol_velocity_mps, tol.rtol, y.motion.velocity_mps.z, y_new.motion.velocity_mps.z),
+        &err5_sq, &err3_sq);
+    count += 3;
+
+    for (std::size_t i = 0; i < y.tank_masses_kg.size(); ++i) {
+        double mass5 = 0.0;
+        double mass3 = 0.0;
+        for (std::size_t stage = 0; stage < kDop853E5.size(); ++stage) {
+            const double dot = i < ks[stage].tank_mass_dots_kgps.size()
+                ? ks[stage].tank_mass_dots_kgps[i]
+                : 0.0;
+            mass5 += dot * kDop853E5[stage];
+            mass3 += dot * kDop853E3[stage];
+        }
+        const double y1 = i < y_new.tank_masses_kg.size() ? y_new.tank_masses_kg[i] : y.tank_masses_kg[i];
+        add_component(mass5, mass3,
+            scale(tol.atol_tank_mass_kg, tol.rtol, y.tank_masses_kg[i], y1),
+            &err5_sq, &err3_sq);
+        ++count;
+    }
+
+    if (count == 0 || (err5_sq == 0.0 && err3_sq == 0.0)) {
+        return 0.0;
+    }
+    const double denom = err5_sq + 0.01 * err3_sq;
+    return std::abs(h) * err5_sq / std::sqrt(denom * static_cast<double>(count));
+}
+
+// Brent-Dekker root-finder for g(theta) on theta in [0, 1].
 // Converges to |theta_hi - theta_lo| < 1e-12 (i.e. |Δt| < 1e-12 * h_used).
-double bisect_zero(
+double brent_zero(
     double g_lo,
     double g_hi,
     const std::function<double(double)>& g_at_theta)
 {
-    double lo = 0.0;
-    double hi = 1.0;
-    double f_lo = g_lo;
-    double f_hi = g_hi;
-    for (int iter = 0; iter < 80; ++iter) {
-        const double mid = 0.5 * (lo + hi);
-        const double f_mid = g_at_theta(mid);
-        if ((f_lo <= 0.0 && f_mid >= 0.0) || (f_lo >= 0.0 && f_mid <= 0.0)) {
-            hi = mid;
-            f_hi = f_mid;
-        } else {
-            lo = mid;
-            f_lo = f_mid;
-        }
-        if (hi - lo < 1.0e-12) {
-            return 0.5 * (lo + hi);
-        }
-        // Avoid infinite work on pathological g
-        if (std::abs(f_mid) < 1.0e-15) {
-            return mid;
-        }
-        (void)f_hi;
+    constexpr double kThetaTol = 1.0e-12;
+    constexpr double kFunctionTol = 1.0e-14;
+
+    if (g_lo == 0.0) {
+        return 0.0;
     }
-    return 0.5 * (lo + hi);
+    if (g_hi == 0.0) {
+        return 1.0;
+    }
+
+    double a = 0.0;
+    double b = 1.0;
+    double fa = g_lo;
+    double fb = g_hi;
+    if (std::abs(fa) < std::abs(fb)) {
+        std::swap(a, b);
+        std::swap(fa, fb);
+    }
+
+    double c = a;
+    double fc = fa;
+    double d = c;
+    bool mflag = true;
+
+    for (int iter = 0; iter < 80; ++iter) {
+        double s = b;
+        if (fa != fc && fb != fc) {
+            s =
+                a * fb * fc / ((fa - fb) * (fa - fc)) +
+                b * fa * fc / ((fb - fa) * (fb - fc)) +
+                c * fa * fb / ((fc - fa) * (fc - fb));
+        } else if (fb != fa) {
+            s = b - fb * (b - a) / (fb - fa);
+        }
+
+        const double guard = (3.0 * a + b) * 0.25;
+        const double lower = std::min(guard, b);
+        const double upper = std::max(guard, b);
+        const bool outside_guard = !(s > lower && s < upper);
+        const bool too_slow_mflag = mflag && std::abs(s - b) >= 0.5 * std::abs(b - c);
+        const bool too_slow = !mflag && std::abs(s - b) >= 0.5 * std::abs(c - d);
+        const bool bracket_tiny_mflag = mflag && std::abs(b - c) < kThetaTol;
+        const bool bracket_tiny = !mflag && std::abs(c - d) < kThetaTol;
+        if (!std::isfinite(s) || outside_guard || too_slow_mflag || too_slow ||
+            bracket_tiny_mflag || bracket_tiny) {
+            s = 0.5 * (a + b);
+            mflag = true;
+        } else {
+            mflag = false;
+        }
+
+        const double fs = g_at_theta(s);
+        d = c;
+        c = b;
+        fc = fb;
+        if ((fa < 0.0 && fs > 0.0) || (fa > 0.0 && fs < 0.0)) {
+            b = s;
+            fb = fs;
+        } else {
+            a = s;
+            fa = fs;
+        }
+
+        if (std::abs(fa) < std::abs(fb)) {
+            std::swap(a, b);
+            std::swap(fa, fb);
+        }
+        if (std::abs(fb) < kFunctionTol || std::abs(b - a) < kThetaTol) {
+            return std::clamp(b, 0.0, 1.0);
+        }
+    }
+    return std::clamp(b, 0.0, 1.0);
 }
 
 // Common helper: examine events for sign changes between t_n and t_n+h_used,
@@ -253,17 +654,24 @@ std::optional<EventHit> find_first_event(
     std::optional<EventHit> best;
     for (std::size_t i = 0; i < events.size(); ++i) {
         const auto& ev = events[i];
-        if (!ev.g) {
+        if (!ev.g || !ev.terminating) {
             continue;
         }
         const double g0 = ev.g(t_n, y_n);
         const double g1 = ev.g(t_n + h_used, y_new);
-        const bool sign_change = (g0 < 0.0 && g1 > 0.0) || (g0 > 0.0 && g1 < 0.0) ||
-                                 (g0 == 0.0 && g1 != 0.0);
+        if (!std::isfinite(g0) || !std::isfinite(g1)) {
+            continue;
+        }
+        const bool rising = (g0 < 0.0 && g1 >= 0.0) || (g0 <= 0.0 && g1 > 0.0);
+        const bool falling = (g0 > 0.0 && g1 <= 0.0) || (g0 >= 0.0 && g1 < 0.0);
+        const bool sign_change =
+            ev.direction > 0 ? rising :
+            ev.direction < 0 ? falling :
+            (rising || falling);
         if (!sign_change) {
             continue;
         }
-        const double theta = bisect_zero(g0, g1, [&](double th) {
+        const double theta = brent_zero(g0, g1, [&](double th) {
             const ExtendedState s = interp(th);
             return ev.g(t_n + th * h_used, s);
         });
@@ -340,8 +748,9 @@ StepResult Dopri5Integrator::step(
         ExtendedState y_new = combine_stages(state, h, kt_sol, b_solution, 6);
 
         // FSAL stage k7 = f at the end-of-step state (used by both the error
-        // estimate and the Hermite interpolation).
+        // estimate and dense output).
         const ExtendedDerivative k7 = dynamics(t_s + h, y_new);
+        const std::array<ExtendedDerivative, 7> ks{{k1, k2, k3, k4, k5, k6, k7}};
 
         // Error per unit step: e_i * k_i summed.
         ExtendedDerivative err;
@@ -380,10 +789,11 @@ StepResult Dopri5Integrator::step(
                 : kFacMax;
             const double h_next = h * factor;
 
-            // Event detection on the accepted step via Hermite interpolation
-            // between (state @ t_s, k1) and (y_new @ t_s + h, k7).
+            // Event detection on the accepted step via the Dormand-Prince
+            // quartic dense-output polynomial.
             auto interp = [&](double theta) {
-                return hermite_interpolate(state, y_new, k1, k7, h, theta);
+                (void)y_new;
+                return dopri5_dense_interpolate(state, h, ks, theta);
             };
             const auto event = find_first_event(events, t_s, h, state, y_new, interp);
 
@@ -409,11 +819,11 @@ StepResult Dopri5Integrator::step(
         // Guard against zero-progress
         if (h_new < 1.0e-15) {
             StepResult res;
-            res.state_end = y_new;
-            res.t_end = t_s + h;
-            res.h_used = h;
+            res.state_end = state;
+            res.t_end = t_s;
+            res.h_used = 0.0;
             res.h_next_suggested = h;
-            res.accepted = true;  // give up adapting; emit the result
+            res.accepted = false;
             return res;
         }
         h = h_new;
@@ -434,6 +844,113 @@ StepResult Dopri5Integrator::step(
 // =========================================================================
 // Rk4IntegratorAdapter — fixed-step RK4 with linear event detection
 // =========================================================================
+
+// =========================================================================
+// Dop853Integrator
+// =========================================================================
+
+Dop853Integrator::Dop853Integrator(IntegratorTolerances tolerances)
+    : tolerances_(tolerances)
+{
+}
+
+StepResult Dop853Integrator::step(
+    const ExtendedState& state,
+    double t_s,
+    double h_suggested,
+    const DynamicsFunction& dynamics,
+    const std::vector<EventFunction>& events)
+{
+    double h = std::abs(h_suggested);
+    if (h <= 0.0) {
+        StepResult res;
+        res.state_end = state;
+        res.t_end = t_s;
+        res.h_used = 0.0;
+        res.h_next_suggested = 0.0;
+        res.accepted = true;
+        return res;
+    }
+
+    for (int attempt = 0; attempt < 12; ++attempt) {
+        std::array<ExtendedDerivative, kDop853StagesExtended> ks;
+        ks[0] = dynamics(t_s, state);
+        for (int s = 1; s < kDop853Stages; ++s) {
+            const ExtendedState y_stage = combine_stages(
+                state,
+                h,
+                ks.data(),
+                kDop853A[static_cast<std::size_t>(s)].data(),
+                static_cast<std::size_t>(s));
+            ks[static_cast<std::size_t>(s)] =
+                dynamics(t_s + kDop853C[static_cast<std::size_t>(s)] * h, y_stage);
+        }
+
+        ExtendedState y_new =
+            combine_stages(state, h, ks.data(), kDop853B.data(), kDop853B.size());
+        ks[12] = dynamics(t_s + h, y_new);
+
+        const double e_norm = dop853_error_norm(state, y_new, ks, h, tolerances_);
+        if (e_norm <= 1.0) {
+            const double factor = e_norm > 0.0
+                ? std::min(kFacMax, std::max(kFacMin, kSafetyFactor * std::pow(1.0 / e_norm, kDop853OrderInv)))
+                : kFacMax;
+            const double h_next = h * factor;
+
+            for (int s = kDop853Stages + 1; s < kDop853StagesExtended; ++s) {
+                const ExtendedState y_stage = combine_stages(
+                    state,
+                    h,
+                    ks.data(),
+                    kDop853A[static_cast<std::size_t>(s)].data(),
+                    static_cast<std::size_t>(s));
+                ks[static_cast<std::size_t>(s)] =
+                    dynamics(t_s + kDop853C[static_cast<std::size_t>(s)] * h, y_stage);
+            }
+            const auto dense = make_dop853_dense_coefficients(state, y_new, h, ks);
+            auto interp = [&](double theta) {
+                return dop853_dense_interpolate(state, dense, theta);
+            };
+            const auto event = find_first_event(events, t_s, h, state, y_new, interp);
+
+            StepResult res;
+            if (event.has_value()) {
+                res.state_end = event->state;
+                res.t_end = event->t_s;
+                res.h_used = event->t_s - t_s;
+                res.event = event;
+            } else {
+                res.state_end = y_new;
+                res.t_end = t_s + h;
+                res.h_used = h;
+            }
+            res.h_next_suggested = h_next;
+            res.accepted = true;
+            return res;
+        }
+
+        const double factor = std::max(kFacMin, kSafetyFactor * std::pow(1.0 / e_norm, kDop853OrderInv));
+        const double h_new = h * factor;
+        if (h_new < 1.0e-15) {
+            StepResult res;
+            res.state_end = state;
+            res.t_end = t_s;
+            res.h_used = 0.0;
+            res.h_next_suggested = h;
+            res.accepted = false;
+            return res;
+        }
+        h = h_new;
+    }
+
+    StepResult res;
+    res.state_end = state;
+    res.t_end = t_s;
+    res.h_used = 0.0;
+    res.h_next_suggested = h;
+    res.accepted = false;
+    return res;
+}
 
 StepResult Rk4IntegratorAdapter::step(
     const ExtendedState& state,
@@ -492,6 +1009,9 @@ std::unique_ptr<IIntegrator> make_integrator(
 {
     if (type == "dopri5") {
         return std::make_unique<Dopri5Integrator>(tolerances);
+    }
+    if (type == "dop853") {
+        return std::make_unique<Dop853Integrator>(tolerances);
     }
     if (type == "rk4" || type == "ode") {
         return std::make_unique<Rk4IntegratorAdapter>();

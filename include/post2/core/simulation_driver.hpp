@@ -9,6 +9,15 @@ public:
     StateLog propagate(const SimulationConfig& config, const StateLog& initial_state_log) const;
 };
 
+class CoastPropagator {
+public:
+    StateLog propagate(
+        const CaseConfig& case_config,
+        const StateLog& source_log,
+        double horizon_s,
+        int sample_count) const;
+};
+
 class LaunchVehicleEvent {
 public:
     bool has_actions_before_propagation() const;
