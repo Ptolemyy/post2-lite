@@ -552,6 +552,26 @@ bool parse_options(int argc, char** argv, Options* options)
                 std::cerr << "Invalid --dry-mass value: " << value << '\n';
                 return false;
             }
+        } else if (arg == "--rigid-body-inertia") {
+            if (!parse_double(value, &options->config.vehicle.rigid_body.moment_of_inertia_kgm2)) {
+                std::cerr << "Invalid --rigid-body-inertia value: " << value << '\n';
+                return false;
+            }
+        } else if (arg == "--rigid-body-attitude") {
+            if (!parse_double(value, &options->config.vehicle.rigid_body.initial_attitude_rad)) {
+                std::cerr << "Invalid --rigid-body-attitude value: " << value << '\n';
+                return false;
+            }
+        } else if (arg == "--rigid-body-omega") {
+            if (!parse_double(value, &options->config.vehicle.rigid_body.initial_angular_velocity_radps)) {
+                std::cerr << "Invalid --rigid-body-omega value: " << value << '\n';
+                return false;
+            }
+        } else if (arg == "--engine-moment-arm") {
+            if (!parse_double(value, &options->config.vehicle.rigid_body.engine_moment_arm_m)) {
+                std::cerr << "Invalid --engine-moment-arm value: " << value << '\n';
+                return false;
+            }
         } else if (arg == "--engine-enabled" || arg == "--thrust-enabled") {
             if (!parse_bool(value, &options->config.vehicle.engine.enabled)) {
                 std::cerr << "Invalid --engine-enabled value: " << value << '\n';
@@ -822,9 +842,9 @@ bool write_exports(
         const post2::core::CaseConfig orbit_case = options.has_case_config
             ? options.case_config
             : post2::core::case_from_simulation_config(options.config);
-        const post2::core::StateLog predicted =
-            post2::core::predict_orbit_path(orbit_case, result.state_log);
-        if (!post2::core::write_svg_file(options.svg_path, result.state_log, &predicted, &error)) {
+        const std::vector<post2::core::PredictedTrajectoryPath> predicted_paths =
+            post2::core::predict_phase_end_trajectory_paths(orbit_case, result.state_log);
+        if (!post2::core::write_svg_file(options.svg_path, result.state_log, predicted_paths, &error)) {
             std::cerr << "SVG export failed: " << error << '\n';
             return false;
         }

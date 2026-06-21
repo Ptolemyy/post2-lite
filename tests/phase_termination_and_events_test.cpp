@@ -592,6 +592,138 @@ int test_thrust_fraction_termination_ends_on_spool()
     return 0;
 }
 
+int test_detached_controller_mounts_only_its_vehicle()
+{
+    post2::core::CaseConfig config = make_base_case();
+    config.step_s = 1.0;
+    config.vehicle.stages.clear();
+
+    post2::vehicle::StageConfig booster;
+    booster.name = "booster";
+    booster.active = true;
+    booster.attached = true;
+    booster.dry_mass_kg = 1000.0;
+    booster.engine.enabled = true;
+    booster.engine.thrust_vac_n = 9806.65;  // 1 kg/s at isp=1000
+    booster.engine.isp_vac_s = 1000.0;
+    booster.engine.feed_tanks = {{"booster", "main"}};
+    booster.tanks = {{"main", "rp1", 50.0, 50.0}};
+
+    post2::vehicle::StageConfig upper;
+    upper.name = "upper";
+    upper.active = true;
+    upper.attached = true;
+    upper.dry_mass_kg = 500.0;
+    upper.engine.enabled = true;
+    upper.engine.thrust_vac_n = 19613.3;
+    upper.engine.isp_vac_s = 1000.0;
+    upper.engine.feed_tanks = {{"upper", "main"}};
+    upper.tanks = {{"main", "rp1", 80.0, 80.0}};
+
+    config.vehicle.stages = {booster, upper};
+    config.vehicle.engine = booster.engine;
+    config.vehicle.tanks = booster.tanks;
+
+    post2::core::PhaseConfig separate;
+    separate.name = "separate";
+    separate.termination = {"time", ">=", 1.0};
+    separate.inherit_initial_state = false;
+    separate.initial_state_eci = post2::core::State{
+        {post2::core::kEarthRadiusM + 200000.0, 0.0, 0.0},
+        {0.0, 7800.0, 0.0},
+    };
+    separate.force_models.thrust = false;
+    separate.force_models.normal_force = false;
+    post2::core::PhaseAction detach;
+    detach.time_s = 0.0;
+    detach.type = "set_stage_attached";
+    detach.value = false;
+    detach.stage_index = 0;
+    detach.stage_name = "booster";
+    separate.actions.push_back(detach);
+
+    post2::core::PhaseConfig fly_booster;
+    fly_booster.name = "booster flyback";
+    fly_booster.controller_stage_index = 0;
+    fly_booster.controller_stage_name = "booster";
+    fly_booster.controller_detached_stage = true;
+    fly_booster.termination = {"time", ">=", 5.0};
+    fly_booster.inherit_initial_state = true;
+    fly_booster.force_models.gravity = false;
+    fly_booster.force_models.thrust = true;
+    fly_booster.force_models.normal_force = false;
+    fly_booster.throttle_model.type = "poly";
+    fly_booster.throttle_model.c0 = 1.0;
+    post2::core::PhaseAction activate;
+    activate.time_s = 0.0;
+    activate.type = "set_stage_active";
+    activate.value = true;
+    activate.stage_index = 0;
+    activate.stage_name = "booster";
+    fly_booster.actions.push_back(activate);
+    post2::core::PhaseAction enable;
+    enable.time_s = 0.0;
+    enable.type = "set_engine_enabled";
+    enable.value = true;
+    fly_booster.actions.push_back(enable);
+
+    config.phases = {separate, fly_booster};
+
+    {
+        const std::string json = post2::core::case_config_to_json(config);
+        post2::core::CaseConfig reloaded;
+        std::string error;
+        if (!post2::core::case_config_from_json(json, &reloaded, &error)) {
+            std::cerr << "detached controller reload failed: " << error << '\n';
+            return 1;
+        }
+        if (reloaded.phases.size() != 2 ||
+            !reloaded.phases[1].controller_detached_stage ||
+            reloaded.phases[1].controller_stage_index != 0 ||
+            reloaded.phases[1].controller_stage_name != "booster") {
+            std::cerr << "detached controller scope did not survive roundtrip\n";
+            return 1;
+        }
+    }
+
+    post2::core::LocalTrajectoryService service;
+    const auto result = service.simulate(config);
+    if (!result.ok) {
+        std::cerr << "detached controller simulation failed: " << result.error << '\n';
+        return 1;
+    }
+
+    const auto& last = result.state_log.back();
+    if (last.phase_name != "booster flyback") {
+        std::cerr << "detached controller did not reach booster phase\n";
+        return 1;
+    }
+    if (last.runtime.stages.size() != 2 ||
+        !last.runtime.stages[0].attached ||
+        last.runtime.stages[1].attached) {
+        std::cerr << "detached controller did not mount only the booster vehicle\n";
+        return 1;
+    }
+    const double booster_remaining = last.runtime.stages[0].tanks[0].remaining_kg;
+    const double upper_remaining = last.runtime.stages[1].tanks[0].remaining_kg;
+    if (booster_remaining > 46.0 || booster_remaining < 44.0) {
+        std::cerr << "detached controller did not burn booster propellant only: "
+                  << booster_remaining << '\n';
+        return 1;
+    }
+    if (std::abs(upper_remaining - 80.0) > 1.0e-9) {
+        std::cerr << "detached controller changed unmounted upper vehicle tank: "
+                  << upper_remaining << '\n';
+        return 1;
+    }
+    if (last.runtime.engine.actual_thrust_n <= 0.0 ||
+        last.runtime.stages[1].engine.actual_thrust_n != 0.0) {
+        std::cerr << "detached controller thrust was not limited to the mounted booster\n";
+        return 1;
+    }
+    return 0;
+}
+
 int main()
 {
     int failures = 0;
@@ -604,6 +736,7 @@ int main()
     failures += test_mission_event_fires_and_deactivates_stage();
     failures += test_continuity_flags_json_roundtrip();
     failures += test_phase_continuity_reanchors_throttle_and_steering();
+    failures += test_detached_controller_mounts_only_its_vehicle();
     if (failures != 0) {
         std::cerr << "phase_termination_and_events_test: " << failures << " case(s) failed\n";
         return 1;

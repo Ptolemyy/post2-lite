@@ -22,6 +22,10 @@ struct EngineCommand {
     // pressure-correction term F(p) = F_vac - p * Ae inside the engine
     // performance model. Zero means vacuum (no correction).
     double ambient_pressure_pa = 0.0;
+    // Single stage controlled by a detached-stage controller. Negative means
+    // no controller filter, which is used by the main-stack controller and
+    // preserves legacy all-attached-stage behavior.
+    int controlled_stage_index = -1;
 };
 
 class EngineActionSchedule {

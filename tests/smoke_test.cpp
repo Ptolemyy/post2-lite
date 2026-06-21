@@ -206,6 +206,10 @@ int main()
     vehicle_config.aero.cd = 0.6;
     vehicle_config.aero.cl = 0.05;
     vehicle_config.aero.aero_table_path = "aero.csv";
+    vehicle_config.rigid_body.moment_of_inertia_kgm2 = 12345.0;
+    vehicle_config.rigid_body.initial_attitude_rad = 0.12;
+    vehicle_config.rigid_body.initial_angular_velocity_radps = -0.03;
+    vehicle_config.rigid_body.engine_moment_arm_m = 4.5;
     vehicle_config.engine.enabled = true;
     vehicle_config.engine.thrust_vac_n = 4500.0;
     vehicle_config.engine.isp_vac_s = 310.0;
@@ -247,7 +251,11 @@ int main()
         loaded_vehicle_config.aero.reference_area_m2 != 12.5 ||
         loaded_vehicle_config.aero.cd != 0.6 ||
         loaded_vehicle_config.aero.cl != 0.05 ||
-        loaded_vehicle_config.aero.aero_table_path != "aero.csv") {
+        loaded_vehicle_config.aero.aero_table_path != "aero.csv" ||
+        loaded_vehicle_config.rigid_body.moment_of_inertia_kgm2 != 12345.0 ||
+        loaded_vehicle_config.rigid_body.initial_attitude_rad != 0.12 ||
+        loaded_vehicle_config.rigid_body.initial_angular_velocity_radps != -0.03 ||
+        loaded_vehicle_config.rigid_body.engine_moment_arm_m != 4.5) {
         std::cerr << "vehicle config roundtrip changed values\n";
         return 1;
     }
@@ -315,6 +323,8 @@ int main()
 
     post2::core::PhaseConfig hdc_phase;
     hdc_phase.name = "hold";
+    hdc_phase.controller_stage_index = 1;
+    hdc_phase.controller_stage_name = "booster";
     hdc_phase.termination.value = 60.0;
     hdc_phase.optimize_enabled = true;
     hdc_phase.inherit_initial_state = false;
@@ -382,6 +392,8 @@ int main()
         loaded_case.vehicle.stages.size() != 2 ||
         loaded_case.vehicle.stages[1].name != "booster" ||
         loaded_case.phases.size() != 2 ||
+        loaded_case.phases[0].controller_stage_index != 1 ||
+        loaded_case.phases[0].controller_stage_name != "booster" ||
         loaded_case.earth_j2 != case_config.earth_j2 ||
         !loaded_case.phases[0].optimize_enabled ||
         loaded_case.phases[1].optimize_enabled ||
@@ -402,6 +414,10 @@ int main()
         loaded_case.vehicle.aero.stage_tables[1].activate_at_min_attached_stage != 1 ||
         loaded_case.vehicle.aero.stage_tables[1].table_path != "aero_stage2.csv" ||
         loaded_case.vehicle.aero.stage_tables[0].reference_area_m2 != 21.2 ||
+        loaded_case.vehicle.rigid_body.moment_of_inertia_kgm2 != 12345.0 ||
+        loaded_case.vehicle.rigid_body.initial_attitude_rad != 0.12 ||
+        loaded_case.vehicle.rigid_body.initial_angular_velocity_radps != -0.03 ||
+        loaded_case.vehicle.rigid_body.engine_moment_arm_m != 4.5 ||
         loaded_case.phases[0].actions.size() != 1 ||
         loaded_case.phases[0].steering_model.azimuth_deg.c0 != 90.0 ||
         loaded_case.phases[1].throttle_model.type != "t2w" ||

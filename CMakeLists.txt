@@ -135,6 +135,12 @@ if(BUILD_TESTING)
     target_link_libraries(post2_integrator_test PRIVATE post2_core)
     add_test(NAME post2_integrator_test COMMAND post2_integrator_test)
 
+    add_executable(post2_dynamics_dof_test
+        tests/dynamics_dof_test.cpp
+    )
+    target_link_libraries(post2_dynamics_dof_test PRIVATE post2_core)
+    add_test(NAME post2_dynamics_dof_test COMMAND post2_dynamics_dof_test)
+
     add_executable(post2_optimization_components_test
         tests/optimization_components_test.cpp
     )

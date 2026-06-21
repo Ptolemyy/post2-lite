@@ -10,6 +10,7 @@
 #include <limits>
 #include <sstream>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace post2::core {
@@ -21,7 +22,8 @@ constexpr const char* kTrajectoryCsvHeader =
     "total_mass_kg,propellant_mass_kg,engine_thrust_n,engine_mass_flow_kgps,"
     "throttle,engine_direction_eci_x,engine_direction_eci_y,engine_direction_eci_z,"
     "ambient_pressure_pa,atmosphere_density_kgpm3,dynamic_pressure_pa,mach_number,"
-    "hold_down_clamp_active,phase_index,phase_name";
+    "hold_down_clamp_active,phase_index,rigid_body_attitude_rad,"
+    "rigid_body_angular_velocity_radps,rigid_body_moment_of_inertia_kgm2,phase_name";
 
 bool parse_double(const std::string& text, double* value)
 {
@@ -83,6 +85,9 @@ void write_trajectory_csv_row(std::ostream& output, const LaunchVehicleStateLogE
         << point.mach_number << ','
         << (point.hold_down_clamp_active ? 1 : 0) << ','
         << point.phase_index << ','
+        << point.rigid_body_attitude_rad << ','
+        << point.rigid_body_angular_velocity_radps << ','
+        << point.rigid_body_moment_of_inertia_kgm2 << ','
         << point.phase_name;
 }
 
@@ -140,6 +145,21 @@ double sx(double x_m, double scale, double center_x)
 double sy(double y_m, double scale, double center_y)
 {
     return center_y - y_m * scale;
+}
+
+std::string color_to_hex(ColorRgb color)
+{
+    color.red = std::clamp(color.red, 0, 255);
+    color.green = std::clamp(color.green, 0, 255);
+    color.blue = std::clamp(color.blue, 0, 255);
+
+    std::ostringstream output;
+    output << '#'
+           << std::hex << std::setfill('0') << std::nouppercase
+           << std::setw(2) << color.red
+           << std::setw(2) << color.green
+           << std::setw(2) << color.blue;
+    return output.str();
 }
 
 } // namespace
@@ -321,18 +341,21 @@ SimulationResult trajectory_from_csv(const std::string& csv)
         //   13         : adds total/prop mass + thrust + mass flow
         //   14         : 13 + hold_down_clamp
         //   15, 16     : 14 + phase_index (+ phase_name)
-        //   23, 24     : current full schema (+ throttle, direction_eci, env, q, mach,
-        //                hold_down_clamp, phase_index, [phase_name])
+        //   23, 24     : full schema before rigid-body state columns.
+        //   26, 27     : current full schema (+ rigid-body attitude/rate/inertia,
+        //                [phase_name])
         if (parts.size() != 9 && parts.size() != 13 && parts.size() != 14 &&
             parts.size() != 15 && parts.size() != 16 &&
-            parts.size() != 23 && parts.size() != 24) {
+            parts.size() != 23 && parts.size() != 24 &&
+            parts.size() != 26 && parts.size() != 27) {
             return {false, "invalid CSV column count at line " + std::to_string(line_number), {}};
         }
 
-        double values[23] = {};
+        double values[26] = {};
         std::size_t numeric_parts = parts.size();
         if (parts.size() == 16) numeric_parts = 15;
         if (parts.size() == 24) numeric_parts = 23;
+        if (parts.size() == 27) numeric_parts = 26;
         for (std::size_t i = 0; i < numeric_parts; ++i) {
             if (!parse_double(parts[i], &values[i])) {
                 return {false, "invalid CSV number at line " + std::to_string(line_number), {}};
@@ -377,7 +400,8 @@ SimulationResult trajectory_from_csv(const std::string& csv)
             entry.phase_index = static_cast<int>(values[14]);
             entry.phase_name = parts.size() == 16 ? parts[15] : "";
             entry.runtime.hold_down_clamp.active = entry.hold_down_clamp_active;
-        } else if (parts.size() == 23 || parts.size() == 24) {
+        } else if (parts.size() == 23 || parts.size() == 24 ||
+                   parts.size() == 26 || parts.size() == 27) {
             apply_mass_thrust();
             entry.throttle = values[13];
             entry.engine_direction_eci = {values[14], values[15], values[16]};
@@ -387,7 +411,17 @@ SimulationResult trajectory_from_csv(const std::string& csv)
             entry.mach_number = values[20];
             entry.hold_down_clamp_active = values[21] != 0.0;
             entry.phase_index = static_cast<int>(values[22]);
-            entry.phase_name = parts.size() == 24 ? parts[23] : "";
+            if (parts.size() == 26 || parts.size() == 27) {
+                entry.rigid_body_attitude_rad = values[23];
+                entry.rigid_body_angular_velocity_radps = values[24];
+                entry.rigid_body_moment_of_inertia_kgm2 = values[25];
+                entry.runtime.vehicle.rigid_body.attitude_rad = values[23];
+                entry.runtime.vehicle.rigid_body.angular_velocity_radps = values[24];
+                entry.runtime.vehicle.rigid_body.moment_of_inertia_kgm2 = values[25];
+                entry.phase_name = parts.size() == 27 ? parts[26] : "";
+            } else {
+                entry.phase_name = parts.size() == 24 ? parts[23] : "";
+            }
             entry.runtime.engine.throttle = entry.throttle;
             entry.runtime.engine.direction_body = entry.engine_direction_eci;
             entry.runtime.hold_down_clamp.active = entry.hold_down_clamp_active;
@@ -435,6 +469,25 @@ bool write_svg_file(
     const StateLog* predicted_orbit,
     std::string* error)
 {
+    std::vector<PredictedTrajectoryPath> predicted_paths;
+    if (predicted_orbit && !predicted_orbit->empty()) {
+        PredictedTrajectoryPath predicted;
+        predicted.state_log = *predicted_orbit;
+        predicted.source_phase_index = predicted_orbit->front().phase_index - 1;
+        predicted.source_phase_name = "terminal";
+        predicted.controller_name = "root stack";
+        predicted.color = {13, 148, 136};
+        predicted_paths.push_back(std::move(predicted));
+    }
+    return write_svg_file(path, state_log, predicted_paths, error);
+}
+
+bool write_svg_file(
+    const std::string& path,
+    const StateLog& state_log,
+    const std::vector<PredictedTrajectoryPath>& predicted_paths,
+    std::string* error)
+{
     if (state_log.empty()) {
         if (error) {
             *error = "StateLog is empty";
@@ -450,7 +503,15 @@ bool write_svg_file(
         return false;
     }
 
-    const bool has_predicted = predicted_orbit && !predicted_orbit->empty();
+    const PredictedTrajectoryPath* marker_prediction = nullptr;
+    int predicted_count = 0;
+    for (const auto& predicted : predicted_paths) {
+        if (!predicted.state_log.empty()) {
+            marker_prediction = &predicted;
+            ++predicted_count;
+        }
+    }
+    const bool has_predicted = marker_prediction != nullptr;
 
     constexpr int width = 1000;
     constexpr int height = 760;
@@ -461,8 +522,10 @@ bool write_svg_file(
     // The predicted orbit reaches the far side of Earth, so the drawing must
     // scale to whichever extent is larger (ascent or full orbit).
     double extent_m = max_abs_projected_xy(state_log, projector);
-    if (has_predicted) {
-        extent_m = std::max(extent_m, max_abs_projected_xy(*predicted_orbit, projector));
+    for (const auto& predicted : predicted_paths) {
+        if (!predicted.state_log.empty()) {
+            extent_m = std::max(extent_m, max_abs_projected_xy(predicted.state_log, projector));
+        }
     }
     const double scale = (std::min(width, height) * 0.5 - margin) / extent_m;
     const double earth_radius_px = kEarthRadiusM * scale;
@@ -478,12 +541,16 @@ bool write_svg_file(
     output << "<circle cx=\"" << center_x << "\" cy=\"" << center_y << "\" r=\"" << earth_radius_px
            << "\" fill=\"#2563eb\" opacity=\"0.22\" stroke=\"#1d4ed8\" stroke-width=\"2\"/>\n";
 
-    // Integrated predicted orbit (drawn behind the ascent), in teal and dashed
-    // to set it apart from the solid red powered ascent.
-    if (has_predicted) {
-        output << "<polyline fill=\"none\" stroke=\"#0d9488\" stroke-width=\"2\" "
+    // Integrated phase-end predictions are drawn behind the ascent as dashed
+    // paths, with one colour per controller.
+    for (const auto& predicted : predicted_paths) {
+        if (predicted.state_log.empty()) {
+            continue;
+        }
+        output << "<polyline fill=\"none\" stroke=\"" << color_to_hex(predicted.color)
+               << "\" stroke-width=\"2\" stroke-opacity=\"0.82\" "
                   "stroke-dasharray=\"7 5\" points=\"";
-        for (const auto& point : predicted_orbit->entries()) {
+        for (const auto& point : predicted.state_log.entries()) {
             const PlanePoint projected = projector.project(point.state.position_m);
             output << sx(projected.x_m, scale, center_x) << ','
                    << sy(projected.y_m, scale, center_y) << ' ';
@@ -518,7 +585,7 @@ bool write_svg_file(
     if (has_predicted) {
         const LaunchVehicleStateLogEntry* apo = nullptr;
         const LaunchVehicleStateLogEntry* peri = nullptr;
-        for (const auto& point : predicted_orbit->entries()) {
+        for (const auto& point : marker_prediction->state_log.entries()) {
             if (!apo || point.altitude_m > apo->altitude_m) {
                 apo = &point;
             }
@@ -550,12 +617,39 @@ bool write_svg_file(
            << "state log entries: " << state_log.size()
            << " | end t: " << last.time_s
            << " s | end altitude: " << last.altitude_m / 1000.0
-           << " km | end speed: " << last.speed_mps
-           << " m/s</text>\n";
+               << " km | end speed: " << last.speed_mps
+               << " m/s</text>\n";
     if (has_predicted) {
         output << "<text x=\"32\" y=\"92\" fill=\"#0d9488\" font-family=\"Segoe UI, Arial\" font-size=\"14\">"
-               << "predicted orbit (integrated)  |  A apoapsis: " << apoapsis_km
+               << "phase-end predictions: " << predicted_count
+               << " dashed path(s)  |  A apoapsis: " << apoapsis_km
                << " km  |  P periapsis: " << periapsis_km << " km</text>\n";
+        int legend_y = 116;
+        std::vector<std::string> legend_keys;
+        for (const auto& predicted : predicted_paths) {
+            if (predicted.state_log.empty()) {
+                continue;
+            }
+            const std::string key = predicted.controller_name + "|" + color_to_hex(predicted.color);
+            if (std::find(legend_keys.begin(), legend_keys.end(), key) != legend_keys.end()) {
+                continue;
+            }
+            legend_keys.push_back(key);
+            const std::string color = color_to_hex(predicted.color);
+            output << "<line x1=\"32\" y1=\"" << legend_y - 5
+                   << "\" x2=\"64\" y2=\"" << legend_y - 5
+                   << "\" stroke=\"" << color
+                   << "\" stroke-width=\"2\" stroke-dasharray=\"7 5\"/>\n";
+            output << "<text x=\"72\" y=\"" << legend_y
+                   << "\" fill=\"" << color
+                   << "\" font-family=\"Segoe UI, Arial\" font-size=\"12\">"
+                   << sanitize_field(predicted.controller_name)
+                   << "</text>\n";
+            legend_y += 16;
+            if (legend_y > 184) {
+                break;
+            }
+        }
     }
     output << "</svg>\n";
 

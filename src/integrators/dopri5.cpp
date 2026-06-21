@@ -256,6 +256,10 @@ ExtendedState add_state_scaled_derivative(
     ExtendedState out;
     out.motion.position_m = s.motion.position_m + d.motion_dot.d_position_mps * scale;
     out.motion.velocity_mps = s.motion.velocity_mps + d.motion_dot.d_velocity_mps2 * scale;
+    out.rigid_body = s.rigid_body;
+    out.rigid_body.attitude_rad += d.rigid_body_dot.attitude_radps * scale;
+    out.rigid_body.angular_velocity_radps +=
+        d.rigid_body_dot.angular_acceleration_radps2 * scale;
     out.tank_masses_kg.resize(s.tank_masses_kg.size());
     const std::size_t n = std::min(s.tank_masses_kg.size(), d.tank_mass_dots_kgps.size());
     for (std::size_t i = 0; i < n; ++i) {
@@ -284,6 +288,9 @@ ExtendedState combine_stages(
         const double scale = h * coefs[s];
         out.motion.position_m = out.motion.position_m + ks[s].motion_dot.d_position_mps * scale;
         out.motion.velocity_mps = out.motion.velocity_mps + ks[s].motion_dot.d_velocity_mps2 * scale;
+        out.rigid_body.attitude_rad += ks[s].rigid_body_dot.attitude_radps * scale;
+        out.rigid_body.angular_velocity_radps +=
+            ks[s].rigid_body_dot.angular_acceleration_radps2 * scale;
         const std::size_t n = std::min(out.tank_masses_kg.size(), ks[s].tank_mass_dots_kgps.size());
         for (std::size_t i = 0; i < n; ++i) {
             out.tank_masses_kg[i] += ks[s].tank_mass_dots_kgps[i] * scale;
@@ -295,6 +302,7 @@ ExtendedState combine_stages(
 ExtendedState zero_state_like(const ExtendedState& ref)
 {
     ExtendedState out;
+    out.rigid_body.moment_of_inertia_kgm2 = ref.rigid_body.moment_of_inertia_kgm2;
     out.tank_masses_kg.assign(ref.tank_masses_kg.size(), 0.0);
     return out;
 }
@@ -304,6 +312,10 @@ ExtendedState state_delta(const ExtendedState& a, const ExtendedState& b)
     ExtendedState out;
     out.motion.position_m = a.motion.position_m - b.motion.position_m;
     out.motion.velocity_mps = a.motion.velocity_mps - b.motion.velocity_mps;
+    out.rigid_body.attitude_rad = a.rigid_body.attitude_rad - b.rigid_body.attitude_rad;
+    out.rigid_body.angular_velocity_radps =
+        a.rigid_body.angular_velocity_radps - b.rigid_body.angular_velocity_radps;
+    out.rigid_body.moment_of_inertia_kgm2 = b.rigid_body.moment_of_inertia_kgm2;
     out.tank_masses_kg.assign(b.tank_masses_kg.size(), 0.0);
     for (std::size_t i = 0; i < out.tank_masses_kg.size(); ++i) {
         const double av = i < a.tank_masses_kg.size() ? a.tank_masses_kg[i] : 0.0;
@@ -316,6 +328,8 @@ void add_scaled_state_in_place(ExtendedState* out, const ExtendedState& delta, d
 {
     out->motion.position_m = out->motion.position_m + delta.motion.position_m * scale;
     out->motion.velocity_mps = out->motion.velocity_mps + delta.motion.velocity_mps * scale;
+    out->rigid_body.attitude_rad += delta.rigid_body.attitude_rad * scale;
+    out->rigid_body.angular_velocity_radps += delta.rigid_body.angular_velocity_radps * scale;
     const std::size_t n = std::min(out->tank_masses_kg.size(), delta.tank_masses_kg.size());
     for (std::size_t i = 0; i < n; ++i) {
         out->tank_masses_kg[i] += delta.tank_masses_kg[i] * scale;
@@ -326,6 +340,8 @@ void scale_state_in_place(ExtendedState* out, double scale)
 {
     out->motion.position_m = out->motion.position_m * scale;
     out->motion.velocity_mps = out->motion.velocity_mps * scale;
+    out->rigid_body.attitude_rad *= scale;
+    out->rigid_body.angular_velocity_radps *= scale;
     for (double& mass : out->tank_masses_kg) {
         mass *= scale;
     }
@@ -339,6 +355,9 @@ ExtendedState derivative_delta(
     ExtendedState out = zero_state_like(ref);
     out.motion.position_m = derivative.motion_dot.d_position_mps * scale;
     out.motion.velocity_mps = derivative.motion_dot.d_velocity_mps2 * scale;
+    out.rigid_body.attitude_rad = derivative.rigid_body_dot.attitude_radps * scale;
+    out.rigid_body.angular_velocity_radps =
+        derivative.rigid_body_dot.angular_acceleration_radps2 * scale;
     const std::size_t n = std::min(out.tank_masses_kg.size(), derivative.tank_mass_dots_kgps.size());
     for (std::size_t i = 0; i < n; ++i) {
         out.tank_masses_kg[i] = derivative.tank_mass_dots_kgps[i] * scale;
@@ -471,6 +490,22 @@ double error_norm(
         sum_sq += sq(h * err_i / sc);
         count += 1;
     }
+    // 2.5-DOF rigid-body attitude state.
+    {
+        const double s_att = scale(
+            tol.atol_attitude_rad,
+            tol.rtol,
+            y.rigid_body.attitude_rad,
+            y_new.rigid_body.attitude_rad);
+        const double s_omega = scale(
+            tol.atol_angular_velocity_radps,
+            tol.rtol,
+            y.rigid_body.angular_velocity_radps,
+            y_new.rigid_body.angular_velocity_radps);
+        sum_sq += sq(h * err_per_unit_h.rigid_body_dot.attitude_radps / s_att);
+        sum_sq += sq(h * err_per_unit_h.rigid_body_dot.angular_acceleration_radps2 / s_omega);
+        count += 2;
+    }
 
     if (count == 0) {
         return 0.0;
@@ -495,6 +530,16 @@ double dop853_error_norm(
                 ? ks[i].motion_dot.d_velocity_mps2
                 : ks[i].motion_dot.d_position_mps;
             out = out + v * coefs[i];
+        }
+        return out;
+    };
+    auto accum_scalar = [&ks](const std::array<double, kDop853Stages + 1>& coefs, bool angular_velocity) {
+        double out = 0.0;
+        for (std::size_t i = 0; i < coefs.size(); ++i) {
+            const double v = angular_velocity
+                ? ks[i].rigid_body_dot.angular_acceleration_radps2
+                : ks[i].rigid_body_dot.attitude_radps;
+            out += v * coefs[i];
         }
         return out;
     };
@@ -551,6 +596,28 @@ double dop853_error_norm(
             &err5_sq, &err3_sq);
         ++count;
     }
+
+    add_component(
+        accum_scalar(kDop853E5, false),
+        accum_scalar(kDop853E3, false),
+        scale(
+            tol.atol_attitude_rad,
+            tol.rtol,
+            y.rigid_body.attitude_rad,
+            y_new.rigid_body.attitude_rad),
+        &err5_sq,
+        &err3_sq);
+    add_component(
+        accum_scalar(kDop853E5, true),
+        accum_scalar(kDop853E3, true),
+        scale(
+            tol.atol_angular_velocity_radps,
+            tol.rtol,
+            y.rigid_body.angular_velocity_radps,
+            y_new.rigid_body.angular_velocity_radps),
+        &err5_sq,
+        &err3_sq);
+    count += 2;
 
     if (count == 0 || (err5_sq == 0.0 && err3_sq == 0.0)) {
         return 0.0;
@@ -768,6 +835,20 @@ StepResult Dopri5Integrator::step(
             k5.motion_dot.d_velocity_mps2 * kE5 +
             k6.motion_dot.d_velocity_mps2 * kE6 +
             k7.motion_dot.d_velocity_mps2 * kE7;
+        err.rigid_body_dot.attitude_radps =
+            k1.rigid_body_dot.attitude_radps * kE1 +
+            k3.rigid_body_dot.attitude_radps * kE3 +
+            k4.rigid_body_dot.attitude_radps * kE4 +
+            k5.rigid_body_dot.attitude_radps * kE5 +
+            k6.rigid_body_dot.attitude_radps * kE6 +
+            k7.rigid_body_dot.attitude_radps * kE7;
+        err.rigid_body_dot.angular_acceleration_radps2 =
+            k1.rigid_body_dot.angular_acceleration_radps2 * kE1 +
+            k3.rigid_body_dot.angular_acceleration_radps2 * kE3 +
+            k4.rigid_body_dot.angular_acceleration_radps2 * kE4 +
+            k5.rigid_body_dot.angular_acceleration_radps2 * kE5 +
+            k6.rigid_body_dot.angular_acceleration_radps2 * kE6 +
+            k7.rigid_body_dot.angular_acceleration_radps2 * kE7;
         err.tank_mass_dots_kgps.assign(state.tank_masses_kg.size(), 0.0);
         for (std::size_t i = 0; i < err.tank_mass_dots_kgps.size(); ++i) {
             auto val = [&](const ExtendedDerivative& d) {
@@ -972,6 +1053,13 @@ StepResult Rk4IntegratorAdapter::step(
             state.motion.position_m * (1.0 - theta) + y_new.motion.position_m * theta;
         out.motion.velocity_mps =
             state.motion.velocity_mps * (1.0 - theta) + y_new.motion.velocity_mps * theta;
+        out.rigid_body = state.rigid_body;
+        out.rigid_body.attitude_rad =
+            state.rigid_body.attitude_rad * (1.0 - theta) +
+            y_new.rigid_body.attitude_rad * theta;
+        out.rigid_body.angular_velocity_radps =
+            state.rigid_body.angular_velocity_radps * (1.0 - theta) +
+            y_new.rigid_body.angular_velocity_radps * theta;
         out.tank_masses_kg.resize(state.tank_masses_kg.size());
         for (std::size_t i = 0; i < out.tank_masses_kg.size(); ++i) {
             const double y0 = state.tank_masses_kg[i];

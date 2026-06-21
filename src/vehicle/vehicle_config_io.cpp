@@ -340,6 +340,23 @@ bool validate_aero_config(const AeroConfig& aero, std::string* error)
     return true;
 }
 
+bool validate_rigid_body_config(const RigidBodyConfig& rigid_body, std::string* error)
+{
+    if (rigid_body.moment_of_inertia_kgm2 < 0.0) {
+        if (error) {
+            *error = "rigid_body.moment_of_inertia_kgm2 cannot be negative";
+        }
+        return false;
+    }
+    if (rigid_body.engine_moment_arm_m < 0.0) {
+        if (error) {
+            *error = "rigid_body.engine_moment_arm_m cannot be negative";
+        }
+        return false;
+    }
+    return true;
+}
+
 } // namespace
 
 VehicleConfig default_vehicle_config()
@@ -375,7 +392,8 @@ bool validate_vehicle_config(const VehicleConfig& config, std::string* error)
         return false;
     }
     if (!validate_engine_config(config.engine, "engine", error) ||
-        !validate_tanks(config.tanks, "vehicle", error)) {
+        !validate_tanks(config.tanks, "vehicle", error) ||
+        !validate_rigid_body_config(config.rigid_body, error)) {
         return false;
     }
     if (!validate_aero_config(config.aero, error)) {
@@ -549,6 +567,14 @@ std::string vehicle_config_to_text(const VehicleConfig& config)
     output << "format=post2_vehicle_config_v1\n";
     output << "name=" << normalized.name << '\n';
     output << "dry_mass_kg=" << normalized.dry_mass_kg << '\n';
+    output << "rigid_body.moment_of_inertia_kgm2="
+           << normalized.rigid_body.moment_of_inertia_kgm2 << '\n';
+    output << "rigid_body.initial_attitude_rad="
+           << normalized.rigid_body.initial_attitude_rad << '\n';
+    output << "rigid_body.initial_angular_velocity_radps="
+           << normalized.rigid_body.initial_angular_velocity_radps << '\n';
+    output << "rigid_body.engine_moment_arm_m="
+           << normalized.rigid_body.engine_moment_arm_m << '\n';
     output << "aero.enabled=" << (normalized.aero.enabled ? "true" : "false") << '\n';
     output << "aero.reference_area_m2=" << normalized.aero.reference_area_m2 << '\n';
     output << "aero.cd=" << normalized.aero.cd << '\n';
@@ -758,6 +784,18 @@ bool vehicle_config_from_text(const std::string& text, VehicleConfig* config, st
     };
 
     if (!set_double("dry_mass_kg", &parsed.dry_mass_kg) ||
+        !set_double(
+            "rigid_body.moment_of_inertia_kgm2",
+            &parsed.rigid_body.moment_of_inertia_kgm2) ||
+        !set_double(
+            "rigid_body.initial_attitude_rad",
+            &parsed.rigid_body.initial_attitude_rad) ||
+        !set_double(
+            "rigid_body.initial_angular_velocity_radps",
+            &parsed.rigid_body.initial_angular_velocity_radps) ||
+        !set_double(
+            "rigid_body.engine_moment_arm_m",
+            &parsed.rigid_body.engine_moment_arm_m) ||
         !set_bool("aero.enabled", &parsed.aero.enabled) ||
         !set_double("aero.reference_area_m2", &parsed.aero.reference_area_m2) ||
         !set_double("aero.cd", &parsed.aero.cd) ||

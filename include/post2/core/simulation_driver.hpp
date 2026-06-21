@@ -50,4 +50,9 @@ StateLog predict_orbit_path(
     const StateLog& source_log,
     int sample_count = 480);
 
+std::vector<PredictedTrajectoryPath> predict_phase_end_trajectory_paths(
+    const CaseConfig& case_config,
+    const StateLog& source_log,
+    int sample_count = 480);
+
 } // namespace post2::core

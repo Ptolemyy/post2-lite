@@ -19,6 +19,10 @@ ExtendedState add_scaled(const ExtendedState& state, const ExtendedDerivative& d
         state.motion.position_m + derivative.motion_dot.d_position_mps * scale,
         state.motion.velocity_mps + derivative.motion_dot.d_velocity_mps2 * scale,
     };
+    out.rigid_body = state.rigid_body;
+    out.rigid_body.attitude_rad += derivative.rigid_body_dot.attitude_radps * scale;
+    out.rigid_body.angular_velocity_radps +=
+        derivative.rigid_body_dot.angular_acceleration_radps2 * scale;
     out.tank_masses_kg.resize(state.tank_masses_kg.size());
     const std::size_t n = std::min(state.tank_masses_kg.size(), derivative.tank_mass_dots_kgps.size());
     for (std::size_t i = 0; i < n; ++i) {
@@ -35,6 +39,7 @@ ExtendedState build_initial_extended(const post2::vehicle::VehicleRuntimeState& 
     ExtendedState state;
     state.motion = runtime.vehicle.motion;
     state.tank_masses_kg = post2::vehicle::read_tank_masses_flat(runtime);
+    state.rigid_body = runtime.vehicle.rigid_body;
     return state;
 }
 
@@ -66,6 +71,18 @@ ExtendedState Rk4OdeIntegrator::step(
         state.motion.position_m + d_position * step_s,
         state.motion.velocity_mps + d_velocity * step_s,
     };
+    const double d_attitude =
+        (k1.rigid_body_dot.attitude_radps +
+         2.0 * (k2.rigid_body_dot.attitude_radps + k3.rigid_body_dot.attitude_radps) +
+         k4.rigid_body_dot.attitude_radps) / 6.0;
+    const double d_angular_velocity =
+        (k1.rigid_body_dot.angular_acceleration_radps2 +
+         2.0 * (k2.rigid_body_dot.angular_acceleration_radps2 +
+                k3.rigid_body_dot.angular_acceleration_radps2) +
+         k4.rigid_body_dot.angular_acceleration_radps2) / 6.0;
+    out.rigid_body = state.rigid_body;
+    out.rigid_body.attitude_rad += d_attitude * step_s;
+    out.rigid_body.angular_velocity_radps += d_angular_velocity * step_s;
     out.tank_masses_kg.assign(state.tank_masses_kg.size(), 0.0);
     for (std::size_t i = 0; i < state.tank_masses_kg.size(); ++i) {
         const double d1 = i < k1.tank_mass_dots_kgps.size() ? k1.tank_mass_dots_kgps[i] : 0.0;
@@ -113,6 +130,7 @@ post2::core::StateLog Rk4OdeIntegrator::integrate(
         runtime = runtime_update(runtime, state, time_s, h);
         state.motion = runtime.vehicle.motion;
         state.tank_masses_kg = post2::vehicle::read_tank_masses_flat(runtime);
+        state.rigid_body = runtime.vehicle.rigid_body;
         state_log.append(runtime);
     }
 

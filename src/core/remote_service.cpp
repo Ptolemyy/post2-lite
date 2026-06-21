@@ -243,7 +243,7 @@ std::string make_remote_request(const SimulationConfig& config)
     post2::vehicle::sync_legacy_vehicle_fields_from_first_stage(&vehicle);
     std::ostringstream output;
     output << std::setprecision(17)
-           << "SIMV4 "
+           << "SIMV5 "
            << config.duration_s << ' '
            << config.step_s << ' '
            << config.initial_altitude_m << ' '
@@ -257,6 +257,10 @@ std::string make_remote_request(const SimulationConfig& config)
            << (config.normal_force.enabled ? 1 : 0) << ' '
            << std::quoted(vehicle.name) << ' '
            << vehicle.dry_mass_kg << ' '
+           << vehicle.rigid_body.moment_of_inertia_kgm2 << ' '
+           << vehicle.rigid_body.initial_attitude_rad << ' '
+           << vehicle.rigid_body.initial_angular_velocity_radps << ' '
+           << vehicle.rigid_body.engine_moment_arm_m << ' '
            << (vehicle.aero.enabled ? 1 : 0) << ' '
            << vehicle.aero.reference_area_m2 << ' '
            << vehicle.aero.cd << ' '
@@ -295,9 +299,10 @@ bool parse_remote_request(const std::string& request, SimulationConfig* config, 
     std::string command;
     SimulationConfig parsed;
     input >> command;
-    if (command != "SIM" && command != "SIMV2" && command != "SIMV3" && command != "SIMV4") {
+    if (command != "SIM" && command != "SIMV2" && command != "SIMV3" &&
+        command != "SIMV4" && command != "SIMV5") {
         if (error) {
-            *error = "expected SIM, SIMV2, SIMV3, or SIMV4 request";
+            *error = "expected SIM, SIMV2, SIMV3, SIMV4, or SIMV5 request";
         }
         return false;
     }
@@ -316,7 +321,7 @@ bool parse_remote_request(const std::string& request, SimulationConfig* config, 
         return false;
     }
 
-    if (command == "SIMV3" || command == "SIMV4") {
+    if (command == "SIMV3" || command == "SIMV4" || command == "SIMV5") {
         int hold_down_clamp_enabled = 0;
         int normal_force_enabled = 1;
         input
@@ -338,14 +343,22 @@ bool parse_remote_request(const std::string& request, SimulationConfig* config, 
         parsed.normal_force.enabled = normal_force_enabled != 0;
     }
 
-    if (command == "SIMV2" || command == "SIMV3" || command == "SIMV4") {
+    if (command == "SIMV2" || command == "SIMV3" ||
+        command == "SIMV4" || command == "SIMV5") {
         int engine_enabled = 0;
         int aero_enabled = 0;
         std::size_t tank_count = 0;
         input
             >> std::quoted(parsed.vehicle.name)
             >> parsed.vehicle.dry_mass_kg;
-        if (command == "SIMV4") {
+        if (command == "SIMV5") {
+            input
+                >> parsed.vehicle.rigid_body.moment_of_inertia_kgm2
+                >> parsed.vehicle.rigid_body.initial_attitude_rad
+                >> parsed.vehicle.rigid_body.initial_angular_velocity_radps
+                >> parsed.vehicle.rigid_body.engine_moment_arm_m;
+        }
+        if (command == "SIMV4" || command == "SIMV5") {
             input
                 >> aero_enabled
                 >> parsed.vehicle.aero.reference_area_m2

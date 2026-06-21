@@ -18,6 +18,8 @@ namespace post2::integrators {
 //                     position components (m).
 //  atol_velocity_mps  same for velocity components (m/s).
 //  atol_tank_mass_kg  same for per-tank propellant mass components (kg).
+//  atol_attitude_rad  same for the 2.5-DOF pitch attitude state (rad).
+//  atol_angular_velocity_radps same for 2.5-DOF pitch rate (rad/s).
 //
 // The component-wise scale used in the embedded-error WRMS norm is:
 //   scale_i = atol_group(i) + rtol * max(|y_old_i|, |y_new_i|).
@@ -26,6 +28,8 @@ struct IntegratorTolerances {
     double atol_position_m = 1.0e-3;
     double atol_velocity_mps = 1.0e-6;
     double atol_tank_mass_kg = 1.0e-3;
+    double atol_attitude_rad = 1.0e-9;
+    double atol_angular_velocity_radps = 1.0e-9;
 };
 
 // A continuous event: integrator watches the sign of g(t, state) along the

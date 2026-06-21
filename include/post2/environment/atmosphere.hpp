@@ -43,9 +43,12 @@ private:
     double scale_height_m_ = 7200.0;
 };
 
-// U.S. Standard Atmosphere 1976, valid 0..86 km geometric altitude. Returns
-// density, pressure, temperature and speed of sound at the given geometric
-// altitude. Above 86 km the lowest-density layer value is clamped (near-vacuum).
+// U.S. Standard Atmosphere 1976. From 0..86 km uses the analytic geopotential
+// layers (density, pressure, temperature, speed of sound). Above 86 km the
+// density continues with the Vallado piecewise-exponential bands (Table 8-4),
+// valid to ~1000 km; pressure/temperature/speed-of-sound there are a continuous
+// near-vacuum continuation (negligible for the dynamics). Returns the sample at
+// the given geometric altitude.
 AtmosphereSample us_standard_1976(double altitude_m);
 
 // Dynamic viscosity of air via Sutherland's law [Pa.s], for Reynolds numbers.

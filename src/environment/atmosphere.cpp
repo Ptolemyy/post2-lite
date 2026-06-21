@@ -39,12 +39,83 @@ constexpr StdAtmoLayer kStdLayers[] = {
     {51000.0, 270.65, -0.0028, 66.93887},
     {71000.0, 214.65, -0.002,  3.956420},
 };
+// Top of the analytic geopotential layers == 86 km geometric altitude.
 constexpr double kStdTopGeopotentialM = 84852.0;
+constexpr double kStdTopGeometricM = 86000.0;
+// USSA76 temperature at 86 km (top of the molecular-scale region). Held constant
+// above 86 km so pressure and speed of sound stay continuous and finite; both
+// are negligible for thrust/drag at those altitudes (p ~ 0.37 Pa and falling).
+constexpr double kTop86kmTemperatureK = 186.946;
+
+// Vallado, "Fundamentals of Astrodynamics and Applications", Table 8-4:
+// piecewise-exponential fit to the USSA76 density from 86 km to 1000 km. Each
+// band gives rho(h) = base_density * exp(-(h - base_alt_km) / scale_km) for
+// h (geometric, km) in [base_alt_km, next band). This is the standard
+// approximation used for upper-atmosphere drag / orbital-decay work; without it
+// the model would freeze density at the ~86 km value (off by ~5 orders of
+// magnitude near 200 km).
+struct ExpDensityBand {
+    double base_alt_km;
+    double base_density_kgpm3;
+    double scale_km;
+};
+constexpr ExpDensityBand kUpperDensityBands[] = {
+    {80.0,   1.905e-5,  5.799},
+    {90.0,   3.396e-6,  5.382},
+    {100.0,  5.297e-7,  5.877},
+    {110.0,  9.661e-8,  7.263},
+    {120.0,  2.438e-8,  9.473},
+    {130.0,  8.484e-9,  12.636},
+    {140.0,  3.845e-9,  16.149},
+    {150.0,  2.070e-9,  22.523},
+    {180.0,  5.464e-10, 29.740},
+    {200.0,  2.789e-10, 37.105},
+    {250.0,  7.248e-11, 45.546},
+    {300.0,  2.418e-11, 53.628},
+    {350.0,  9.518e-12, 53.298},
+    {400.0,  3.725e-12, 58.515},
+    {450.0,  1.585e-12, 60.828},
+    {500.0,  6.967e-13, 63.822},
+    {600.0,  1.454e-13, 71.835},
+    {700.0,  3.614e-14, 88.667},
+    {800.0,  1.170e-14, 124.64},
+    {900.0,  5.245e-15, 181.05},
+    {1000.0, 3.019e-15, 268.00},
+};
+
+// Density above 86 km from the piecewise-exponential bands. Extrapolates with
+// the top (1000 km) band above 1000 km.
+double upper_atmosphere_density(double altitude_km) {
+    const ExpDensityBand* band = &kUpperDensityBands[0];
+    for (const auto& candidate : kUpperDensityBands) {
+        if (altitude_km >= candidate.base_alt_km) {
+            band = &candidate;
+        }
+    }
+    return band->base_density_kgpm3 *
+           std::exp(-(altitude_km - band->base_alt_km) / band->scale_km);
+}
 
 } // namespace
 
 AtmosphereSample us_standard_1976(double altitude_m) {
     const double z = std::max(altitude_m, 0.0);
+
+    // Above 86 km the analytic geopotential layers stop; continue the density
+    // decay with the Vallado piecewise-exponential bands instead of freezing at
+    // the 86 km value. Pressure/temperature/speed-of-sound there are negligible
+    // for the dynamics, so we hold the 86 km boundary temperature for continuity.
+    if (z > kStdTopGeometricM) {
+        AtmosphereSample sample;
+        sample.density_kgpm3 = upper_atmosphere_density(z / 1000.0);
+        sample.temperature_k = kTop86kmTemperatureK;
+        sample.pressure_pa =
+            sample.density_kgpm3 * kSpecificGasConstantJPerKgK * kTop86kmTemperatureK;
+        sample.speed_of_sound_mps =
+            std::sqrt(kGamma * kSpecificGasConstantJPerKgK * kTop86kmTemperatureK);
+        return sample;
+    }
+
     // Geometric -> geopotential altitude.
     double h = kGeopotentialEarthRadiusM * z / (kGeopotentialEarthRadiusM + z);
     h = std::min(h, kStdTopGeopotentialM);

@@ -29,6 +29,18 @@ namespace post2::core {
 
 namespace {
 
+constexpr ColorRgb kRootStackPredictionColor{13, 148, 136};
+constexpr ColorRgb kControllerPredictionColors[] = {
+    {37, 99, 235},
+    {219, 39, 119},
+    {245, 158, 11},
+    {22, 163, 74},
+    {124, 58, 237},
+    {234, 88, 12},
+    {14, 165, 233},
+    {190, 24, 93},
+};
+
 std::string lowercase(std::string text)
 {
     std::transform(text.begin(), text.end(), text.begin(), [](unsigned char ch) {
@@ -77,6 +89,135 @@ bool trigger_uses_event_path(const TriggerCondition& trigger)
         trigger.type == "sma_m" ||
         trigger.type == "thrust_fraction" ||
         trigger.type == "time";
+}
+
+int phase_controller_stage_index(const CaseConfig& case_config, const PhaseConfig& phase)
+{
+    const std::vector<post2::vehicle::StageConfig> stages =
+        post2::vehicle::effective_stage_configs(case_config.vehicle);
+    if (stages.empty()) {
+        return -1;
+    }
+    if (phase.controller_stage_index >= 0 &&
+        static_cast<std::size_t>(phase.controller_stage_index) < stages.size()) {
+        return phase.controller_stage_index;
+    }
+    if (!phase.controller_stage_name.empty()) {
+        for (std::size_t i = 0; i < stages.size(); ++i) {
+            if (stages[i].name == phase.controller_stage_name) {
+                return static_cast<int>(i);
+            }
+        }
+    }
+    return static_cast<int>(stages.size() - 1);
+}
+
+int phase_controlled_stage_index(const CaseConfig& case_config, const PhaseConfig& phase)
+{
+    return phase.controller_detached_stage
+        ? phase_controller_stage_index(case_config, phase)
+        : -1;
+}
+
+std::string prediction_controller_name(
+    const CaseConfig& case_config,
+    const PhaseConfig& phase,
+    int controller_stage_index)
+{
+    if (!phase.controller_detached_stage) {
+        return "root stack";
+    }
+    const std::vector<post2::vehicle::StageConfig> stages =
+        post2::vehicle::effective_stage_configs(case_config.vehicle);
+    if (controller_stage_index >= 0 &&
+        static_cast<std::size_t>(controller_stage_index) < stages.size()) {
+        return stages[static_cast<std::size_t>(controller_stage_index)].name;
+    }
+    if (!phase.controller_stage_name.empty()) {
+        return phase.controller_stage_name;
+    }
+    return "detached controller";
+}
+
+ColorRgb prediction_color_for_controller(
+    bool detached_controller,
+    int controller_stage_index)
+{
+    if (!detached_controller) {
+        return kRootStackPredictionColor;
+    }
+    const int index = std::max(0, controller_stage_index);
+    return kControllerPredictionColors[
+        static_cast<std::size_t>(index) %
+        (sizeof(kControllerPredictionColors) / sizeof(kControllerPredictionColors[0]))];
+}
+
+void sync_engine_from_mounted_stage(
+    post2::vehicle::VehicleRuntimeState* runtime,
+    int preferred_stage_index = -1)
+{
+    if (!runtime || runtime->stages.empty()) {
+        return;
+    }
+    if (preferred_stage_index >= 0 &&
+        static_cast<std::size_t>(preferred_stage_index) < runtime->stages.size()) {
+        runtime->engine = runtime->stages[static_cast<std::size_t>(preferred_stage_index)].engine;
+        return;
+    }
+    for (const auto& stage : runtime->stages) {
+        if (stage.attached && stage.active) {
+            runtime->engine = stage.engine;
+            return;
+        }
+    }
+    for (const auto& stage : runtime->stages) {
+        if (stage.attached) {
+            runtime->engine = stage.engine;
+            return;
+        }
+    }
+    runtime->engine = runtime->stages.front().engine;
+}
+
+void mount_phase_controller_vehicle(
+    const PhaseConfig& phase,
+    const CaseConfig& case_config,
+    post2::vehicle::VehicleRuntimeState* runtime)
+{
+    if (!runtime || runtime->stages.empty()) {
+        return;
+    }
+
+    if (!phase.controller_detached_stage) {
+        post2::vehicle::refresh_vehicle_masses(runtime);
+        sync_engine_from_mounted_stage(runtime);
+        return;
+    }
+
+    const int controlled_stage_index = phase_controller_stage_index(case_config, phase);
+    if (controlled_stage_index < 0 ||
+        static_cast<std::size_t>(controlled_stage_index) >= runtime->stages.size()) {
+        return;
+    }
+
+    const std::size_t controlled = static_cast<std::size_t>(controlled_stage_index);
+    for (std::size_t i = 0; i < runtime->stages.size(); ++i) {
+        auto& stage = runtime->stages[i];
+        const bool mounted = i == controlled;
+        stage.attached = mounted;
+        if (!mounted) {
+            stage.active = false;
+            stage.engine.firing = false;
+            stage.engine.throttle = 0.0;
+            stage.engine.commanded_thrust_n = 0.0;
+            stage.engine.actual_thrust_n = 0.0;
+            stage.engine.mass_flow_kgps = 0.0;
+            stage.engine.spool_throttle = 0.0;
+            stage.engine.ignition_time_s = -1.0;
+        }
+    }
+    post2::vehicle::refresh_vehicle_masses(runtime);
+    sync_engine_from_mounted_stage(runtime, controlled_stage_index);
 }
 
 // Specific orbital quantity from an inertial state, used by the orbital-element
@@ -284,6 +425,7 @@ bool trigger_condition_is_satisfied(
     const post2::integrators::ExtendedState state{
         runtime.vehicle.motion,
         post2::vehicle::read_tank_masses_flat(runtime),
+        runtime.vehicle.rigid_body,
     };
     const double g = probe.g(runtime.time_s, state);
     return g >= 0.0;
@@ -309,6 +451,230 @@ Vec3 cross_product(const Vec3& lhs, const Vec3& rhs)
         lhs.z * rhs.x - lhs.x * rhs.z,
         lhs.x * rhs.y - lhs.y * rhs.x,
     };
+}
+
+Vec3 normalized_or(const Vec3& value, const Vec3& fallback)
+{
+    const double length = post2::vehicle::norm(value);
+    if (length <= 1.0e-12) {
+        return fallback;
+    }
+    return value / length;
+}
+
+struct DynamicsPlane {
+    Vec3 normal{0.0, 0.0, 1.0};
+    Vec3 axis_u{1.0, 0.0, 0.0};
+    Vec3 axis_v{0.0, 1.0, 0.0};
+    bool enabled = false;
+};
+
+bool two_point_five_dof(DynamicsDof dof)
+{
+    return dof == DynamicsDof::TwoPointFiveDof;
+}
+
+Vec3 project_onto_plane(const Vec3& value, const DynamicsPlane& plane)
+{
+    if (!plane.enabled) {
+        return value;
+    }
+    return value - plane.normal * post2::vehicle::dot(value, plane.normal);
+}
+
+void set_two_point_five_dof_plane_basis(
+    DynamicsPlane* plane,
+    const State& state,
+    const Vec3& direction_hint_eci)
+{
+    if (!plane || !plane->enabled) {
+        return;
+    }
+
+    Vec3 axis_u = project_onto_plane(state.position_m, *plane);
+    if (post2::vehicle::norm(axis_u) <= 1.0e-12) {
+        axis_u = project_onto_plane(direction_hint_eci, *plane);
+    }
+    if (post2::vehicle::norm(axis_u) <= 1.0e-12) {
+        const Vec3 reference = std::abs(plane->normal.z) < 0.9
+            ? Vec3{0.0, 0.0, 1.0}
+            : Vec3{0.0, 1.0, 0.0};
+        axis_u = cross_product(reference, plane->normal);
+    }
+    plane->axis_u = normalized_or(axis_u, {1.0, 0.0, 0.0});
+    plane->axis_v = normalized_or(
+        cross_product(plane->normal, plane->axis_u),
+        {0.0, 1.0, 0.0});
+
+    const Vec3 projected_hint = project_onto_plane(direction_hint_eci, *plane);
+    if (post2::vehicle::norm(projected_hint) > 1.0e-12 &&
+        post2::vehicle::dot(projected_hint, plane->axis_v) < 0.0) {
+        plane->normal = plane->normal * -1.0;
+        plane->axis_v = plane->axis_v * -1.0;
+    }
+}
+
+State apply_two_point_five_dof_constraint(const State& state, const DynamicsPlane& plane)
+{
+    if (!plane.enabled) {
+        return state;
+    }
+    return {
+        project_onto_plane(state.position_m, plane),
+        project_onto_plane(state.velocity_mps, plane),
+    };
+}
+
+DynamicsPlane make_two_point_five_dof_plane(const State& state, const Vec3& direction_hint_eci)
+{
+    DynamicsPlane plane;
+    const double r_norm = post2::vehicle::norm(state.position_m);
+    if (r_norm <= 1.0e-12) {
+        plane.enabled = true;
+        set_two_point_five_dof_plane_basis(&plane, state, direction_hint_eci);
+        return plane;
+    }
+
+    auto use_normal_if_valid = [&plane](const Vec3& candidate, double threshold) {
+        const double n = post2::vehicle::norm(candidate);
+        if (n <= threshold) {
+            return false;
+        }
+        plane.normal = candidate / n;
+        plane.enabled = true;
+        return true;
+    };
+
+    const Vec3 hint_unit = normalized_or(direction_hint_eci, {0.0, 0.0, 0.0});
+    if (use_normal_if_valid(cross_product(state.position_m, hint_unit), r_norm * 1.0e-9)) {
+        set_two_point_five_dof_plane_basis(&plane, state, direction_hint_eci);
+        return plane;
+    }
+
+    const double v_norm = post2::vehicle::norm(state.velocity_mps);
+    if (use_normal_if_valid(
+            cross_product(state.position_m, state.velocity_mps),
+            r_norm * std::max(1.0, v_norm) * 1.0e-12)) {
+        set_two_point_five_dof_plane_basis(&plane, state, direction_hint_eci);
+        return plane;
+    }
+
+    const Vec3 r_hat = state.position_m / r_norm;
+    const Vec3 reference = std::abs(r_hat.z) < 0.9
+        ? Vec3{0.0, 0.0, 1.0}
+        : Vec3{0.0, 1.0, 0.0};
+    use_normal_if_valid(cross_product(state.position_m, reference), r_norm * 1.0e-12);
+    if (!plane.enabled) {
+        plane.enabled = true;
+    }
+    set_two_point_five_dof_plane_basis(&plane, state, direction_hint_eci);
+    return plane;
+}
+
+Vec3 two_point_five_dof_body_axis_eci(
+    const post2::vehicle::RigidBodyState& rigid_body,
+    const DynamicsPlane& plane)
+{
+    if (!plane.enabled) {
+        return {1.0, 0.0, 0.0};
+    }
+    const double c = std::cos(rigid_body.attitude_rad);
+    const double s = std::sin(rigid_body.attitude_rad);
+    return normalized_or(plane.axis_u * c + plane.axis_v * s, plane.axis_u);
+}
+
+Vec3 two_point_five_dof_engine_direction_eci(
+    const post2::vehicle::RigidBodyState& rigid_body,
+    const DynamicsPlane& plane,
+    const post2::vehicle::EngineConfig& engine)
+{
+    const Vec3 body_x = two_point_five_dof_body_axis_eci(rigid_body, plane);
+    const Vec3 body_y = normalized_or(cross_product(plane.normal, body_x), plane.axis_v);
+    const Vec3 direction_body = normalized_or(engine.direction_body, {1.0, 0.0, 0.0});
+    return normalized_or(
+        body_x * direction_body.x + body_y * direction_body.y,
+        body_x);
+}
+
+post2::vehicle::EngineConfig selected_engine_config_for_command(
+    const CaseConfig& case_config,
+    const post2::vehicle::VehicleRuntimeState& runtime,
+    int controlled_stage_index)
+{
+    const std::vector<post2::vehicle::StageConfig> stage_configs =
+        post2::vehicle::effective_stage_configs(case_config.vehicle);
+    auto stage_config_at = [&](std::size_t index) -> const post2::vehicle::StageConfig* {
+        return index < stage_configs.size() ? &stage_configs[index] : nullptr;
+    };
+    if (controlled_stage_index >= 0 &&
+        static_cast<std::size_t>(controlled_stage_index) < runtime.stages.size()) {
+        if (const auto* stage_config = stage_config_at(static_cast<std::size_t>(controlled_stage_index))) {
+            return stage_config->engine;
+        }
+    }
+    for (std::size_t i = 0; i < runtime.stages.size(); ++i) {
+        if (runtime.stages[i].attached && runtime.stages[i].active) {
+            if (const auto* stage_config = stage_config_at(i)) {
+                return stage_config->engine;
+            }
+        }
+    }
+    for (std::size_t i = 0; i < runtime.stages.size(); ++i) {
+        if (runtime.stages[i].attached) {
+            if (const auto* stage_config = stage_config_at(i)) {
+                return stage_config->engine;
+            }
+        }
+    }
+    return case_config.vehicle.engine;
+}
+
+double two_point_five_dof_angular_acceleration_radps2(
+    const CaseConfig& case_config,
+    const post2::integrators::ExtendedState& state,
+    const post2::propagation::DerivativeResult& eval)
+{
+    const double inertia = state.rigid_body.moment_of_inertia_kgm2;
+    const double moment_arm_m = case_config.vehicle.rigid_body.engine_moment_arm_m;
+    if (inertia <= 0.0 || moment_arm_m <= 0.0) {
+        return 0.0;
+    }
+
+    const std::vector<post2::vehicle::StageConfig> stage_configs =
+        post2::vehicle::effective_stage_configs(case_config.vehicle);
+    double torque_nm = 0.0;
+    for (std::size_t i = 0; i < eval.per_stage_engine.size() && i < stage_configs.size(); ++i) {
+        const double thrust_n = eval.per_stage_engine[i].actual_thrust_n;
+        if (thrust_n <= 0.0) {
+            continue;
+        }
+        const Vec3 direction_body = normalized_or(
+            stage_configs[i].engine.direction_body,
+            {1.0, 0.0, 0.0});
+        torque_nm += -moment_arm_m * thrust_n * direction_body.y;
+    }
+
+    if (eval.per_stage_engine.empty()) {
+        const Vec3 direction_body = normalized_or(
+            case_config.vehicle.engine.direction_body,
+            {1.0, 0.0, 0.0});
+        torque_nm += -moment_arm_m * eval.total_actual_thrust_n * direction_body.y;
+    }
+    return torque_nm / inertia;
+}
+
+post2::propagation::EngineCommand constrain_engine_command_to_plane(
+    post2::propagation::EngineCommand command,
+    const DynamicsPlane& plane,
+    const State& state)
+{
+    if (!plane.enabled) {
+        return command;
+    }
+    const Vec3 radial_fallback = normalized_or(project_onto_plane(state.position_m, plane), {1.0, 0.0, 0.0});
+    command.direction_eci =
+        normalized_or(project_onto_plane(command.direction_eci, plane), radial_fallback);
+    return command;
 }
 
 State make_hold_down_clamp_state(const SimulationConfig& config, double time_s)
@@ -435,27 +801,51 @@ post2::integrators::ExtendedDerivative three_dof_extended_dynamics(
     };
 }
 
-// Dispatch seam for per-phase dynamics models. Today only 3-DOF is wired; the
-// 1.5-DOF (2D + pitch) branch is the reserved extension point. validate_case_
-// config rejects 1.5dof while kOnePointFiveDofEnabled is false, so the stub
-// below is unreachable in normal operation -- it exists to mark where the
-// planar + pitch equations of motion will be implemented and to fail loudly if
-// the feature flag is flipped before the dynamics are filled in.
+// 2.5-DOF derivative: keep the existing 6D state representation but constrain
+// translational motion and acceleration to the phase plane. The commanded pitch
+// attitude enters through the in-plane steering/thrust direction.
+post2::integrators::ExtendedDerivative two_point_five_dof_extended_dynamics(
+    const post2::propagation::ForceModelSet& force_models,
+    const post2::propagation::ForceModelContext& force_context,
+    const post2::integrators::ExtendedState& state,
+    const DynamicsPlane& plane,
+    double angular_acceleration_radps2,
+    std::vector<double> tank_mass_dots_kgps)
+{
+    const post2::propagation::ForceModelOutput force_output =
+        force_models.evaluate_all(force_context, state);
+
+    post2::integrators::ExtendedDerivative derivative{
+        {
+            project_onto_plane(state.motion.velocity_mps, plane),
+            project_onto_plane(force_output.acceleration_eci_mps2, plane),
+        },
+        std::move(tank_mass_dots_kgps),
+    };
+    derivative.rigid_body_dot.attitude_radps = state.rigid_body.angular_velocity_radps;
+    derivative.rigid_body_dot.angular_acceleration_radps2 = angular_acceleration_radps2;
+    return derivative;
+}
+
+// Dispatch seam for per-phase dynamics models.
 post2::integrators::ExtendedDerivative phase_extended_dynamics(
     DynamicsDof dof,
+    const DynamicsPlane& dynamics_plane,
+    double angular_acceleration_radps2,
     const post2::propagation::ForceModelSet& force_models,
     const post2::propagation::ForceModelContext& force_context,
     const post2::integrators::ExtendedState& state,
     std::vector<double> tank_mass_dots_kgps)
 {
     switch (dof) {
-        case DynamicsDof::OnePointFiveDof:
-            // TODO(dynamics): planar translation constrained to the launch /
-            // orbital plane with a commanded pitch attitude (steering reduced
-            // to pitch-in-plane). Project force-model accelerations onto the
-            // 2D plane and integrate the pitch DOF here.
-            throw std::logic_error(
-                "1.5DOF (2D + pitch) dynamics is reserved and not yet implemented");
+        case DynamicsDof::TwoPointFiveDof:
+            return two_point_five_dof_extended_dynamics(
+                force_models,
+                force_context,
+                state,
+                dynamics_plane,
+                angular_acceleration_radps2,
+                std::move(tank_mass_dots_kgps));
         case DynamicsDof::ThreeDof:
         default:
             return three_dof_extended_dynamics(
@@ -611,6 +1001,67 @@ bool action_type_is_supported(const std::string& type)
         type == "set_stage_attached";
 }
 
+bool poly_is_default_zero(const Poly2Config& poly)
+{
+    return poly.c0 == 0.0 &&
+        poly.c1 == 0.0 &&
+        poly.c2 == 0.0 &&
+        !poly.continuity;
+}
+
+bool linear_tangent_is_default(const LinearTangentConfig& tangent)
+{
+    return tangent.a == 0.0 &&
+        tangent.a_dot == 0.0 &&
+        tangent.b == 0.0 &&
+        tangent.b_dot == 0.0 &&
+        tangent.t_offset_s == 0.0 &&
+        !tangent.continuity;
+}
+
+bool upfg_is_default(const UpfgConfig& upfg)
+{
+    return upfg.periapsis_km == 200.0 &&
+        upfg.apoapsis_km == 200.0 &&
+        upfg.inclination_deg == kDefaultInclinationDeg;
+}
+
+bool vec3_equal(const Vec3& lhs, const Vec3& rhs)
+{
+    return lhs.x == rhs.x && lhs.y == rhs.y && lhs.z == rhs.z;
+}
+
+bool quaternion_points_empty(const std::vector<QuaternionPoint>& points)
+{
+    return points.empty();
+}
+
+bool selectable_segments_empty(const std::vector<SelectableSteeringSegment>& segments)
+{
+    return segments.empty();
+}
+
+bool segmented_steering_poly_is_default(const SegmentedSteeringPolyConfig& poly)
+{
+    return poly.order == 1 && poly.continuity && poly.segments.empty();
+}
+
+bool steering_model_is_default_for_two_point_five_dof(const SteeringModelConfig& steering)
+{
+    return lowercase(steering.type) == "generic_poly" &&
+        poly_is_default_zero(steering.roll_deg) &&
+        poly_is_default_zero(steering.pitch_deg) &&
+        poly_is_default_zero(steering.yaw_deg) &&
+        poly_is_default_zero(steering.azimuth_deg) &&
+        poly_is_default_zero(steering.elevation_deg) &&
+        linear_tangent_is_default(steering.tangent) &&
+        upfg_is_default(steering.upfg) &&
+        vec3_equal(steering.fixed_direction_eci, {1.0, 0.0, 0.0}) &&
+        quaternion_points_empty(steering.points) &&
+        selectable_segments_empty(steering.segments) &&
+        segmented_steering_poly_is_default(steering.segmented_poly);
+}
+
 bool validate_case_config(const CaseConfig& config, std::string* error)
 {
     if (config.earth_radius_m <= 0.0) {
@@ -648,9 +1099,41 @@ bool validate_case_config(const CaseConfig& config, std::string* error)
     if (!post2::vehicle::validate_vehicle_config(config.vehicle, error)) {
         return false;
     }
+    const std::vector<post2::vehicle::StageConfig> stage_configs =
+        post2::vehicle::effective_stage_configs(config.vehicle);
 
     for (std::size_t i = 0; i < config.phases.size(); ++i) {
         const PhaseConfig& phase = config.phases[i];
+        if (phase.controller_stage_index < -1) {
+            *error = "phase " + std::to_string(i) + " controller_stage_index must be -1 or a stage index";
+            return false;
+        }
+        if (phase.controller_detached_stage &&
+            phase.controller_stage_index < 0 &&
+            phase.controller_stage_name.empty()) {
+            *error = "phase " + std::to_string(i) +
+                " detached controller needs controller_stage_index or controller_stage_name";
+            return false;
+        }
+        if (phase.controller_stage_index >= 0 &&
+            static_cast<std::size_t>(phase.controller_stage_index) >= stage_configs.size()) {
+            *error = "phase " + std::to_string(i) + " controller_stage_index is out of range";
+            return false;
+        }
+        if (!phase.controller_stage_name.empty()) {
+            bool found_controller_stage = false;
+            for (const auto& stage : stage_configs) {
+                if (stage.name == phase.controller_stage_name) {
+                    found_controller_stage = true;
+                    break;
+                }
+            }
+            if (!found_controller_stage) {
+                *error = "phase " + std::to_string(i) +
+                    " controller_stage_name does not match any vehicle stage";
+                return false;
+            }
+        }
         if (phase.termination.type == "time" && phase.termination.value <= 0.0) {
             *error = "phase " + std::to_string(i) + " termination.value must be positive for time-based termination";
             return false;
@@ -666,18 +1149,27 @@ bool validate_case_config(const CaseConfig& config, std::string* error)
         DynamicsDof phase_dof = DynamicsDof::ThreeDof;
         if (!dynamics_dof_from_string(phase.dynamics_dof, &phase_dof)) {
             *error = "phase " + std::to_string(i) +
-                " dynamics_dof must be \"3dof\" or \"1.5dof\"";
+                " dynamics_dof must be \"3dof\" or \"2.5dof\"";
             return false;
         }
-        if (phase_dof == DynamicsDof::OnePointFiveDof && !kOnePointFiveDofEnabled) {
-            *error = "phase " + std::to_string(i) +
-                " dynamics_dof \"1.5dof\" (2D + pitch) is reserved and not yet enabled";
-            return false;
+        if (phase_dof == DynamicsDof::TwoPointFiveDof) {
+            if (config.vehicle.rigid_body.moment_of_inertia_kgm2 <= 0.0) {
+                *error = "phase " + std::to_string(i) +
+                    " dynamics_dof \"2.5dof\" requires vehicle.rigid_body.moment_of_inertia_kgm2 > 0";
+                return false;
+            }
+            if (!steering_model_is_default_for_two_point_five_dof(phase.steering_model)) {
+                *error = "phase " + std::to_string(i) +
+                    " dynamics_dof \"2.5dof\" does not support steering_model; use vehicle.rigid_body initial attitude/omega and engine.direction_body";
+                return false;
+            }
         }
         if (phase.tolerances.rtol <= 0.0 ||
             phase.tolerances.atol_position_m <= 0.0 ||
             phase.tolerances.atol_velocity_mps <= 0.0 ||
-            phase.tolerances.atol_tank_mass_kg <= 0.0) {
+            phase.tolerances.atol_tank_mass_kg <= 0.0 ||
+            phase.tolerances.atol_attitude_rad <= 0.0 ||
+            phase.tolerances.atol_angular_velocity_radps <= 0.0) {
             *error = "phase " + std::to_string(i) + " tolerances must be positive";
             return false;
         }
@@ -787,6 +1279,7 @@ bool case_vehicle_impacted_earth(const StateLog& state_log, const CaseConfig& co
 struct RuntimeControl {
     bool engine_enabled = false;
     bool hold_down_clamp_active = false;
+    int controlled_stage_index = -1;
     std::size_t next_action_index = 0;
 };
 
@@ -807,13 +1300,17 @@ bool is_powered_upfg_phase(
 
 double active_propulsive_burn_time_s(
     const CaseConfig& case_config,
-    const post2::vehicle::VehicleRuntimeState& runtime)
+    const post2::vehicle::VehicleRuntimeState& runtime,
+    int controlled_stage_index)
 {
     const std::vector<post2::vehicle::StageConfig> stage_configs =
         post2::vehicle::effective_stage_configs(case_config.vehicle);
     double propellant_kg = 0.0;
     double mdot_kgps = 0.0;
     for (std::size_t i = 0; i < stage_configs.size() && i < runtime.stages.size(); ++i) {
+        if (controlled_stage_index >= 0 && i != static_cast<std::size_t>(controlled_stage_index)) {
+            continue;
+        }
         const auto& stage_rt = runtime.stages[i];
         const auto& stage_cfg = stage_configs[i];
         if (!stage_rt.attached ||
@@ -914,6 +1411,16 @@ void apply_single_action(
                 }
             }
         }
+        if (found_stage && control) {
+            if (control->controlled_stage_index >= 0) {
+                if (stage_index != static_cast<std::size_t>(control->controlled_stage_index)) {
+                    found_stage = false;
+                }
+            } else if (stage_index >= runtime->stages.size() ||
+                       !runtime->stages[stage_index].attached) {
+                found_stage = false;
+            }
+        }
         if (found_stage) {
             if (action.type == "set_stage_attached") {
                 post2::vehicle::set_stage_attached(runtime, stage_index, action.value);
@@ -968,11 +1475,59 @@ post2::propagation::EngineCommand make_engine_command(
     post2::vehicle::VehicleRuntimeState runtime_for_model = runtime;
     runtime_for_model.engine.enabled = engine_enabled;
     const double phase_time_s = absolute_time_s - context.phase_start_time_s;
-    return {
-        engine_enabled,
-        throttle_model.throttle(phase_time_s, runtime_for_model, context),
-        steering_model.thrust_direction_eci(phase_time_s, state, runtime_for_model, context),
-    };
+    post2::propagation::EngineCommand command;
+    command.enabled = engine_enabled;
+    command.throttle = throttle_model.throttle(phase_time_s, runtime_for_model, context);
+    command.direction_eci = steering_model.thrust_direction_eci(
+        phase_time_s,
+        state,
+        runtime_for_model,
+        context);
+    if (context.case_config) {
+        command.controlled_stage_index = phase_controlled_stage_index(*context.case_config, phase);
+    }
+    return command;
+}
+
+post2::propagation::EngineCommand make_two_point_five_dof_engine_command(
+    const PhaseConfig& phase,
+    const PhaseContext& context,
+    const IThrottleModel& throttle_model,
+    const post2::vehicle::VehicleRuntimeState& runtime,
+    const State&,
+    const DynamicsPlane& plane,
+    double absolute_time_s,
+    bool engine_enabled)
+{
+    if (!phase.force_models.thrust) {
+        return {};
+    }
+
+    post2::vehicle::VehicleRuntimeState runtime_for_model = runtime;
+    runtime_for_model.engine.enabled = engine_enabled;
+    const double phase_time_s = absolute_time_s - context.phase_start_time_s;
+    post2::propagation::EngineCommand command;
+    command.enabled = engine_enabled;
+    command.throttle = throttle_model.throttle(phase_time_s, runtime_for_model, context);
+    if (context.case_config) {
+        command.controlled_stage_index =
+            phase_controlled_stage_index(*context.case_config, phase);
+        const post2::vehicle::EngineConfig engine =
+            selected_engine_config_for_command(
+                *context.case_config,
+                runtime_for_model,
+                command.controlled_stage_index);
+        command.direction_eci =
+            two_point_five_dof_engine_direction_eci(
+                runtime_for_model.vehicle.rigid_body,
+                plane,
+                engine);
+    } else {
+        command.direction_eci = two_point_five_dof_body_axis_eci(
+            runtime_for_model.vehicle.rigid_body,
+            plane);
+    }
+    return command;
 }
 
 void merge_phase_log(StateLog* merged, const StateLog& phase_log)
@@ -998,7 +1553,7 @@ StateLog propagate_phase(
     const double phase_horizon_s = time_terminated ? phase.termination.value : kMaxPhaseTimeS;
     const double phase_end_time_s = phase_start_time_s + phase_horizon_s;
     // Resolve the dynamics model once; validate_case_config has already
-    // guaranteed the token is recognised and (for now) that it is 3-DOF.
+    // guaranteed the token is recognised.
     DynamicsDof phase_dof = DynamicsDof::ThreeDof;
     dynamics_dof_from_string(phase.dynamics_dof, &phase_dof);
     const SimulationConfig simulation_config =
@@ -1006,8 +1561,9 @@ StateLog propagate_phase(
     post2::propagation::VehicleConsumptionPropagator vehicle_propagator(case_config.vehicle);
     auto integrator = post2::integrators::make_integrator(
         phase.integrator, case_config.step_s, phase.tolerances);
+    const bool is_two_point_five_dof_phase = two_point_five_dof(phase_dof);
     ThrottleModelConfig effective_throttle = phase.throttle_model;
-    if (lowercase(phase.steering_model.type) == "upfg") {
+    if (!is_two_point_five_dof_phase && lowercase(phase.steering_model.type) == "upfg") {
         effective_throttle = ThrottleModelConfig{};
         effective_throttle.type = "poly";
         effective_throttle.c0 = 1.0;
@@ -1017,20 +1573,42 @@ StateLog propagate_phase(
         effective_throttle.continuity = false;
     }
     const auto throttle_model = make_throttle_model(effective_throttle);
-    const auto steering_model = make_steering_model(phase.steering_model);
+    std::unique_ptr<ISteeringModel> steering_model;
+    if (!is_two_point_five_dof_phase) {
+        steering_model = make_steering_model(phase.steering_model);
+    }
     const PhaseContext context{&case_config, &phase, phase_index, phase_start_time_s};
     const post2::propagation::ForceModelSet force_models =
         post2::propagation::make_force_model_set(case_config, phase);
     const std::vector<TimedAction> actions = sorted_actions(phase);
 
-    RuntimeControl control;
-    control.engine_enabled = initial_runtime.engine.enabled;
-    control.hold_down_clamp_active = phase.hold_down_clamp_initial_active;
-
     auto runtime = initial_runtime;
     runtime.time_s = phase_start_time_s;
+    mount_phase_controller_vehicle(phase, case_config, &runtime);
+
+    RuntimeControl control;
+    control.engine_enabled = runtime.engine.enabled;
+    control.hold_down_clamp_active = phase.hold_down_clamp_initial_active;
+    control.controlled_stage_index = phase_controlled_stage_index(case_config, phase);
+
     set_hold_down_clamp_state(&runtime, simulation_config, control.hold_down_clamp_active);
     apply_due_actions(actions, 0.0, simulation_config, &control, &runtime);
+
+    double time_s = phase_start_time_s;
+    DynamicsPlane dynamics_plane;
+    auto ensure_two_point_five_dof_plane = [&]() {
+        if (!is_two_point_five_dof_phase ||
+            control.hold_down_clamp_active ||
+            dynamics_plane.enabled) {
+            return;
+        }
+        dynamics_plane = make_two_point_five_dof_plane(
+            runtime.vehicle.motion,
+            runtime.vehicle.motion.velocity_mps);
+        runtime.vehicle.motion =
+            apply_two_point_five_dof_constraint(runtime.vehicle.motion, dynamics_plane);
+    };
+    ensure_two_point_five_dof_plane();
 
     StateLog state_log(case_config.earth_radius_m, case_config.vehicle);
     state_log.set_phase_metadata(static_cast<int>(phase_index), phase.name);
@@ -1047,7 +1625,6 @@ StateLog propagate_phase(
     const int max_step_count =
         max_phase_integration_steps(phase_horizon_s, case_config.step_s);
     int step_count = 0;
-    double time_s = phase_start_time_s;
     double suggested_step_s = case_config.step_s;
     while (time_s < phase_end_time_s) {
         ++step_count;
@@ -1065,6 +1642,7 @@ StateLog propagate_phase(
         if (control.next_action_index != action_index_before_step) {
             suggested_step_s = case_config.step_s;
         }
+        ensure_two_point_five_dof_plane();
         // The integrator events localize crossings inside the next step; this
         // covers phase/action boundaries where the condition is already true.
         if (!time_terminated &&
@@ -1080,7 +1658,7 @@ StateLog propagate_phase(
             !time_terminated && is_powered_upfg_phase(phase, control, actions);
         const double burnout_margin_s = std::max(1.0e-3, min_effective_step_s);
         const double burn_time_remaining_s = powered_upfg
-            ? active_propulsive_burn_time_s(case_config, runtime)
+            ? active_propulsive_burn_time_s(case_config, runtime, control.controlled_stage_index)
             : std::numeric_limits<double>::infinity();
         if (powered_upfg && burn_time_remaining_s <= burnout_margin_s) {
             break;
@@ -1118,15 +1696,25 @@ StateLog propagate_phase(
         }
 
         const State current_state = runtime.vehicle.motion;
-        auto command = make_engine_command(
-            phase,
-            context,
-            *throttle_model,
-            *steering_model,
-            runtime,
-            current_state,
-            time_s,
-            control.engine_enabled);
+        auto command = is_two_point_five_dof_phase
+            ? make_two_point_five_dof_engine_command(
+                phase,
+                context,
+                *throttle_model,
+                runtime,
+                current_state,
+                dynamics_plane,
+                time_s,
+                control.engine_enabled)
+            : make_engine_command(
+                phase,
+                context,
+                *throttle_model,
+                *steering_model,
+                runtime,
+                current_state,
+                time_s,
+                control.engine_enabled);
         // Pre-sample environment at the start-of-step state so engine
         // performance (pressure correction) and downstream force models see a
         // consistent ambient pressure.
@@ -1139,6 +1727,7 @@ StateLog propagate_phase(
         post2::integrators::ExtendedState current_extended{
             current_state,
             post2::vehicle::read_tank_masses_flat(runtime),
+            runtime.vehicle.rigid_body,
         };
 
         post2::propagation::DerivativeResult last_eval;
@@ -1155,6 +1744,7 @@ StateLog propagate_phase(
                 time_s, runtime, current_extended.tank_masses_kg, current_state, command);
             last_acceleration_eci_mps2 = {0.0, 0.0, 0.0};
             integrated.motion = make_hold_down_clamp_state(simulation_config, time_s + step_s);
+            integrated.rigid_body = current_extended.rigid_body;
             integrated.tank_masses_kg.resize(current_extended.tank_masses_kg.size());
             for (std::size_t i = 0; i < integrated.tank_masses_kg.size(); ++i) {
                 const double dot = i < last_eval.tank_mass_dots_kgps.size()
@@ -1250,15 +1840,29 @@ StateLog propagate_phase(
                             phase,
                             dynamics_time_s,
                             dynamics_state.motion);
-                    auto dynamics_command = make_engine_command(
-                        phase,
-                        context,
-                        *throttle_model,
-                        *steering_model,
-                        runtime,
-                        dynamics_state.motion,
-                        dynamics_time_s,
-                        control.engine_enabled);
+                    post2::vehicle::VehicleRuntimeState dynamics_runtime = runtime;
+                    dynamics_runtime.time_s = dynamics_time_s;
+                    dynamics_runtime.vehicle.motion = dynamics_state.motion;
+                    dynamics_runtime.vehicle.rigid_body = dynamics_state.rigid_body;
+                    auto dynamics_command = is_two_point_five_dof_phase
+                        ? make_two_point_five_dof_engine_command(
+                            phase,
+                            context,
+                            *throttle_model,
+                            dynamics_runtime,
+                            dynamics_state.motion,
+                            dynamics_plane,
+                            dynamics_time_s,
+                            control.engine_enabled)
+                        : make_engine_command(
+                            phase,
+                            context,
+                            *throttle_model,
+                            *steering_model,
+                            dynamics_runtime,
+                            dynamics_state.motion,
+                            dynamics_time_s,
+                            control.engine_enabled);
                     dynamics_command.ambient_pressure_pa = environment.pressure_pa;
                     auto eval = vehicle_propagator.compute_derivatives(
                         dynamics_time_s,
@@ -1273,8 +1877,16 @@ StateLog propagate_phase(
                         &environment,
                         eval.thrust_acceleration_mps2,
                     };
+                    const double angular_acceleration_radps2 = two_point_five_dof(phase_dof)
+                        ? two_point_five_dof_angular_acceleration_radps2(
+                            case_config,
+                            dynamics_state,
+                            eval)
+                        : 0.0;
                     auto deriv = phase_extended_dynamics(
                         phase_dof,
+                        dynamics_plane,
+                        angular_acceleration_radps2,
                         force_models,
                         force_context,
                         dynamics_state,
@@ -1334,6 +1946,11 @@ StateLog propagate_phase(
                         mission_event_armed_indices[event_idx - mission_event_base];
                 }
             }
+            if (two_point_five_dof(phase_dof) && !control.hold_down_clamp_active) {
+                integrated.motion = apply_two_point_five_dof_constraint(
+                    integrated.motion,
+                    dynamics_plane);
+            }
             if (phase.force_models.normal_force) {
                 integrated.motion = post2::propagation::apply_surface_contact_constraint(
                     simulation_config, integrated.motion);
@@ -1367,6 +1984,7 @@ StateLog propagate_phase(
             const post2::integrators::ExtendedState eval_state{
                 runtime.vehicle.motion,
                 post2::vehicle::read_tank_masses_flat(runtime),
+                runtime.vehicle.rigid_body,
             };
             for (std::size_t k = 0; k < case_config.events.size(); ++k) {
                 if (!case_config.events[k].enabled) {
@@ -1448,6 +2066,7 @@ StateLog propagate_hold_down_clamp(
         const post2::integrators::ExtendedState integrated{
             make_hold_down_clamp_state(config, next_time_s),
             std::move(tank_masses),
+            runtime.vehicle.rigid_body,
         };
         runtime = vehicle_propagator.commit(runtime, integrated, next_time_s, eval, cmd);
         set_hold_down_clamp_state(&runtime, config, next_time_s < config.hold_down_clamp.release_time_s);
@@ -1484,13 +2103,21 @@ StateLog GravityPropagator::propagate(const SimulationConfig& config, const Stat
     const PhaseConfig& phase = case_config.phases.front();
     DynamicsDof phase_dof = DynamicsDof::ThreeDof;
     dynamics_dof_from_string(phase.dynamics_dof, &phase_dof);
+    DynamicsPlane dynamics_plane;
+    if (two_point_five_dof(phase_dof)) {
+        dynamics_plane = make_two_point_five_dof_plane(
+            current_runtime.vehicle.motion,
+            current_runtime.vehicle.motion.velocity_mps);
+        current_runtime.vehicle.motion =
+            apply_two_point_five_dof_constraint(current_runtime.vehicle.motion, dynamics_plane);
+    }
     const post2::propagation::ForceModelSet force_models =
         post2::propagation::make_force_model_set(case_config, phase);
 
     return integrator.integrate(
         state_log,
         termination,
-        [&config, &case_config, &phase, phase_dof, &force_models, &vehicle_propagator, &current_runtime, last_eval, last_cmd](
+        [&config, &case_config, &phase, phase_dof, dynamics_plane, &force_models, &vehicle_propagator, &current_runtime, last_eval, last_cmd](
             double time_s, const post2::integrators::ExtendedState& state) {
             const post2::propagation::EnvironmentState environment =
                 make_environment_state(config, phase, time_s, state.motion);
@@ -1499,6 +2126,14 @@ StateLog GravityPropagator::propagate(const SimulationConfig& config, const Stat
                 vehicle_propagator.throttle_at(time_s),
                 current_runtime.engine.direction_body,
             };
+            if (two_point_five_dof(phase_dof)) {
+                const post2::vehicle::EngineConfig engine =
+                    selected_engine_config_for_command(case_config, current_runtime, -1);
+                cmd.direction_eci = two_point_five_dof_engine_direction_eci(
+                    state.rigid_body,
+                    dynamics_plane,
+                    engine);
+            }
             cmd.ambient_pressure_pa = environment.pressure_pa;
             *last_cmd = cmd;
             auto eval = vehicle_propagator.compute_derivatives(
@@ -1510,8 +2145,13 @@ StateLog GravityPropagator::propagate(const SimulationConfig& config, const Stat
                 &environment,
                 eval.thrust_acceleration_mps2,
             };
+            const double angular_acceleration_radps2 = two_point_five_dof(phase_dof)
+                ? two_point_five_dof_angular_acceleration_radps2(case_config, state, eval)
+                : 0.0;
             auto deriv = phase_extended_dynamics(
                 phase_dof,
+                dynamics_plane,
+                angular_acceleration_radps2,
                 force_models,
                 force_context,
                 state,
@@ -1519,13 +2159,18 @@ StateLog GravityPropagator::propagate(const SimulationConfig& config, const Stat
             *last_eval = std::move(eval);
             return deriv;
         },
-        [&config, &vehicle_propagator, &current_runtime, last_eval, last_cmd](
+        [&config, phase_dof, dynamics_plane, &vehicle_propagator, &current_runtime, last_eval, last_cmd](
             const post2::vehicle::VehicleRuntimeState& previous_runtime,
             const post2::integrators::ExtendedState& integrated,
             double next_time_s,
             double step_s) {
             (void)step_s;
             post2::integrators::ExtendedState constrained = integrated;
+            if (two_point_five_dof(phase_dof)) {
+                constrained.motion = apply_two_point_five_dof_constraint(
+                    constrained.motion,
+                    dynamics_plane);
+            }
             constrained.motion = post2::propagation::apply_surface_contact_constraint(
                 config, constrained.motion);
             current_runtime = vehicle_propagator.commit(
@@ -1691,12 +2336,18 @@ StateLog CoastPropagator::propagate(
     phase.optimize_enabled = false;
     phase.hold_down_clamp_initial_active = false;
     phase.integrator = "dop853";
-    phase.tolerances = case_config.phases.empty()
-        ? post2::integrators::IntegratorTolerances{}
-        : case_config.phases.back().tolerances;
-    phase.force_models = case_config.phases.empty()
-        ? ForceModelSwitches{}
-        : case_config.phases.back().force_models;
+    const bool has_source_phase =
+        last.phase_index >= 0 &&
+        static_cast<std::size_t>(last.phase_index) < case_config.phases.size();
+    const PhaseConfig* source_phase = has_source_phase
+        ? &case_config.phases[static_cast<std::size_t>(last.phase_index)]
+        : (case_config.phases.empty() ? nullptr : &case_config.phases.back());
+    phase.tolerances = source_phase
+        ? source_phase->tolerances
+        : post2::integrators::IntegratorTolerances{};
+    phase.force_models = source_phase
+        ? source_phase->force_models
+        : ForceModelSwitches{};
     phase.force_models.gravity = true;
     phase.force_models.thrust = false;
     phase.force_models.normal_force = false;
@@ -1734,10 +2385,15 @@ StateLog CoastPropagator::propagate(
         append_entry_with_environment(
             &out, coast_runtime, env, simulation_config.earth_rotation_rad_per_s);
     }
+    std::vector<post2::integrators::EventFunction> events;
+    if (!out.empty() && out.back().altitude_m > 0.0) {
+        events.push_back(post2::propagation::altitude_zero_event(true));
+    }
 
     post2::integrators::ExtendedState state{
         coast_runtime.vehicle.motion,
         post2::vehicle::read_tank_masses_flat(coast_runtime),
+        coast_runtime.vehicle.rigid_body,
     };
     post2::integrators::Dop853Integrator integrator(phase.tolerances);
 
@@ -1745,6 +2401,7 @@ StateLog CoastPropagator::propagate(
         post2::vehicle::VehicleRuntimeState eval_runtime = coast_runtime;
         eval_runtime.time_s = t_s;
         eval_runtime.vehicle.motion = eval_state.motion;
+        eval_runtime.vehicle.rigid_body = eval_state.rigid_body;
         const post2::propagation::EnvironmentState environment =
             make_environment_state(simulation_config, phase, t_s, eval_state.motion);
         const post2::propagation::ForceModelContext force_context{
@@ -1774,7 +2431,7 @@ StateLog CoastPropagator::propagate(
                 (std::isfinite(suggested_h) && suggested_h > 1.0e-12) ? suggested_h : target_t_s - t_s,
                 target_t_s - t_s);
             const post2::integrators::StepResult step =
-                integrator.step(state, t_s, h, derivative, {});
+                integrator.step(state, t_s, h, derivative, events);
             if (!step.accepted || step.h_used <= 1.0e-12) {
                 throw std::runtime_error("coast DOP853 integrator failed to make progress");
             }
@@ -1787,15 +2444,15 @@ StateLog CoastPropagator::propagate(
             if (t_s > end_t_s + 1.0e-9) {
                 break;
             }
+            if (step.event.has_value()) {
+                break;
+            }
         }
 
         coast_runtime.time_s = t_s;
         coast_runtime.vehicle.motion = state.motion;
         const auto env = make_environment_state(
             simulation_config, phase, t_s, coast_runtime.vehicle.motion);
-        if (env.altitude_m < 0.0) {
-            throw std::runtime_error("coast trajectory impacted Earth");
-        }
         const auto d = derivative(t_s, state);
         append_entry_with_environment(
             &out,
@@ -1803,6 +2460,9 @@ StateLog CoastPropagator::propagate(
             env,
             simulation_config.earth_rotation_rad_per_s,
             d.motion_dot.d_velocity_mps2);
+        if (env.altitude_m <= 0.0) {
+            break;
+        }
     }
 
     return out;
@@ -1841,10 +2501,117 @@ StateLog predict_orbit_path(
 
     const int samples = std::max(60, sample_count);
     try {
+        StateLog predicted = CoastPropagator{}.propagate(case_config, source_log, horizon_s, samples);
+        if (!predicted.empty() && predicted.back().altitude_m <= 0.0) {
+            return empty;
+        }
+        return predicted;
+    } catch (const std::exception&) {
+        return empty;
+    }
+}
+
+StateLog predict_coast_path(
+    const CaseConfig& case_config,
+    const StateLog& source_log,
+    int sample_count)
+{
+    StateLog empty(case_config.earth_radius_m, case_config.vehicle);
+    if (source_log.empty()) {
+        return empty;
+    }
+
+    const LaunchVehicleStateLogEntry& last = source_log.back();
+    const Vec3& r = last.state.position_m;
+    const Vec3& v = last.state.velocity_mps;
+    const double r_norm = post2::vehicle::norm(r);
+    const double v_norm = post2::vehicle::norm(v);
+    const double mu = case_config.earth_mu_m3s2;
+    if (r_norm <= 0.0 || mu <= 0.0) {
+        return empty;
+    }
+
+    double horizon_s = 1800.0;
+    const double specific_energy = 0.5 * v_norm * v_norm - mu / r_norm;
+    if (specific_energy < 0.0) {
+        const double a = -mu / (2.0 * specific_energy);
+        if (a > 0.0) {
+            constexpr double kPi = 3.141592653589793238462643383279502884;
+            horizon_s = 2.0 * kPi * std::sqrt((a * a * a) / mu) * 1.02;
+        }
+    } else {
+        horizon_s = 3600.0;
+    }
+
+    const int samples = std::max(60, sample_count);
+    try {
         return CoastPropagator{}.propagate(case_config, source_log, horizon_s, samples);
     } catch (const std::exception&) {
         return empty;
     }
+}
+
+std::vector<PredictedTrajectoryPath> predict_phase_end_trajectory_paths(
+    const CaseConfig& case_config,
+    const StateLog& source_log,
+    int sample_count)
+{
+    std::vector<PredictedTrajectoryPath> predictions;
+    if (source_log.empty()) {
+        return predictions;
+    }
+
+    const auto& entries = source_log.entries();
+    predictions.reserve(case_config.phases.empty() ? 1 : case_config.phases.size());
+    for (std::size_t i = 0; i < entries.size(); ++i) {
+        const bool phase_ends_here =
+            (i + 1 == entries.size()) ||
+            entries[i + 1].phase_index != entries[i].phase_index;
+        if (!phase_ends_here) {
+            continue;
+        }
+
+        const LaunchVehicleStateLogEntry& phase_end = entries[i];
+        StateLog source(case_config.earth_radius_m, case_config.vehicle);
+        source.set_phase_metadata(phase_end.phase_index, phase_end.phase_name);
+        source.append(phase_end);
+        StateLog predicted = predict_coast_path(case_config, source, sample_count);
+        if (predicted.empty()) {
+            continue;
+        }
+
+        PredictedTrajectoryPath path;
+        path.state_log = std::move(predicted);
+        path.source_phase_index = phase_end.phase_index;
+        path.source_phase_name = phase_end.phase_name;
+
+        const bool has_phase =
+            phase_end.phase_index >= 0 &&
+            static_cast<std::size_t>(phase_end.phase_index) < case_config.phases.size();
+        if (has_phase) {
+            const PhaseConfig& phase =
+                case_config.phases[static_cast<std::size_t>(phase_end.phase_index)];
+            path.source_phase_name = path.source_phase_name.empty()
+                ? phase.name
+                : path.source_phase_name;
+            path.controller_detached_stage = phase.controller_detached_stage;
+            path.controller_stage_index = phase.controller_detached_stage
+                ? phase_controller_stage_index(case_config, phase)
+                : -1;
+            path.controller_name =
+                prediction_controller_name(case_config, phase, path.controller_stage_index);
+        } else {
+            path.controller_detached_stage = false;
+            path.controller_stage_index = -1;
+            path.controller_name = "root stack";
+        }
+        path.color = prediction_color_for_controller(
+            path.controller_detached_stage,
+            path.controller_stage_index);
+        predictions.push_back(std::move(path));
+    }
+
+    return predictions;
 }
 
 } // namespace post2::core

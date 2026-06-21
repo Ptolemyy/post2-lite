@@ -148,6 +148,11 @@ VehicleRuntimeState make_initial_runtime_state(
     VehicleRuntimeState runtime;
     runtime.time_s = time_s;
     runtime.vehicle.motion = motion;
+    runtime.vehicle.rigid_body.attitude_rad = config.rigid_body.initial_attitude_rad;
+    runtime.vehicle.rigid_body.angular_velocity_radps =
+        config.rigid_body.initial_angular_velocity_radps;
+    runtime.vehicle.rigid_body.moment_of_inertia_kgm2 =
+        config.rigid_body.moment_of_inertia_kgm2;
     runtime.vehicle.dry_mass_kg = effective_dry_mass_kg(config);
     runtime.engine.enabled = config.engine.enabled;
     runtime.engine.firing = false;

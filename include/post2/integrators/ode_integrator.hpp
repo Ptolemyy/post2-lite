@@ -17,11 +17,13 @@ namespace post2::integrators {
 struct ExtendedState {
     post2::vehicle::CartesianState6D motion;
     std::vector<double> tank_masses_kg;
+    post2::vehicle::RigidBodyState rigid_body;
 };
 
 struct ExtendedDerivative {
     post2::vehicle::CartesianStateDerivative6D motion_dot;
     std::vector<double> tank_mass_dots_kgps;
+    post2::vehicle::RigidBodyDerivative rigid_body_dot;
 };
 
 using DynamicsFunction = std::function<

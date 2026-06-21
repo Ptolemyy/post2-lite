@@ -93,6 +93,8 @@ constexpr int kPhaseActionStage = 1928;
 constexpr int kPhaseScrollPane = 1930;
 constexpr int kPhaseAtmosphereType = 1931;
 constexpr int kPhaseDynamicsDof = 1932;
+constexpr int kPhaseController = 1933;
+constexpr int kPhaseEditController = 1934;
 constexpr int kSidebarWidth = 326;
 constexpr int kRemoteHostEdit = 1201;
 constexpr int kRemotePortEdit = 1202;
@@ -220,9 +222,9 @@ CoreMode g_mode = CoreMode::Local;
 SimulationConfig g_config;
 CaseConfig g_case;
 SimulationResult g_result;
-// Integrated predicted orbit from the final state, recomputed whenever g_result
-// changes; drawn (teal, with A/P markers) in the 3D scene and SVG export.
-StateLog g_predicted_orbit;
+// Integrated phase-end predicted trajectories, recomputed whenever g_result
+// changes; drawn as dashed controller-coloured paths in the 3D scene and SVG export.
+std::vector<post2::core::PredictedTrajectoryPath> g_predicted_paths;
 std::string g_status;
 std::string g_remote_host = "127.0.0.1";
 int g_remote_port = 5050;
@@ -254,7 +256,10 @@ bool g_case_initialized = false;
 bool g_dragging = false;
 POINT g_last_mouse = {};
 int g_selected_phase_index = 0;
+int g_selected_controller_stage_index = -1;
+bool g_selected_controller_detached_vehicle = false;
 HWND g_phase_list = nullptr;
+HWND g_phase_controller_combo = nullptr;
 HWND g_phase_add_button = nullptr;
 HWND g_phase_delete_button = nullptr;
 HWND g_phase_name_edit = nullptr;
@@ -286,9 +291,20 @@ HWND g_phase_action_type = nullptr;
 HWND g_phase_action_value = nullptr;
 HWND g_phase_action_stage = nullptr;
 HWND g_phase_scroll_pane = nullptr;
+HWND g_phase_editor_controller_combo = nullptr;
 HWND g_outputs_edit = nullptr;
 int g_selected_action_index = 0;
 std::string g_outputs_text;
+
+struct ControllerOption {
+    int stage_index = -1;
+    std::string stage_name;
+    bool detached_vehicle = false;
+};
+
+std::vector<ControllerOption> g_phase_controller_options;
+std::vector<int> g_visible_phase_indices;
+std::vector<int> g_phase_action_stage_indices;
 
 struct NumericBindingRow {
     std::string path;
@@ -316,6 +332,7 @@ int g_phase_scroll_page_height = 0;
 WNDPROC g_phase_scroll_old_proc = nullptr;
 
 void refresh_phase_list();
+void refresh_phase_controller_combo();
 void load_selected_phase_controls();
 void create_label(HWND parent, int x, int y, int width, const wchar_t* text, HFONT font);
 HWND create_edit(HWND parent, int id, int x, int y, int width, const std::wstring& text, HFONT font);
@@ -367,8 +384,10 @@ void clear_phase_editor_handles()
     g_phase_action_value = nullptr;
     g_phase_action_stage = nullptr;
     g_phase_scroll_pane = nullptr;
+    g_phase_editor_controller_combo = nullptr;
     g_phase_numeric_rows.clear();
     g_phase_continuity_rows.clear();
+    g_phase_action_stage_indices.clear();
     g_phase_scroll_pos = 0;
     g_phase_scroll_content_height = 0;
     g_phase_scroll_page_height = 0;
@@ -473,6 +492,9 @@ struct PhaseActionEditorDialogState {
     HWND stage_combo = nullptr;
     post2::core::PhaseAction action;
     const post2::vehicle::VehicleConfig* vehicle = nullptr;
+    std::vector<int> stage_combo_indices;
+    int min_stage_index = 0;
+    int max_stage_index = -1;
     bool accepted = false;
 };
 
@@ -752,11 +774,12 @@ void run_simulation(HWND hwnd)
     ensure_case_initialized();
     const auto service = post2::core::make_trajectory_service(g_mode, g_remote_host, g_remote_port);
     g_result = service->simulate(g_case);
-    g_predicted_orbit = (g_result.ok && !g_result.state_log.empty())
-        ? post2::core::predict_orbit_path(g_case, g_result.state_log)
-        : StateLog{};
+    g_predicted_paths = (g_result.ok && !g_result.state_log.empty())
+        ? post2::core::predict_phase_end_trajectory_paths(g_case, g_result.state_log)
+        : std::vector<post2::core::PredictedTrajectoryPath>{};
     if (g_result.ok && !g_result.state_log.empty()) {
-        const double scene_radius_m = post2::gui::compute_scene_radius_m(g_result.state_log);
+        const double scene_radius_m =
+            post2::gui::compute_scene_radius_m(g_result.state_log, g_predicted_paths);
         if (!g_camera_initialized) {
             g_camera.reset(scene_radius_m);
             g_camera_initialized = true;
@@ -858,11 +881,12 @@ void finish_optimization(HWND hwnd)
     sync_legacy_from_case();
     refresh_phase_list();
     load_selected_phase_controls();
-    g_predicted_orbit = (g_result.ok && !g_result.state_log.empty())
-        ? post2::core::predict_orbit_path(g_case, g_result.state_log)
-        : StateLog{};
+    g_predicted_paths = (g_result.ok && !g_result.state_log.empty())
+        ? post2::core::predict_phase_end_trajectory_paths(g_case, g_result.state_log)
+        : std::vector<post2::core::PredictedTrajectoryPath>{};
     if (g_result.ok && !g_result.state_log.empty()) {
-        const double scene_radius_m = post2::gui::compute_scene_radius_m(g_result.state_log);
+        const double scene_radius_m =
+            post2::gui::compute_scene_radius_m(g_result.state_log, g_predicted_paths);
         if (!g_camera_initialized) {
             g_camera.reset(scene_radius_m);
             g_camera_initialized = true;
@@ -3928,17 +3952,41 @@ void populate_action_value_combo_for_hwnd(HWND combo, const std::string& type, b
 }
 
 void populate_action_stage_combo_for_hwnd(
-    HWND combo, const post2::vehicle::VehicleConfig& vehicle, int selected_index)
+    HWND combo,
+    const post2::vehicle::VehicleConfig& vehicle,
+    int selected_index,
+    int min_stage_index,
+    int max_stage_index,
+    std::vector<int>* stage_indices)
 {
     SendMessageW(combo, CB_RESETCONTENT, 0, 0);
+    if (stage_indices) {
+        stage_indices->clear();
+    }
     const auto stages = post2::vehicle::effective_stage_configs(vehicle);
+    int selected_combo_index = 0;
+    const int min_allowed = std::max(0, min_stage_index);
     for (std::size_t i = 0; i < stages.size(); ++i) {
+        if (i < static_cast<std::size_t>(min_allowed)) {
+            continue;
+        }
+        if (max_stage_index >= 0 && i > static_cast<std::size_t>(max_stage_index)) {
+            continue;
+        }
         const std::wstring label = widen(std::to_string(i + 1) + ": " + stages[i].name);
         SendMessageW(combo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label.c_str()));
+        if (stage_indices) {
+            if (static_cast<int>(i) == selected_index) {
+                selected_combo_index = static_cast<int>(stage_indices->size());
+            }
+            stage_indices->push_back(static_cast<int>(i));
+        } else if (static_cast<int>(i) == selected_index) {
+            selected_combo_index = static_cast<int>(i);
+        }
     }
-    const int clamped = selected_index >= 0 && static_cast<std::size_t>(selected_index) < stages.size()
-        ? selected_index : 0;
-    SendMessageW(combo, CB_SETCURSEL, static_cast<WPARAM>(clamped), 0);
+    if (SendMessageW(combo, CB_GETCOUNT, 0, 0) > 0) {
+        SendMessageW(combo, CB_SETCURSEL, static_cast<WPARAM>(selected_combo_index), 0);
+    }
 }
 
 void sync_phase_action_editor_stage_enabled(PhaseActionEditorDialogState* state)
@@ -3972,7 +4020,13 @@ void create_phase_action_editor_controls(PhaseActionEditorDialogState* state)
     create_label(state->hwnd, 18, 142, 70, L"Stage", font);
     state->stage_combo = create_combo(state->hwnd, kPhaseActionEditStage, 104, 138, 250, font);
     if (state->vehicle) {
-        populate_action_stage_combo_for_hwnd(state->stage_combo, *state->vehicle, state->action.stage_index);
+        populate_action_stage_combo_for_hwnd(
+            state->stage_combo,
+            *state->vehicle,
+            state->action.stage_index,
+            state->min_stage_index,
+            state->max_stage_index,
+            &state->stage_combo_indices);
     }
     sync_phase_action_editor_stage_enabled(state);
 
@@ -4003,7 +4057,12 @@ bool accept_phase_action_editor_dialog(PhaseActionEditorDialogState* state)
             SetFocus(state->stage_combo);
             return false;
         }
-        action.stage_index = static_cast<int>(sel);
+        if (static_cast<std::size_t>(sel) >= state->stage_combo_indices.size()) {
+            MessageBoxW(state->hwnd, L"Select a target stage.", L"Phase action", MB_ICONWARNING);
+            SetFocus(state->stage_combo);
+            return false;
+        }
+        action.stage_index = state->stage_combo_indices[static_cast<std::size_t>(sel)];
         if (state->vehicle) {
             const auto stages = post2::vehicle::effective_stage_configs(*state->vehicle);
             if (static_cast<std::size_t>(action.stage_index) < stages.size()) {
@@ -4077,12 +4136,16 @@ bool show_phase_action_editor_dialog(
     HWND parent,
     post2::core::PhaseAction* action,
     const post2::vehicle::VehicleConfig& vehicle,
-    const wchar_t* title)
+    const wchar_t* title,
+    int min_stage_index = 0,
+    int max_stage_index = -1)
 {
     register_phase_action_editor_class();
     PhaseActionEditorDialogState state;
     state.action = *action;
     state.vehicle = &vehicle;
+    state.min_stage_index = min_stage_index;
+    state.max_stage_index = max_stage_index;
     RECT parent_rect;
     GetWindowRect(parent, &parent_rect);
     constexpr int dialog_width = 480;
@@ -5631,16 +5694,278 @@ void populate_action_value_combo(const std::string& type, bool value)
     select_combo_text(g_phase_action_value, action_state_display_label(type, value));
 }
 
+int top_stage_index_for_vehicle(const post2::vehicle::VehicleConfig& vehicle)
+{
+    const auto stages = post2::vehicle::effective_stage_configs(vehicle);
+    return stages.empty() ? -1 : static_cast<int>(stages.size() - 1);
+}
+
+std::string stage_name_for_index(const post2::vehicle::VehicleConfig& vehicle, int stage_index)
+{
+    const auto stages = post2::vehicle::effective_stage_configs(vehicle);
+    if (stage_index >= 0 && static_cast<std::size_t>(stage_index) < stages.size()) {
+        return stages[static_cast<std::size_t>(stage_index)].name;
+    }
+    return "";
+}
+
+std::optional<int> resolve_stage_index(
+    const post2::vehicle::VehicleConfig& vehicle,
+    int stage_index,
+    const std::string& stage_name)
+{
+    const auto stages = post2::vehicle::effective_stage_configs(vehicle);
+    if (stage_index >= 0 && static_cast<std::size_t>(stage_index) < stages.size()) {
+        return stage_index;
+    }
+    if (!stage_name.empty()) {
+        for (std::size_t i = 0; i < stages.size(); ++i) {
+            if (stages[i].name == stage_name) {
+                return static_cast<int>(i);
+            }
+        }
+    }
+    return std::nullopt;
+}
+
+int phase_controller_stage_index(const post2::core::PhaseConfig& phase)
+{
+    const auto resolved = resolve_stage_index(
+        g_case.vehicle,
+        phase.controller_stage_index,
+        phase.controller_stage_name);
+    if (resolved.has_value()) {
+        return *resolved;
+    }
+    return top_stage_index_for_vehicle(g_case.vehicle);
+}
+
+int phase_action_min_stage_index(const post2::core::PhaseConfig& phase)
+{
+    return phase.controller_detached_stage ? phase_controller_stage_index(phase) : 0;
+}
+
+int phase_action_max_stage_index(const post2::core::PhaseConfig& phase)
+{
+    return phase.controller_detached_stage
+        ? phase_controller_stage_index(phase)
+        : top_stage_index_for_vehicle(g_case.vehicle);
+}
+
+void set_phase_controller(
+    post2::core::PhaseConfig* phase,
+    int stage_index,
+    bool detached_vehicle)
+{
+    if (!phase) {
+        return;
+    }
+    phase->controller_stage_index = stage_index;
+    phase->controller_stage_name = stage_name_for_index(g_case.vehicle, stage_index);
+    phase->controller_detached_stage = detached_vehicle;
+}
+
+bool controller_option_matches(const ControllerOption& option, int stage_index, bool detached_vehicle)
+{
+    return option.stage_index == stage_index &&
+        option.detached_vehicle == detached_vehicle;
+}
+
+bool controller_option_exists(
+    const std::vector<ControllerOption>& options,
+    int stage_index,
+    bool detached_vehicle)
+{
+    return std::any_of(options.begin(), options.end(), [&](const ControllerOption& option) {
+        return controller_option_matches(option, stage_index, detached_vehicle);
+    });
+}
+
+void add_controller_option(
+    std::vector<ControllerOption>* options,
+    int stage_index,
+    bool detached_vehicle)
+{
+    if (!options || stage_index < 0) {
+        return;
+    }
+    const std::string stage_name = stage_name_for_index(g_case.vehicle, stage_index);
+    if (stage_name.empty() || controller_option_exists(*options, stage_index, detached_vehicle)) {
+        return;
+    }
+    options->push_back(ControllerOption{stage_index, stage_name, detached_vehicle});
+}
+
+std::vector<ControllerOption> build_controller_options()
+{
+    ensure_case_initialized();
+
+    std::vector<ControllerOption> options;
+    add_controller_option(&options, top_stage_index_for_vehicle(g_case.vehicle), false);
+
+    for (const auto& phase : g_case.phases) {
+        for (const auto& action : phase.actions) {
+            if (action.type != "set_stage_attached" || action.value) {
+                continue;
+            }
+            const auto resolved = resolve_stage_index(
+                g_case.vehicle,
+                action.stage_index,
+                action.stage_name);
+            if (resolved.has_value()) {
+                add_controller_option(&options, *resolved, true);
+            }
+        }
+    }
+    return options;
+}
+
+std::string controller_option_label(const ControllerOption& option)
+{
+    const std::string prefix = option.detached_vehicle ? "Detached vehicle: " : "Main stack: ";
+    return prefix + std::to_string(option.stage_index + 1) + ": " + option.stage_name;
+}
+
+bool selected_controller_exists()
+{
+    return std::any_of(
+        g_phase_controller_options.begin(),
+        g_phase_controller_options.end(),
+        [](const ControllerOption& option) {
+            return controller_option_matches(
+                option,
+                g_selected_controller_stage_index,
+                g_selected_controller_detached_vehicle);
+        });
+}
+
+void refresh_phase_controller_combo()
+{
+    ensure_case_initialized();
+    g_phase_controller_options = build_controller_options();
+    if (!selected_controller_exists()) {
+        if (g_phase_controller_options.empty()) {
+            g_selected_controller_stage_index = -1;
+            g_selected_controller_detached_vehicle = false;
+        } else {
+            g_selected_controller_stage_index = g_phase_controller_options.front().stage_index;
+            g_selected_controller_detached_vehicle = g_phase_controller_options.front().detached_vehicle;
+        }
+    }
+
+    if (!window_is_live(g_phase_controller_combo)) {
+        return;
+    }
+
+    SendMessageW(g_phase_controller_combo, CB_RESETCONTENT, 0, 0);
+    int selected_option = 0;
+    for (std::size_t i = 0; i < g_phase_controller_options.size(); ++i) {
+        const auto& option = g_phase_controller_options[i];
+        SendMessageW(
+            g_phase_controller_combo,
+            CB_ADDSTRING,
+            0,
+            reinterpret_cast<LPARAM>(widen(controller_option_label(option)).c_str()));
+        if (controller_option_matches(
+                option,
+                g_selected_controller_stage_index,
+                g_selected_controller_detached_vehicle)) {
+            selected_option = static_cast<int>(i);
+        }
+    }
+    if (!g_phase_controller_options.empty()) {
+        SendMessageW(g_phase_controller_combo, CB_SETCURSEL, static_cast<WPARAM>(selected_option), 0);
+    }
+}
+
+void select_phase_editor_controller(const post2::core::PhaseConfig& phase)
+{
+    if (!window_is_live(g_phase_editor_controller_combo)) {
+        return;
+    }
+    const int stage_index = phase_controller_stage_index(phase);
+    int selected_option = 0;
+    for (std::size_t i = 0; i < g_phase_controller_options.size(); ++i) {
+        if (controller_option_matches(
+                g_phase_controller_options[i],
+                stage_index,
+                phase.controller_detached_stage)) {
+            selected_option = static_cast<int>(i);
+            break;
+        }
+    }
+    SendMessageW(g_phase_editor_controller_combo, CB_SETCURSEL, static_cast<WPARAM>(selected_option), 0);
+}
+
+int selected_phase_editor_controller_stage_index()
+{
+    if (!window_is_live(g_phase_editor_controller_combo)) {
+        return g_selected_controller_stage_index;
+    }
+    const LRESULT selected = SendMessageW(g_phase_editor_controller_combo, CB_GETCURSEL, 0, 0);
+    if (selected == CB_ERR ||
+        static_cast<std::size_t>(selected) >= g_phase_controller_options.size()) {
+        return g_selected_controller_stage_index;
+    }
+    return g_phase_controller_options[static_cast<std::size_t>(selected)].stage_index;
+}
+
+bool selected_phase_editor_controller_detached_vehicle()
+{
+    if (!window_is_live(g_phase_editor_controller_combo)) {
+        return g_selected_controller_detached_vehicle;
+    }
+    const LRESULT selected = SendMessageW(g_phase_editor_controller_combo, CB_GETCURSEL, 0, 0);
+    if (selected == CB_ERR ||
+        static_cast<std::size_t>(selected) >= g_phase_controller_options.size()) {
+        return g_selected_controller_detached_vehicle;
+    }
+    return g_phase_controller_options[static_cast<std::size_t>(selected)].detached_vehicle;
+}
+
 post2::core::PhaseConfig* selected_phase()
 {
     ensure_case_initialized();
     if (g_case.phases.empty()) {
         g_case.phases.push_back(post2::core::PhaseConfig{});
     }
+    if (!g_visible_phase_indices.empty()) {
+        const bool selected_visible = std::any_of(
+            g_visible_phase_indices.begin(),
+            g_visible_phase_indices.end(),
+            [](int phase_index) {
+                return phase_index == g_selected_phase_index;
+            });
+        if (!selected_visible) {
+            g_selected_phase_index = g_visible_phase_indices.front();
+        }
+    }
     if (g_selected_phase_index < 0 || static_cast<std::size_t>(g_selected_phase_index) >= g_case.phases.size()) {
         g_selected_phase_index = 0;
     }
     return &g_case.phases[static_cast<std::size_t>(g_selected_phase_index)];
+}
+
+int current_phase_action_min_stage_index()
+{
+    const auto* phase = selected_phase();
+    if (!window_is_live(g_phase_editor_controller_combo)) {
+        return phase_action_min_stage_index(*phase);
+    }
+    const bool detached = selected_phase_editor_controller_detached_vehicle();
+    const int stage_index = selected_phase_editor_controller_stage_index();
+    return detached ? stage_index : 0;
+}
+
+int current_phase_action_max_stage_index()
+{
+    const auto* phase = selected_phase();
+    if (!window_is_live(g_phase_editor_controller_combo)) {
+        return phase_action_max_stage_index(*phase);
+    }
+    const bool detached = selected_phase_editor_controller_detached_vehicle();
+    const int stage_index = selected_phase_editor_controller_stage_index();
+    return detached ? stage_index : top_stage_index_for_vehicle(g_case.vehicle);
 }
 
 std::string action_label(const post2::core::PhaseAction& action)
@@ -5665,15 +5990,13 @@ void populate_action_stage_combo()
     if (!window_is_live(g_phase_action_stage)) {
         return;
     }
-    SendMessageW(g_phase_action_stage, CB_RESETCONTENT, 0, 0);
-    const auto stages = post2::vehicle::effective_stage_configs(g_case.vehicle);
-    for (std::size_t i = 0; i < stages.size(); ++i) {
-        const std::string label = std::to_string(i + 1) + ": " + stages[i].name;
-        SendMessageW(g_phase_action_stage, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(widen(label).c_str()));
-    }
-    if (!stages.empty()) {
-        SendMessageW(g_phase_action_stage, CB_SETCURSEL, 0, 0);
-    }
+    populate_action_stage_combo_for_hwnd(
+        g_phase_action_stage,
+        g_case.vehicle,
+        0,
+        current_phase_action_min_stage_index(),
+        current_phase_action_max_stage_index(),
+        &g_phase_action_stage_indices);
 }
 
 void refresh_action_list()
@@ -5726,7 +6049,20 @@ void load_selected_action_controls()
     populate_action_value_combo(action.type, action.value);
     EnableWindow(g_phase_action_stage, action.type == "set_stage_active" || action.type == "set_stage_attached");
     const int stage_index = action.stage_index >= 0 ? action.stage_index : 0;
-    SendMessageW(g_phase_action_stage, CB_SETCURSEL, static_cast<WPARAM>(stage_index), 0);
+    auto stage_it = std::find(
+        g_phase_action_stage_indices.begin(),
+        g_phase_action_stage_indices.end(),
+        stage_index);
+    if (stage_it == g_phase_action_stage_indices.end()) {
+        stage_it = g_phase_action_stage_indices.begin();
+    }
+    if (stage_it != g_phase_action_stage_indices.end()) {
+        SendMessageW(
+            g_phase_action_stage,
+            CB_SETCURSEL,
+            static_cast<WPARAM>(std::distance(g_phase_action_stage_indices.begin(), stage_it)),
+            0);
+    }
 }
 
 bool update_selected_action_from_controls(HWND hwnd, post2::core::PhaseConfig* phase)
@@ -5748,7 +6084,11 @@ bool update_selected_action_from_controls(HWND hwnd, post2::core::PhaseConfig* p
             MessageBoxW(hwnd, L"Select a target stage.", L"Phase action", MB_ICONWARNING);
             return false;
         }
-        action.stage_index = static_cast<int>(selected_stage);
+        if (static_cast<std::size_t>(selected_stage) >= g_phase_action_stage_indices.size()) {
+            MessageBoxW(hwnd, L"Select a target stage.", L"Phase action", MB_ICONWARNING);
+            return false;
+        }
+        action.stage_index = g_phase_action_stage_indices[static_cast<std::size_t>(selected_stage)];
         const auto stages = post2::vehicle::effective_stage_configs(g_case.vehicle);
         if (static_cast<std::size_t>(action.stage_index) < stages.size()) {
             action.stage_name = stages[static_cast<std::size_t>(action.stage_index)].name;
@@ -5774,12 +6114,19 @@ bool add_action_from_sidebar(HWND hwnd)
     action.time_s = 0.0;
     action.type = "set_stage_active";
     action.value = true;
-    action.stage_index = 0;
+    action.stage_index = current_phase_action_min_stage_index();
     const auto stages = post2::vehicle::effective_stage_configs(g_case.vehicle);
-    if (!stages.empty()) {
-        action.stage_name = stages.front().name;
+    if (action.stage_index >= 0 &&
+        static_cast<std::size_t>(action.stage_index) < stages.size()) {
+        action.stage_name = stages[static_cast<std::size_t>(action.stage_index)].name;
     }
-    if (!show_phase_action_editor_dialog(hwnd, &action, g_case.vehicle, L"Add Action")) {
+    if (!show_phase_action_editor_dialog(
+            hwnd,
+            &action,
+            g_case.vehicle,
+            L"Add Action",
+            current_phase_action_min_stage_index(),
+            current_phase_action_max_stage_index())) {
         return true;
     }
     phase->actions.push_back(std::move(action));
@@ -5797,7 +6144,13 @@ bool edit_action_from_sidebar(HWND hwnd)
         return true;
     }
     auto action = phase->actions[static_cast<std::size_t>(g_selected_action_index)];
-    if (!show_phase_action_editor_dialog(hwnd, &action, g_case.vehicle, L"Edit Action")) {
+    if (!show_phase_action_editor_dialog(
+            hwnd,
+            &action,
+            g_case.vehicle,
+            L"Edit Action",
+            current_phase_action_min_stage_index(),
+            current_phase_action_max_stage_index())) {
         return true;
     }
     phase->actions[static_cast<std::size_t>(g_selected_action_index)] = std::move(action);
@@ -6347,20 +6700,32 @@ void refresh_phase_list()
     }
 
     ensure_case_initialized();
+    refresh_phase_controller_combo();
     SendMessageW(g_phase_list, LB_RESETCONTENT, 0, 0);
+    g_visible_phase_indices.clear();
     for (std::size_t i = 0; i < g_case.phases.size(); ++i) {
+        if (phase_controller_stage_index(g_case.phases[i]) != g_selected_controller_stage_index ||
+            g_case.phases[i].controller_detached_stage != g_selected_controller_detached_vehicle) {
+            continue;
+        }
+        g_visible_phase_indices.push_back(static_cast<int>(i));
         const std::string label = std::to_string(i + 1) + ": " + g_case.phases[i].name +
             (g_case.phases[i].optimize_enabled ? "" : " (opt off)");
         SendMessageW(g_phase_list, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(widen(label).c_str()));
     }
-    if (g_case.phases.empty()) {
+    if (g_visible_phase_indices.empty()) {
         g_selected_phase_index = -1;
     } else {
-        if (g_selected_phase_index < 0 ||
-            static_cast<std::size_t>(g_selected_phase_index) >= g_case.phases.size()) {
-            g_selected_phase_index = 0;
+        auto selected_it = std::find(
+            g_visible_phase_indices.begin(),
+            g_visible_phase_indices.end(),
+            g_selected_phase_index);
+        if (selected_it == g_visible_phase_indices.end()) {
+            g_selected_phase_index = g_visible_phase_indices.front();
+            selected_it = g_visible_phase_indices.begin();
         }
-        SendMessageW(g_phase_list, LB_SETCURSEL, static_cast<WPARAM>(g_selected_phase_index), 0);
+        const int list_index = static_cast<int>(std::distance(g_visible_phase_indices.begin(), selected_it));
+        SendMessageW(g_phase_list, LB_SETCURSEL, static_cast<WPARAM>(list_index), 0);
     }
 }
 
@@ -6369,8 +6734,13 @@ void load_selected_phase_controls()
     if (!window_is_live(g_phase_scroll_pane)) {
         return;
     }
+    if (g_selected_phase_index < 0 ||
+        static_cast<std::size_t>(g_selected_phase_index) >= g_case.phases.size()) {
+        return;
+    }
 
     const auto* phase = selected_phase();
+    select_phase_editor_controller(*phase);
     SetWindowTextW(g_phase_name_edit, widen(phase->name).c_str());
     Button_SetCheck(g_phase_inherit_initial, phase->inherit_initial_state ? BST_CHECKED : BST_UNCHECKED);
     Button_SetCheck(g_phase_hold_down_initial, phase->hold_down_clamp_initial_active ? BST_CHECKED : BST_UNCHECKED);
@@ -6407,6 +6777,10 @@ bool apply_phase_controls(HWND hwnd)
         SetFocus(g_phase_name_edit);
         return false;
     }
+    set_phase_controller(
+        &edited,
+        selected_phase_editor_controller_stage_index(),
+        selected_phase_editor_controller_detached_vehicle());
 
     edited.inherit_initial_state = Button_GetCheck(g_phase_inherit_initial) == BST_CHECKED;
     edited.hold_down_clamp_initial_active = Button_GetCheck(g_phase_hold_down_initial) == BST_CHECKED;
@@ -6505,6 +6879,10 @@ void add_phase_from_sidebar()
     const double default_duration_s = g_case.phases.empty() ? g_config.duration_s : 60.0;
     phase.termination = {"time", ">=", default_duration_s};
     phase.inherit_initial_state = !g_case.phases.empty();
+    set_phase_controller(
+        &phase,
+        g_selected_controller_stage_index,
+        g_selected_controller_detached_vehicle);
     g_case.phases.push_back(std::move(phase));
     g_selected_phase_index = static_cast<int>(g_case.phases.size() - 1);
     refresh_phase_list();
@@ -6518,7 +6896,10 @@ void delete_selected_phase_from_sidebar()
         MessageBoxW(GetParent(g_phase_list), L"A case must keep at least one phase.", L"Phase", MB_ICONWARNING);
         return;
     }
-    if (g_selected_phase_index < 0 || static_cast<std::size_t>(g_selected_phase_index) >= g_case.phases.size()) {
+    if (g_selected_phase_index < 0 ||
+        static_cast<std::size_t>(g_selected_phase_index) >= g_case.phases.size() ||
+        std::find(g_visible_phase_indices.begin(), g_visible_phase_indices.end(), g_selected_phase_index) ==
+            g_visible_phase_indices.end()) {
         return;
     }
     g_case.phases.erase(g_case.phases.begin() + g_selected_phase_index);
@@ -6536,6 +6917,7 @@ void create_phase_editor_controls(HWND hwnd)
     HFONT font = static_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
     const auto* phase = selected_phase();
     const std::string prefix = phase_path_prefix();
+    refresh_phase_controller_combo();
 
     g_phase_scroll_pane = CreateWindowExW(
         WS_EX_CLIENTEDGE,
@@ -6555,8 +6937,19 @@ void create_phase_editor_controls(HWND hwnd)
         SetWindowLongPtrW(g_phase_scroll_pane, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(phase_scroll_pane_proc)));
 
     int y = 16;
+    create_label(g_phase_scroll_pane, 18, y + 4, 86, L"Controller", font);
+    g_phase_editor_controller_combo = create_combo(g_phase_scroll_pane, kPhaseEditController, 118, y, 360, font);
+    for (const auto& option : g_phase_controller_options) {
+        SendMessageW(
+            g_phase_editor_controller_combo,
+            CB_ADDSTRING,
+            0,
+            reinterpret_cast<LPARAM>(widen(controller_option_label(option)).c_str()));
+    }
+    y += 38;
+
     create_label(g_phase_scroll_pane, 18, y + 4, 70, L"Name", font);
-    g_phase_name_edit = create_edit(g_phase_scroll_pane, kPhaseNameEdit, 278, y, 386, widen(phase->name), font);
+    g_phase_name_edit = create_edit(g_phase_scroll_pane, kPhaseNameEdit, 118, y, 546, widen(phase->name), font);
     y += 38;
 
     g_phase_inherit_initial = create_checkbox(g_phase_scroll_pane, kPhaseInheritInitial, 18, y, 138, L"Inherit state", font);
@@ -6580,12 +6973,11 @@ void create_phase_editor_controls(HWND hwnd)
     y += 40;
 
     // Dynamics model (degrees of freedom). "3dof" is the standard translational
-    // point mass; "1.5dof" (2D + pitch) is a reserved interface and is rejected
-    // at validation until enabled (see DynamicsDof / kOnePointFiveDofEnabled).
+    // point mass; "2.5dof" constrains motion and steering to a phase plane.
     create_label(g_phase_scroll_pane, 18, y + 4, 86, L"Dynamics", font);
     g_phase_dynamics_dof = create_combo(g_phase_scroll_pane, kPhaseDynamicsDof, 118, y, 154, font);
     add_combo_item(g_phase_dynamics_dof, L"3dof");
-    add_combo_item(g_phase_dynamics_dof, L"1.5dof");
+    add_combo_item(g_phase_dynamics_dof, L"2.5dof");
     y += 40;
 
     // Phase termination — summary + Edit... opens TriggerCondition editor.
@@ -6684,16 +7076,19 @@ void create_phase_sidebar_controls(HWND hwnd)
 {
     HFONT font = static_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
 
-    create_label(hwnd, 18, 18, 70, L"Phases", font);
+    create_label(hwnd, 18, 18, 70, L"Controller", font);
+    g_phase_controller_combo = create_combo(hwnd, kPhaseController, 98, 14, 210, font);
+
+    create_label(hwnd, 18, 50, 70, L"Phases", font);
     g_phase_list = CreateWindowExW(
         WS_EX_CLIENTEDGE,
         L"LISTBOX",
         L"",
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | LBS_NOTIFY | WS_VSCROLL,
         18,
-        42,
+        74,
         290,
-        356,
+        324,
         hwnd,
         control_id(kPhaseList),
         g_instance,
@@ -6801,6 +7196,13 @@ LRESULT CALLBACK phase_editor_proc(HWND hwnd, UINT message, WPARAM wparam, LPARA
                 const bool value = action_state_from_display_label(type, get_combo_text(g_phase_action_value));
                 populate_action_value_combo(type, value);
                 EnableWindow(g_phase_action_stage, type == "set_stage_active" || type == "set_stage_attached");
+                return 0;
+            }
+            break;
+        case kPhaseEditController:
+            if (HIWORD(wparam) == CBN_SELCHANGE) {
+                populate_action_stage_combo();
+                load_selected_action_controls();
                 return 0;
             }
             break;
@@ -6993,19 +7395,26 @@ std::vector<std::string> format_final_lines()
     lines.push_back("Propellant: " + format_double_short(tail.propellant_mass_kg, 1) + " kg");
     lines.push_back("Engine thrust: " + format_double_short(tail.engine_thrust_n / 1000.0, 1) + " kN");
     lines.push_back(std::string("Hold-down: ") + (tail.hold_down_clamp_active ? "yes" : "no"));
-    // Predicted orbit apoapsis (A) / periapsis (P): the max / min geodetic
-    // altitude of the integrated orbit drawn in the 3D scene.
-    if (!g_predicted_orbit.empty()) {
-        double apoapsis_m = g_predicted_orbit.front().altitude_m;
+    // Predicted trajectory apoapsis (A) / periapsis (P): shown for the last
+    // generated phase-end prediction, which is normally the terminal state.
+    const post2::core::PredictedTrajectoryPath* final_prediction = nullptr;
+    for (const auto& predicted : g_predicted_paths) {
+        if (!predicted.state_log.empty()) {
+            final_prediction = &predicted;
+        }
+    }
+    if (final_prediction) {
+        double apoapsis_m = final_prediction->state_log.front().altitude_m;
         double periapsis_m = apoapsis_m;
-        for (const auto& entry : g_predicted_orbit.entries()) {
+        for (const auto& entry : final_prediction->state_log.entries()) {
             apoapsis_m = std::max(apoapsis_m, entry.altitude_m);
             periapsis_m = std::min(periapsis_m, entry.altitude_m);
         }
+        lines.push_back("Predictions: " + std::to_string(g_predicted_paths.size()));
         lines.push_back("Apoapsis (A): " + format_double_short(apoapsis_m / 1000.0, 1) + " km");
         lines.push_back("Periapsis (P): " + format_double_short(periapsis_m / 1000.0, 1) + " km");
     } else {
-        lines.push_back("Predicted orbit: sub-orbital");
+        lines.push_back("Predictions: none");
     }
     return lines;
 }
@@ -7156,7 +7565,7 @@ void export_current(HWND hwnd, bool svg)
     std::string error;
     const std::string path = svg ? "gui_trajectory.svg" : "gui_trajectory.csv";
     const bool ok = svg
-        ? post2::core::write_svg_file(path, g_result.state_log, &g_predicted_orbit, &error)
+        ? post2::core::write_svg_file(path, g_result.state_log, g_predicted_paths, &error)
         : post2::core::write_csv_file(path, g_result.state_log, &error);
 
     if (!ok) {
@@ -7282,7 +7691,7 @@ LRESULT CALLBACK scene_window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARA
         g_scene_renderer.render(
             g_camera,
             g_result.state_log,
-            g_predicted_orbit,
+            g_predicted_paths,
             g_case.earth_rotation_at_epoch_rad,
             g_case.earth_rotation_rad_per_s,
             false);
@@ -7552,11 +7961,28 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
                 run_simulation(hwnd);
             }
             return 0;
+        case kPhaseController:
+            if (HIWORD(wparam) == CBN_SELCHANGE) {
+                const LRESULT selected = SendMessageW(g_phase_controller_combo, CB_GETCURSEL, 0, 0);
+                if (selected != CB_ERR &&
+                    static_cast<std::size_t>(selected) < g_phase_controller_options.size()) {
+                    const ControllerOption& option =
+                        g_phase_controller_options[static_cast<std::size_t>(selected)];
+                    g_selected_controller_stage_index = option.stage_index;
+                    g_selected_controller_detached_vehicle = option.detached_vehicle;
+                    g_selected_action_index = 0;
+                    refresh_phase_list();
+                }
+                return 0;
+            }
+            break;
         case kPhaseList:
             if (HIWORD(wparam) == LBN_SELCHANGE) {
                 const LRESULT selected = SendMessageW(g_phase_list, LB_GETCURSEL, 0, 0);
-                if (selected != LB_ERR) {
-                    g_selected_phase_index = static_cast<int>(selected);
+                if (selected != LB_ERR &&
+                    static_cast<std::size_t>(selected) < g_visible_phase_indices.size()) {
+                    g_selected_phase_index =
+                        g_visible_phase_indices[static_cast<std::size_t>(selected)];
                     g_selected_action_index = 0;
                 }
                 return 0;
@@ -7571,7 +7997,10 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
             run_simulation(hwnd);
             return 0;
         case kPhaseApply:
-            if (show_phase_editor_dialog(hwnd)) {
+            if (g_selected_phase_index >= 0 &&
+                std::find(g_visible_phase_indices.begin(), g_visible_phase_indices.end(), g_selected_phase_index) !=
+                    g_visible_phase_indices.end() &&
+                show_phase_editor_dialog(hwnd)) {
                 run_simulation(hwnd);
             }
             return 0;
@@ -7597,6 +8026,8 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
             return 0;
         case kMenuVehicleEdit:
             if (show_vehicle_settings_dialog(hwnd)) {
+                refresh_phase_list();
+                load_selected_phase_controls();
                 run_simulation(hwnd);
             }
             return 0;

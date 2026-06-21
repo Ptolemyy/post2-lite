@@ -231,33 +231,24 @@ struct SteeringModelConfig {
     SegmentedSteeringPolyConfig segmented_poly;
 };
 
-// Per-phase dynamics degrees-of-freedom. The simulation today integrates a
-// full 3-DOF translational point mass (3 position + 3 velocity) regardless of
-// phase. This enum is the seam that lets individual phases select a reduced /
-// alternative model later without touching every call site.
+// Per-phase dynamics degrees-of-freedom. The 3-DOF model integrates a full
+// translational point mass (3 position + 3 velocity). The 2.5-DOF model keeps
+// the same 6D storage but constrains motion and commanded thrust to a fixed
+// phase plane: two translational coordinates plus pitch-in-plane steering.
 //
-//   ThreeDof        - 3-DOF translational point mass (current, default).
-//   OnePointFiveDof - "1.5-DOF": planar (2D) translation plus a commanded
-//                     pitch attitude. Motion is constrained to the launch /
-//                     orbital plane and steering reduces to pitch-in-plane.
-//                     RESERVED INTERFACE -- not yet implemented (see
-//                     kOnePointFiveDofEnabled). Selecting it is rejected at
-//                     config validation until the dynamics are filled in.
+//   ThreeDof        - 3-DOF translational point mass (default).
+//   TwoPointFiveDof - "2.5-DOF": planar 2D translation plus commanded pitch
+//                     attitude in the launch / orbital plane.
 enum class DynamicsDof {
     ThreeDof,
-    OnePointFiveDof,
+    TwoPointFiveDof,
 };
-
-// Master switch for the reserved 1.5-DOF path. Flip to true once the planar +
-// pitch dynamics are implemented; until then validation refuses any phase that
-// requests it so cases cannot silently run with the wrong model.
-inline constexpr bool kOnePointFiveDofEnabled = false;
 
 inline const char* dynamics_dof_to_string(DynamicsDof dof)
 {
     switch (dof) {
-        case DynamicsDof::OnePointFiveDof:
-            return "1.5dof";
+        case DynamicsDof::TwoPointFiveDof:
+            return "2.5dof";
         case DynamicsDof::ThreeDof:
         default:
             return "3dof";
@@ -272,8 +263,8 @@ inline bool dynamics_dof_from_string(const std::string& token, DynamicsDof* out)
         *out = DynamicsDof::ThreeDof;
         return true;
     }
-    if (token == "1.5dof") {
-        *out = DynamicsDof::OnePointFiveDof;
+    if (token == "2.5dof") {
+        *out = DynamicsDof::TwoPointFiveDof;
         return true;
     }
     return false;
@@ -281,8 +272,15 @@ inline bool dynamics_dof_from_string(const std::string& token, DynamicsDof* out)
 
 struct PhaseConfig {
     std::string name = "default";
-    // Dynamics model for this phase: "3dof" (default) or the reserved "1.5dof"
-    // (planar + pitch) interface. See DynamicsDof / kOnePointFiveDofEnabled.
+    // Controller mount point for this phase. A negative index with an empty
+    // name preserves legacy behaviour: the controller is mounted on the main
+    // stack's top/payload stage. When controller_detached_stage is true, the
+    // controller commands only that separated stage as its own vehicle.
+    int controller_stage_index = -1;
+    std::string controller_stage_name;
+    bool controller_detached_stage = false;
+    // Dynamics model for this phase: "3dof" (default) or "2.5dof" (planar
+    // translation + pitch-in-plane steering).
     std::string dynamics_dof = "3dof";
     // Polymorphic termination condition. For type == "time" the value is the
     // phase duration in seconds (phase-relative). For altitude/velocity/mass
@@ -415,6 +413,22 @@ struct SimulationResult {
     bool ok = false;
     std::string error;
     StateLog state_log;
+};
+
+struct ColorRgb {
+    int red = 0;
+    int green = 0;
+    int blue = 0;
+};
+
+struct PredictedTrajectoryPath {
+    StateLog state_log;
+    int source_phase_index = -1;
+    std::string source_phase_name;
+    int controller_stage_index = -1;
+    std::string controller_name = "root stack";
+    bool controller_detached_stage = false;
+    ColorRgb color = {13, 148, 136};
 };
 
 struct OptimizationRunOptions {

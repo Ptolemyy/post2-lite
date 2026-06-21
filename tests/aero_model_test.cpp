@@ -110,6 +110,21 @@ void test_us1976_atmosphere()
     check("density decreases with altitude", h20.density_kgpm3 < h11.density_kgpm3 &&
                                               h11.density_kgpm3 < sea.density_kgpm3);
     check("tropopause temp ~216.65", std::fabs(h11.temperature_k - 216.65) < 0.5);
+
+    // Above 86 km the density must keep decaying (Vallado bands), not freeze at
+    // the ~7e-6 kg/m3 boundary value the old clamp produced.
+    const post2::environment::AtmosphereSample h100 = post2::environment::us_standard_1976(100000.0);
+    const post2::environment::AtmosphereSample h200 = post2::environment::us_standard_1976(200000.0);
+    const post2::environment::AtmosphereSample h400 = post2::environment::us_standard_1976(400000.0);
+    check("100km density ~5.30e-7", std::fabs(h100.density_kgpm3 - 5.297e-7) < 5.0e-8);
+    check("200km density ~2.79e-10", std::fabs(h200.density_kgpm3 - 2.789e-10) < 5.0e-11);
+    check("200km density far below 86km clamp", h200.density_kgpm3 < 1.0e-8);
+    check("upper atmosphere keeps decaying",
+          h400.density_kgpm3 < h200.density_kgpm3 &&
+              h200.density_kgpm3 < h100.density_kgpm3);
+    check("200km values finite",
+          std::isfinite(h200.pressure_pa) && std::isfinite(h200.speed_of_sound_mps) &&
+              h200.speed_of_sound_mps > 0.0);
 }
 
 } // namespace

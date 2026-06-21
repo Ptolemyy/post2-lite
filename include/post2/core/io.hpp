@@ -1,6 +1,7 @@
 #pragma once
 
 #include <string>
+#include <vector>
 
 #include "post2/core/state_log.hpp"
 #include "post2/core/types.hpp"
@@ -22,13 +23,16 @@ bool write_guidance_script_file(
     const std::string& path,
     const CaseConfig& case_config,
     std::string* error);
-// Draws the ascent trajectory and, when `predicted_orbit` is non-null and
-// non-empty, the integrated predicted orbit (distinct colour) with its
-// apoapsis/periapsis (max/min altitude points) marked. Pass nullptr to skip.
+// Draws the ascent trajectory and optional integrated prediction paths.
 bool write_svg_file(
     const std::string& path,
     const StateLog& state_log,
     const StateLog* predicted_orbit,
+    std::string* error);
+bool write_svg_file(
+    const std::string& path,
+    const StateLog& state_log,
+    const std::vector<PredictedTrajectoryPath>& predicted_paths,
     std::string* error);
 
 } // namespace post2::core

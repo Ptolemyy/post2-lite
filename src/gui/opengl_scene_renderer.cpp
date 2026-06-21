@@ -500,6 +500,19 @@ double compute_scene_radius_m(const post2::core::StateLog& state_log)
     return radius_m;
 }
 
+double compute_scene_radius_m(
+    const post2::core::StateLog& state_log,
+    const std::vector<post2::core::PredictedTrajectoryPath>& predicted_paths)
+{
+    double radius_m = compute_scene_radius_m(state_log);
+    for (const auto& predicted : predicted_paths) {
+        for (const auto& entry : predicted.state_log.entries()) {
+            radius_m = std::max(radius_m, post2::vehicle::norm(entry.state.position_m));
+        }
+    }
+    return radius_m;
+}
+
 OpenGLSceneRenderer::~OpenGLSceneRenderer()
 {
     destroy();
@@ -592,7 +605,7 @@ void OpenGLSceneRenderer::resize(int width, int height)
 void OpenGLSceneRenderer::render(
     const Camera3D& camera,
     const post2::core::StateLog& state_log,
-    const post2::core::StateLog& predicted_orbit,
+    const std::vector<post2::core::PredictedTrajectoryPath>& predicted_paths,
     double earth_rotation_at_epoch_rad,
     double earth_rotation_rad_per_s,
     bool earth_fixed_view)
@@ -607,7 +620,7 @@ void OpenGLSceneRenderer::render(
         resize(rect_width(client), rect_height(client));
     }
 
-    draw_scene(camera, state_log, predicted_orbit, earth_rotation_at_epoch_rad, earth_rotation_rad_per_s, earth_fixed_view);
+    draw_scene(camera, state_log, predicted_paths, earth_rotation_at_epoch_rad, earth_rotation_rad_per_s, earth_fixed_view);
     SwapBuffers(hdc_);
 }
 
@@ -662,7 +675,7 @@ void OpenGLSceneRenderer::build_earth_mesh()
 void OpenGLSceneRenderer::draw_scene(
     const Camera3D& camera,
     const post2::core::StateLog& state_log,
-    const post2::core::StateLog& predicted_orbit,
+    const std::vector<post2::core::PredictedTrajectoryPath>& predicted_paths,
     double earth_rotation_at_epoch_rad,
     double earth_rotation_rad_per_s,
     bool earth_fixed_view)
@@ -689,7 +702,20 @@ void OpenGLSceneRenderer::draw_scene(
                 takeoff_time_s_for_display(state_log));
         draw_earth(earth_rotation_for_display_rad);
         draw_axis();
-        draw_predicted_orbit(predicted_orbit, earth_rotation_at_epoch_rad, earth_rotation_rad_per_s, earth_fixed_view);
+        const post2::core::PredictedTrajectoryPath* marker_prediction = nullptr;
+        for (const auto& predicted_path : predicted_paths) {
+            if (!predicted_path.state_log.empty()) {
+                marker_prediction = &predicted_path;
+            }
+        }
+        for (const auto& predicted_path : predicted_paths) {
+            draw_predicted_path(
+                predicted_path,
+                earth_rotation_at_epoch_rad,
+                earth_rotation_rad_per_s,
+                earth_fixed_view,
+                &predicted_path == marker_prediction);
+        }
         draw_trajectory(state_log, earth_rotation_at_epoch_rad, earth_rotation_rad_per_s, earth_fixed_view);
         draw_markers(state_log, earth_rotation_at_epoch_rad, earth_rotation_rad_per_s, earth_fixed_view);
     }
@@ -802,13 +828,14 @@ void OpenGLSceneRenderer::draw_markers(
     glDepthMask(GL_TRUE);
 }
 
-void OpenGLSceneRenderer::draw_predicted_orbit(
-    const post2::core::StateLog& predicted_orbit,
+void OpenGLSceneRenderer::draw_predicted_path(
+    const post2::core::PredictedTrajectoryPath& predicted_path,
     double earth_rotation_at_epoch_rad,
     double earth_rotation_rad_per_s,
-    bool earth_fixed_view) const
+    bool earth_fixed_view,
+    bool draw_apsis_markers) const
 {
-    const auto& entries = predicted_orbit.entries();
+    const auto& entries = predicted_path.state_log.entries();
     if (entries.size() < 2) {
         return;
     }
@@ -816,12 +843,14 @@ void OpenGLSceneRenderer::draw_predicted_orbit(
     glDisable(GL_TEXTURE_2D);
     glDepthMask(GL_FALSE);
 
-    // Dashed teal loop for the integrated predicted orbit (distinct from the
-    // solid red powered ascent).
+    // Dashed integrated prediction path, distinct from the solid red ascent.
     glEnable(GL_LINE_STIPPLE);
     glLineStipple(2, 0x00FF);
     glLineWidth(2.0f);
-    glColor3ub(13, 148, 136);
+    glColor3ub(
+        static_cast<GLubyte>(std::clamp(predicted_path.color.red, 0, 255)),
+        static_cast<GLubyte>(std::clamp(predicted_path.color.green, 0, 255)),
+        static_cast<GLubyte>(std::clamp(predicted_path.color.blue, 0, 255)));
     glBegin(GL_LINE_STRIP);
     for (const auto& entry : entries) {
         const Vec3 position = lifted_for_display(position_for_display(
@@ -830,6 +859,12 @@ void OpenGLSceneRenderer::draw_predicted_orbit(
     }
     glEnd();
     glDisable(GL_LINE_STIPPLE);
+
+    if (!draw_apsis_markers) {
+        glLineWidth(1.0f);
+        glDepthMask(GL_TRUE);
+        return;
+    }
 
     // Apoapsis (max altitude) and periapsis (min altitude) markers.
     const post2::core::LaunchVehicleStateLogEntry* apo = &entries.front();

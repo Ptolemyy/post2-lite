@@ -393,6 +393,25 @@ bool resolve_path(CaseConfig* config, const std::string& path, ResolvedPath* tar
             target->value = &config->vehicle.dry_mass_kg;
             return true;
         }
+        if (consume_identifier(&working, "rigid_body") && consume_dot(&working)) {
+            if (working == "moment_of_inertia_kgm2") {
+                target->value = &config->vehicle.rigid_body.moment_of_inertia_kgm2;
+                return true;
+            }
+            if (working == "initial_attitude_rad") {
+                target->value = &config->vehicle.rigid_body.initial_attitude_rad;
+                return true;
+            }
+            if (working == "initial_angular_velocity_radps") {
+                target->value = &config->vehicle.rigid_body.initial_angular_velocity_radps;
+                return true;
+            }
+            if (working == "engine_moment_arm_m") {
+                target->value = &config->vehicle.rigid_body.engine_moment_arm_m;
+                return true;
+            }
+            return fail(error, "unsupported vehicle rigid_body variable path: " + path);
+        }
         std::size_t tank_index = 0;
         if (consume_indexed(&working, "tanks", &tank_index) && consume_dot(&working)) {
             if (tank_index >= config->vehicle.tanks.size()) {

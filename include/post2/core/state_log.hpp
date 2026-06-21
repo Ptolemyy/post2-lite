@@ -18,6 +18,9 @@ struct LaunchVehicleStateLogEntry {
     double speed_mps = 0.0;
     double total_mass_kg = 0.0;
     double propellant_mass_kg = 0.0;
+    double rigid_body_attitude_rad = 0.0;
+    double rigid_body_angular_velocity_radps = 0.0;
+    double rigid_body_moment_of_inertia_kgm2 = 0.0;
     double engine_thrust_n = 0.0;
     double engine_mass_flow_kgps = 0.0;
     post2::vehicle::Vec3 acceleration_eci_mps2 = {0.0, 0.0, 0.0};

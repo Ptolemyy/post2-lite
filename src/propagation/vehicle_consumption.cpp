@@ -57,17 +57,21 @@ double total_attached_mass_kg(
     const post2::vehicle::VehicleRuntimeState& topology,
     const std::vector<double>& tank_masses_kg)
 {
-    double total = topology.vehicle.dry_mass_kg;
+    double total = 0.0;
     for (std::size_t i = 0; i < topology.stages.size(); ++i) {
         if (!topology.stages[i].attached) {
             continue;
         }
+        total += std::max(0.0, topology.stages[i].dry_mass_kg);
         for (std::size_t j = 0; j < topology.stages[i].tanks.size(); ++j) {
             const std::size_t flat = post2::vehicle::flat_tank_index(topology, i, j);
             if (flat < tank_masses_kg.size()) {
                 total += std::max(0.0, tank_masses_kg[flat]);
             }
         }
+    }
+    if (total <= 0.0) {
+        return topology.vehicle.total_mass_kg;
     }
     return total;
 }
@@ -210,6 +214,10 @@ DerivativeResult VehicleConsumptionPropagator::compute_derivatives(
         post2::vehicle::effective_stage_configs(config_);
     if (command.enabled && !runtime_topology.stages.empty()) {
         for (std::size_t i = 0; i < runtime_topology.stages.size() && i < stage_configs.size(); ++i) {
+            if (command.controlled_stage_index >= 0 &&
+                i != static_cast<std::size_t>(command.controlled_stage_index)) {
+                continue;
+            }
             const auto& stage_rt = runtime_topology.stages[i];
             const auto& stage_cfg = stage_configs[i];
             post2::vehicle::EngineState& engine_out = result.per_stage_engine[i];
@@ -332,6 +340,7 @@ post2::vehicle::VehicleRuntimeState VehicleConsumptionPropagator::commit(
     post2::vehicle::VehicleRuntimeState next = previous;
     next.time_s = next_time_s;
     next.vehicle.motion = integrated.motion;
+    next.vehicle.rigid_body = integrated.rigid_body;
     next.engine.enabled = command.enabled;
     next.engine.direction_body = normalized_or(command.direction_eci, {1.0, 0.0, 0.0});
 
@@ -370,7 +379,11 @@ post2::vehicle::VehicleRuntimeState VehicleConsumptionPropagator::commit(
         const post2::vehicle::EngineState& prev_engine = previous.stages[i].engine;
         const post2::vehicle::EngineConfig& ecfg = stage_configs[i].engine;
         const post2::vehicle::StageRuntimeState& srt = next.stages[i];
+        const bool controller_allows_stage =
+            command.controlled_stage_index < 0 ||
+            i == static_cast<std::size_t>(command.controlled_stage_index);
         const bool eligible = command.enabled && srt.active && srt.attached &&
+            controller_allows_stage &&
             ecfg.enabled && ecfg.thrust_vac_n > 0.0 && ecfg.isp_vac_s > 0.0;
 
         double ignition_time_s = prev_engine.ignition_time_s;

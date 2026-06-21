@@ -22,6 +22,29 @@ struct CartesianStateDerivative6D {
     Vec3 d_velocity_mps2;
 };
 
+struct RigidBodyConfig {
+    // Scalar pitch-axis inertia used by the planar 2.5-DOF rigid-body model.
+    // A value <= 0 is ignored by 3-DOF phases but rejected by 2.5-DOF phases.
+    double moment_of_inertia_kgm2 = 0.0;
+    double initial_attitude_rad = 0.0;
+    double initial_angular_velocity_radps = 0.0;
+    // Distance from the center of mass to the engine thrust line along the
+    // negative body-X axis. Lateral thrust from engine.direction_body produces
+    // pitch torque tau = r x F in the 2.5-DOF model.
+    double engine_moment_arm_m = 0.0;
+};
+
+struct RigidBodyState {
+    double attitude_rad = 0.0;
+    double angular_velocity_radps = 0.0;
+    double moment_of_inertia_kgm2 = 0.0;
+};
+
+struct RigidBodyDerivative {
+    double attitude_radps = 0.0;
+    double angular_acceleration_radps2 = 0.0;
+};
+
 struct TankRef {
     std::string stage_name;
     std::string tank_name;
@@ -193,6 +216,7 @@ struct AeroConfig {
 struct VehicleConfig {
     std::string name = "default";
     double dry_mass_kg = 1000.0;
+    RigidBodyConfig rigid_body;
     // Legacy single-stage fields. New configs should use stages; these remain
     // as the compatibility surface for old CLI/remote/config paths.
     EngineConfig engine;
@@ -204,6 +228,7 @@ struct VehicleConfig {
 
 struct VehicleState {
     CartesianState6D motion;
+    RigidBodyState rigid_body;
     double dry_mass_kg = 0.0;
     double propellant_mass_kg = 0.0;
     double total_mass_kg = 0.0;

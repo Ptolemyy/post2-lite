@@ -160,6 +160,11 @@ LaunchVehicleStateLogEntry StateLog::make_entry(const post2::vehicle::VehicleRun
     entry.speed_mps = post2::vehicle::norm(runtime.vehicle.motion.velocity_mps);
     entry.total_mass_kg = runtime.vehicle.total_mass_kg;
     entry.propellant_mass_kg = runtime.vehicle.propellant_mass_kg;
+    entry.rigid_body_attitude_rad = runtime.vehicle.rigid_body.attitude_rad;
+    entry.rigid_body_angular_velocity_radps =
+        runtime.vehicle.rigid_body.angular_velocity_radps;
+    entry.rigid_body_moment_of_inertia_kgm2 =
+        runtime.vehicle.rigid_body.moment_of_inertia_kgm2;
     entry.engine_thrust_n = runtime.engine.actual_thrust_n;
     entry.engine_mass_flow_kgps = runtime.engine.mass_flow_kgps;
     entry.throttle = runtime.engine.throttle;

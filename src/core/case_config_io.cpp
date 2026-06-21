@@ -169,6 +169,17 @@ JsonValue engine_to_json(const post2::vehicle::EngineConfig& engine)
     });
 }
 
+JsonValue rigid_body_to_json(const post2::vehicle::RigidBodyConfig& rigid_body)
+{
+    return JsonValue::object({
+        {"moment_of_inertia_kgm2", number(rigid_body.moment_of_inertia_kgm2)},
+        {"initial_attitude_rad", number(rigid_body.initial_attitude_rad)},
+        {"initial_angular_velocity_radps",
+         number(rigid_body.initial_angular_velocity_radps)},
+        {"engine_moment_arm_m", number(rigid_body.engine_moment_arm_m)},
+    });
+}
+
 JsonValue gravity_model_to_json(const GravityModelConfig& model)
 {
     return JsonValue::object({
@@ -307,6 +318,7 @@ JsonValue vehicle_to_json(const post2::vehicle::VehicleConfig& vehicle)
     return JsonValue::object({
         {"name", string(normalized_vehicle.name)},
         {"dry_mass_kg", number(normalized_vehicle.dry_mass_kg)},
+        {"rigid_body", rigid_body_to_json(normalized_vehicle.rigid_body)},
         {"aero", aero_to_json(normalized_vehicle.aero)},
         {"engine", engine_to_json(normalized_vehicle.engine)},
         {"tanks", JsonValue::array(std::move(tanks))},
@@ -436,6 +448,9 @@ JsonValue phase_to_json(const PhaseConfig& phase)
 
     JsonValue::Object object{
         {"name", string(phase.name)},
+        {"controller_stage_index", number(static_cast<double>(phase.controller_stage_index))},
+        {"controller_stage_name", string(phase.controller_stage_name)},
+        {"controller_detached_stage", boolean(phase.controller_detached_stage)},
         {"termination", trigger_to_json(phase.termination)},
         {"optimize_enabled", boolean(phase.optimize_enabled)},
         {"inherit_initial_state", boolean(phase.inherit_initial_state)},
@@ -447,6 +462,9 @@ JsonValue phase_to_json(const PhaseConfig& phase)
             {"atol_position_m", number(phase.tolerances.atol_position_m)},
             {"atol_velocity_mps", number(phase.tolerances.atol_velocity_mps)},
             {"atol_tank_mass_kg", number(phase.tolerances.atol_tank_mass_kg)},
+            {"atol_attitude_rad", number(phase.tolerances.atol_attitude_rad)},
+            {"atol_angular_velocity_radps",
+             number(phase.tolerances.atol_angular_velocity_radps)},
         })},
         {"force_models", force_models_to_json(phase.force_models)},
         {"throttle_model", throttle_to_json(phase.throttle_model)},
@@ -1003,6 +1021,30 @@ bool parse_vehicle_aero(const JsonValue& value, post2::vehicle::AeroConfig* targ
     return true;
 }
 
+bool parse_rigid_body(
+    const JsonValue& value,
+    post2::vehicle::RigidBodyConfig* target,
+    std::string* error)
+{
+    if (!value.is_object()) {
+        return fail(error, "vehicle.rigid_body must be an object");
+    }
+
+    post2::vehicle::RigidBodyConfig parsed = *target;
+    if (!read_number(value, "moment_of_inertia_kgm2", &parsed.moment_of_inertia_kgm2, error) ||
+        !read_number(value, "initial_attitude_rad", &parsed.initial_attitude_rad, error) ||
+        !read_number(
+            value,
+            "initial_angular_velocity_radps",
+            &parsed.initial_angular_velocity_radps,
+            error) ||
+        !read_number(value, "engine_moment_arm_m", &parsed.engine_moment_arm_m, error)) {
+        return false;
+    }
+    *target = parsed;
+    return true;
+}
+
 bool parse_quaternion(const JsonValue& value, Quaternion* target, std::string* error)
 {
     if (!value.is_array() || value.array_value.size() != 4) {
@@ -1035,6 +1077,11 @@ bool parse_vehicle(const JsonValue& value, post2::vehicle::VehicleConfig* target
     }
     if (const JsonValue* aero = find_member(value, "aero")) {
         if (!parse_vehicle_aero(*aero, &parsed.aero, error)) {
+            return false;
+        }
+    }
+    if (const JsonValue* rigid_body = find_member(value, "rigid_body")) {
+        if (!parse_rigid_body(*rigid_body, &parsed.rigid_body, error)) {
             return false;
         }
     }
@@ -1619,6 +1666,13 @@ bool parse_phase(const JsonValue& value, PhaseConfig* target, std::string* error
         !read_string(value, "integrator", &parsed.integrator, error)) {
         return false;
     }
+    double controller_stage_index = static_cast<double>(parsed.controller_stage_index);
+    if (!read_number(value, "controller_stage_index", &controller_stage_index, error) ||
+        !read_string(value, "controller_stage_name", &parsed.controller_stage_name, error) ||
+        !read_bool(value, "controller_detached_stage", &parsed.controller_detached_stage, error)) {
+        return false;
+    }
+    parsed.controller_stage_index = static_cast<int>(controller_stage_index);
 
     // Termination: prefer an explicit block. Old JSON files that only carry
     // duration_s are migrated by synthesising a {time, >=, duration_s} block.
@@ -1648,7 +1702,13 @@ bool parse_phase(const JsonValue& value, PhaseConfig* target, std::string* error
         if (!read_number(*tol, "rtol", &parsed.tolerances.rtol, error) ||
             !read_number(*tol, "atol_position_m", &parsed.tolerances.atol_position_m, error) ||
             !read_number(*tol, "atol_velocity_mps", &parsed.tolerances.atol_velocity_mps, error) ||
-            !read_number(*tol, "atol_tank_mass_kg", &parsed.tolerances.atol_tank_mass_kg, error)) {
+            !read_number(*tol, "atol_tank_mass_kg", &parsed.tolerances.atol_tank_mass_kg, error) ||
+            !read_number(*tol, "atol_attitude_rad", &parsed.tolerances.atol_attitude_rad, error) ||
+            !read_number(
+                *tol,
+                "atol_angular_velocity_radps",
+                &parsed.tolerances.atol_angular_velocity_radps,
+                error)) {
             return false;
         }
     }

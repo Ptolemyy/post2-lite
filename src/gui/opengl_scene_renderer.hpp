@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <vector>
 
 #include <windows.h>
 
@@ -59,6 +60,9 @@ private:
 };
 
 double compute_scene_radius_m(const post2::core::StateLog& state_log);
+double compute_scene_radius_m(
+    const post2::core::StateLog& state_log,
+    const std::vector<post2::core::PredictedTrajectoryPath>& predicted_paths);
 
 class OpenGLSceneRenderer {
 public:
@@ -74,7 +78,7 @@ public:
     void render(
         const Camera3D& camera,
         const post2::core::StateLog& state_log,
-        const post2::core::StateLog& predicted_orbit,
+        const std::vector<post2::core::PredictedTrajectoryPath>& predicted_paths,
         double earth_rotation_at_epoch_rad,
         double earth_rotation_rad_per_s,
         bool earth_fixed_view);
@@ -86,7 +90,7 @@ private:
     void draw_scene(
         const Camera3D& camera,
         const post2::core::StateLog& state_log,
-        const post2::core::StateLog& predicted_orbit,
+        const std::vector<post2::core::PredictedTrajectoryPath>& predicted_paths,
         double earth_rotation_at_epoch_rad,
         double earth_rotation_rad_per_s,
         bool earth_fixed_view);
@@ -97,11 +101,12 @@ private:
         double earth_rotation_at_epoch_rad,
         double earth_rotation_rad_per_s,
         bool earth_fixed_view) const;
-    void draw_predicted_orbit(
-        const post2::core::StateLog& predicted_orbit,
+    void draw_predicted_path(
+        const post2::core::PredictedTrajectoryPath& predicted_path,
         double earth_rotation_at_epoch_rad,
         double earth_rotation_rad_per_s,
-        bool earth_fixed_view) const;
+        bool earth_fixed_view,
+        bool draw_apsis_markers) const;
     void draw_markers(
         const post2::core::StateLog& state_log,
         double earth_rotation_at_epoch_rad,
