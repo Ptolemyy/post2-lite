@@ -35,6 +35,8 @@ struct LaunchVehicleStateLogEntry {
     double atmosphere_density_kgpm3 = 0.0;
     double dynamic_pressure_pa = 0.0;
     double mach_number = 0.0;
+    // Sutton-Graves stagnation-point convective heat flux [W/m^2].
+    double heat_flux_wpm2 = 0.0;
     bool hold_down_clamp_active = false;
     int phase_index = 0;
     std::string phase_name;

@@ -34,7 +34,8 @@ bool generate_case_aero_tables(CaseConfig* config,
     // descriptor.
     const auto make_table = [&](int lo, int hi, const std::string& file, double length,
                                 double ref_d, double base_d,
-                                post2::vehicle::AeroStageTable* out) -> bool {
+                                post2::vehicle::AeroStageTable* out,
+                                const post2::aero::GridFinSpec& fins = {}) -> bool {
         post2::aero::AeroGeometry geom;
         geom.ref_diameter_m = ref_d;
         geom.total_length_m = std::max(length, 1.0);
@@ -42,7 +43,8 @@ bool generate_case_aero_tables(CaseConfig* config,
         geom.base_diameter_m = base_d;
         geom.power_on = true;
         post2::aero::finalize_geometry(&geom);
-        const post2::aero::AeroTable table = post2::aero::generate_aero_table(geom);
+        const post2::aero::AeroTable table =
+            post2::aero::generate_aero_table(geom, {}, {}, fins);
         const std::string path = output_dir + file;
         if (!post2::aero::write_aero_table_csv(path, table, &local_error)) {
             return false;
@@ -55,6 +57,7 @@ bool generate_case_aero_tables(CaseConfig* config,
         out->body_length_m = geom.total_length_m;
         out->nose_length_m = geom.nose_length_m;
         out->base_diameter_m = geom.base_diameter_m;
+        out->nose_radius_m = 0.5 * geom.base_diameter_m;
         return true;
     };
 
@@ -141,13 +144,20 @@ bool generate_case_aero_tables(CaseConfig* config,
         }
 
         // Single-stage tables [i, i] for the lower stages flying on their own.
-        // No fairing, so the core diameter sets both the reference and base.
+        // No fairing, so the core diameter sets both the reference and base. The
+        // booster (stage 0) carries the deployed grid fins through its recovery,
+        // so its solo table is generated grid-fin-inclusive.
         for (int i = 0; i < top; ++i) {
             const std::string file =
                 "aero_table_stage" + std::to_string(i + 1) + "_only.csv";
+            post2::aero::GridFinSpec fins;
+            if (i == 0) {
+                fins.count = aero.grid_fins.count;
+                fins.area_per_fin_m2 = aero.grid_fins.area_per_fin_m2;
+            }
             post2::vehicle::AeroStageTable alone;
             if (!make_table(i, i, file, stage_length[static_cast<std::size_t>(i)],
-                            base_diameter, base_diameter, &alone)) {
+                            base_diameter, base_diameter, &alone, fins)) {
                 if (error) {
                     *error = local_error;
                 }

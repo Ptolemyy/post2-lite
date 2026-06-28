@@ -19,8 +19,11 @@ constexpr double kPi = 3.141592653589793238462643383279502884;
 constexpr double kDegToRad = kPi / 180.0;
 constexpr int kEarthSlices = 192;
 constexpr int kEarthStacks = 96;
+constexpr int kCoastlineLonSteps = 1440;
+constexpr int kCoastlineLatSteps = 720;
 constexpr std::size_t kMaxDrawnSegments = 3000;
 constexpr double kTrajectorySurfaceLiftM = 1500.0;
+constexpr double kCoastlineSurfaceLiftM = 3500.0;
 
 using post2::core::Vec3;
 
@@ -96,6 +99,15 @@ Vec3 lifted_for_display(const Vec3& position_m)
     return position_m * ((length + kTrajectorySurfaceLiftM) / length);
 }
 
+Vec3 lifted_for_display(const Vec3& position_m, double lift_m)
+{
+    const double length = post2::vehicle::norm(position_m);
+    if (length <= 1.0e-9) {
+        return position_m;
+    }
+    return position_m * ((length + lift_m) / length);
+}
+
 Vec3 earth_fixed_position_for_display(
     const post2::core::LaunchVehicleStateLogEntry& entry,
     double earth_rotation_at_epoch_rad,
@@ -136,6 +148,15 @@ double takeoff_time_s_for_display(const post2::core::StateLog& state_log)
     return state_log.front().time_s;
 }
 
+bool phase_is_primary(const SceneRenderOptions& options, int phase_index)
+{
+    return options.primary_phase_indices.empty() ||
+        std::find(
+            options.primary_phase_indices.begin(),
+            options.primary_phase_indices.end(),
+            phase_index) != options.primary_phase_indices.end();
+}
+
 struct EarthTexture {
     int width = 0;
     int height = 0;
@@ -145,6 +166,12 @@ struct EarthTexture {
     {
         return width > 0 && height > 0 && rgb.size() == static_cast<std::size_t>(width) * height * 3U;
     }
+};
+
+struct RgbSample {
+    double r = 0.0;
+    double g = 0.0;
+    double b = 0.0;
 };
 
 std::uint16_t read_u16(const std::uint8_t* value)
@@ -220,6 +247,83 @@ EarthTexture decode_bmp_texture(const void* raw_data, std::size_t raw_size)
     return texture;
 }
 
+RgbSample texture_rgb_at(const std::vector<std::uint8_t>& rgb, int width, int height, double u, double v)
+{
+    if (width <= 0 || height <= 0 ||
+        rgb.size() != static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 3U) {
+        return {};
+    }
+
+    u -= std::floor(u);
+    v = clamp(v, 0.0, 1.0);
+
+    const double fx = u * static_cast<double>(width);
+    const double fy = v * static_cast<double>(height - 1);
+    const int x0 = ((static_cast<int>(std::floor(fx)) % width) + width) % width;
+    const int x1 = (x0 + 1) % width;
+    const int y0 = std::clamp(static_cast<int>(std::floor(fy)), 0, height - 1);
+    const int y1 = std::clamp(y0 + 1, 0, height - 1);
+    const double tx = fx - std::floor(fx);
+    const double ty = fy - std::floor(fy);
+
+    auto sample = [&](int x, int y) {
+        const std::size_t index =
+            (static_cast<std::size_t>(y) * static_cast<std::size_t>(width) +
+             static_cast<std::size_t>(x)) * 3U;
+        return RgbSample{
+            static_cast<double>(rgb[index + 0]),
+            static_cast<double>(rgb[index + 1]),
+            static_cast<double>(rgb[index + 2]),
+        };
+    };
+    const RgbSample c00 = sample(x0, y0);
+    const RgbSample c10 = sample(x1, y0);
+    const RgbSample c01 = sample(x0, y1);
+    const RgbSample c11 = sample(x1, y1);
+    const auto mix = [](double a, double b, double t) {
+        return a + (b - a) * t;
+    };
+    return {
+        mix(mix(c00.r, c10.r, tx), mix(c01.r, c11.r, tx), ty),
+        mix(mix(c00.g, c10.g, tx), mix(c01.g, c11.g, tx), ty),
+        mix(mix(c00.b, c10.b, tx), mix(c01.b, c11.b, tx), ty),
+    };
+}
+
+double texture_water_score_at(const std::vector<std::uint8_t>& rgb, int width, int height, double u, double v)
+{
+    const RgbSample c = texture_rgb_at(rgb, width, height, u, v);
+    const double max_rg = std::max(c.r, c.g);
+    const double min_rgb = std::min({c.r, c.g, c.b});
+    const double blue_margin = c.b - max_rg;
+    double score = 0.5 + blue_margin / 55.0;
+    score += (c.b - min_rgb) / 420.0;
+    if (c.b < 45.0) {
+        score -= (45.0 - c.b) / 90.0;
+    }
+    if (c.r > 185.0 && c.g > 185.0 && c.b > 185.0) {
+        score -= 0.35;  // clouds/ice should not punch ocean holes.
+    }
+    return clamp(score, 0.0, 1.0);
+}
+
+bool texture_land_at(const std::vector<std::uint8_t>& rgb, int width, int height, double u, double v)
+{
+    return texture_water_score_at(rgb, width, height, u, v) < 0.5;
+}
+
+Vec3 ellipsoid_surface_point(double lat_rad, double lon_rad, double lift_m = 0.0)
+{
+    const double a_m = post2::core::frames::Wgs84::a_m + lift_m;
+    const double b_m = post2::core::frames::Wgs84::b_m + lift_m;
+    const double cos_lat = std::cos(lat_rad);
+    return {
+        a_m * cos_lat * std::cos(lon_rad),
+        a_m * cos_lat * std::sin(lon_rad),
+        b_m * std::sin(lat_rad),
+    };
+}
+
 EarthTexture load_earth_texture_from_resource()
 {
     const HMODULE module = GetModuleHandleW(nullptr);
@@ -287,12 +391,168 @@ void emit_earth_sphere_mesh()
     }
 }
 
+void emit_overview_earth_mesh(const std::vector<std::uint8_t>& rgb, int width, int height)
+{
+    for (int stack = 0; stack < kEarthStacks; ++stack) {
+        const double stack0 = static_cast<double>(stack) / static_cast<double>(kEarthStacks);
+        const double stack1 = static_cast<double>(stack + 1) / static_cast<double>(kEarthStacks);
+        const double lat0 = -0.5 * kPi + stack0 * kPi;
+        const double lat1 = -0.5 * kPi + stack1 * kPi;
+
+        glBegin(GL_TRIANGLE_STRIP);
+        for (int slice = 0; slice <= kEarthSlices; ++slice) {
+            const double unit_slice = static_cast<double>(slice) / static_cast<double>(kEarthSlices);
+            const double lon = -kPi + unit_slice * (2.0 * kPi);
+            const double u = lon / (2.0 * kPi) + 0.5;
+
+            auto emit_vertex = [&](double lat) {
+                const double v = 0.5 - lat / kPi;
+                glTexCoord2d(u, v);
+
+                const double cos_lat = std::cos(lat);
+                const double sin_lat = std::sin(lat);
+                const double cos_lon = std::cos(lon);
+                const double sin_lon = std::sin(lon);
+                const double a_m = post2::core::frames::Wgs84::a_m;
+                const double b_m = post2::core::frames::Wgs84::b_m;
+                const double nx = cos_lat * cos_lon / a_m;
+                const double ny = cos_lat * sin_lon / a_m;
+                const double nz = sin_lat / b_m;
+                const double n_inv = 1.0 / std::sqrt(nx * nx + ny * ny + nz * nz);
+                glNormal3d(nx * n_inv, ny * n_inv, nz * n_inv);
+                glVertex3d(a_m * cos_lat * cos_lon, a_m * cos_lat * sin_lon, b_m * sin_lat);
+            };
+
+            emit_vertex(lat0);
+            emit_vertex(lat1);
+        }
+        glEnd();
+    }
+}
+
+void emit_coastline_segments(const std::vector<std::uint8_t>& rgb, int width, int height)
+{
+    if (width <= 0 || height <= 0 || rgb.empty()) {
+        return;
+    }
+
+    const int lon_nodes = kCoastlineLonSteps + 1;
+    const int lat_nodes = kCoastlineLatSteps + 1;
+    std::vector<double> water_score(
+        static_cast<std::size_t>(lon_nodes) * static_cast<std::size_t>(lat_nodes));
+    for (int y = 0; y < lat_nodes; ++y) {
+        const double lat = -0.5 * kPi + static_cast<double>(y) * kPi /
+            static_cast<double>(kCoastlineLatSteps);
+        const double v = 0.5 - lat / kPi;
+        for (int x = 0; x < lon_nodes; ++x) {
+            const double lon = -kPi + static_cast<double>(x) * (2.0 * kPi) /
+                static_cast<double>(kCoastlineLonSteps);
+            const double u = lon / (2.0 * kPi) + 0.5;
+            water_score[static_cast<std::size_t>(y) * lon_nodes + x] =
+                texture_water_score_at(rgb, width, height, u, v);
+        }
+    }
+
+    auto score = [&](int x, int y) {
+        x = std::clamp(x, 0, lon_nodes - 1);
+        y = std::clamp(y, 0, lat_nodes - 1);
+        return water_score[static_cast<std::size_t>(y) * lon_nodes + x];
+    };
+    auto edge_t = [](double a, double b) {
+        const double denom = b - a;
+        if (std::abs(denom) <= 1.0e-9) {
+            return 0.5;
+        }
+        return clamp((0.5 - a) / denom, 0.0, 1.0);
+    };
+    auto emit_segment = [&](double lat_a, double lon_a, double lat_b, double lon_b) {
+        const Vec3 a = ellipsoid_surface_point(lat_a, lon_a, kCoastlineSurfaceLiftM);
+        const Vec3 b = ellipsoid_surface_point(lat_b, lon_b, kCoastlineSurfaceLiftM);
+        glVertex3d(a.x, a.y, a.z);
+        glVertex3d(b.x, b.y, b.z);
+    };
+
+    glBegin(GL_LINES);
+    for (int y = 0; y < kCoastlineLatSteps; ++y) {
+        const double lat0 = -0.5 * kPi + static_cast<double>(y) * kPi /
+            static_cast<double>(kCoastlineLatSteps);
+        const double lat1 = -0.5 * kPi + static_cast<double>(y + 1) * kPi /
+            static_cast<double>(kCoastlineLatSteps);
+        for (int x = 0; x < kCoastlineLonSteps; ++x) {
+            const double lon0 = -kPi + static_cast<double>(x) * (2.0 * kPi) /
+                static_cast<double>(kCoastlineLonSteps);
+            const double lon1 = -kPi + static_cast<double>(x + 1) * (2.0 * kPi) /
+                static_cast<double>(kCoastlineLonSteps);
+            const double s00 = score(x, y);
+            const double s10 = score(x + 1, y);
+            const double s11 = score(x + 1, y + 1);
+            const double s01 = score(x, y + 1);
+            const bool b00 = s00 >= 0.5;
+            const bool b10 = s10 >= 0.5;
+            const bool b11 = s11 >= 0.5;
+            const bool b01 = s01 >= 0.5;
+            const int crossings =
+                (b00 != b10 ? 1 : 0) +
+                (b10 != b11 ? 1 : 0) +
+                (b11 != b01 ? 1 : 0) +
+                (b01 != b00 ? 1 : 0);
+            if (crossings == 0) {
+                continue;
+            }
+
+            struct Crossing {
+                int edge = 0;
+                double lat = 0.0;
+                double lon = 0.0;
+            };
+            Crossing c[4];
+            int count = 0;
+            if (b00 != b10) {
+                const double t = edge_t(s00, s10);
+                c[count++] = Crossing{0, lat0, lon0 + (lon1 - lon0) * t};
+            }
+            if (b10 != b11) {
+                const double t = edge_t(s10, s11);
+                c[count++] = Crossing{1, lat0 + (lat1 - lat0) * t, lon1};
+            }
+            if (b11 != b01) {
+                const double t = edge_t(s11, s01);
+                c[count++] = Crossing{2, lat1, lon1 + (lon0 - lon1) * t};
+            }
+            if (b01 != b00) {
+                const double t = edge_t(s01, s00);
+                c[count++] = Crossing{3, lat1 + (lat0 - lat1) * t, lon0};
+            }
+
+            if (count == 2) {
+                emit_segment(c[0].lat, c[0].lon, c[1].lat, c[1].lon);
+            } else if (count == 4) {
+                const double center = 0.25 * (s00 + s10 + s11 + s01);
+                if (center >= 0.5) {
+                    emit_segment(c[0].lat, c[0].lon, c[1].lat, c[1].lon);
+                    emit_segment(c[2].lat, c[2].lon, c[3].lat, c[3].lon);
+                } else {
+                    emit_segment(c[0].lat, c[0].lon, c[3].lat, c[3].lon);
+                    emit_segment(c[1].lat, c[1].lon, c[2].lat, c[2].lon);
+                }
+            }
+        }
+    }
+    glEnd();
+}
+
 } // namespace
 
 void Camera3D::reset(double scene_radius_m)
 {
+    reset(scene_radius_m, target_m_);
+}
+
+void Camera3D::reset(double scene_radius_m, const Vec3& target_m)
+{
     yaw_deg_ = 35.0;
     pitch_deg_ = 22.0;
+    target_m_ = target_m;
     set_scene_radius(scene_radius_m);
     distance_m_ = 3.2 * scene_radius_m_;
 }
@@ -304,6 +564,19 @@ void Camera3D::set_scene_radius(double scene_radius_m)
         distance_m_ = 3.2 * scene_radius_m_;
     }
     distance_m_ = clamp(distance_m_, min_distance_m(), max_distance_m());
+}
+
+void Camera3D::set_target(const Vec3& target_m)
+{
+    target_m_ = target_m;
+}
+
+void Camera3D::set_eye_direction(const Vec3& direction_from_target)
+{
+    const Vec3 direction = normalized_or(direction_from_target, {1.0, 0.0, 0.0});
+    yaw_deg_ = std::atan2(direction.y, direction.x) / kDegToRad;
+    pitch_deg_ = std::asin(clamp(direction.z, -1.0, 1.0)) / kDegToRad;
+    pitch_deg_ = clamp(pitch_deg_, -89.0, 89.0);
 }
 
 void Camera3D::set_viewport(RECT viewport)
@@ -330,6 +603,11 @@ double Camera3D::scene_radius_m() const
     return scene_radius_m_;
 }
 
+Vec3 Camera3D::target() const
+{
+    return target_m_;
+}
+
 RECT Camera3D::viewport() const
 {
     return viewport_;
@@ -347,7 +625,7 @@ ProjectedPoint3D Camera3D::project(const Vec3& position_m) const
     }
 
     const Vec3 eye = eye_position();
-    const Vec3 forward = normalized_or(Vec3{0.0, 0.0, 0.0} - eye, {-1.0, 0.0, 0.0});
+    const Vec3 forward = normalized_or(target_m_ - eye, {-1.0, 0.0, 0.0});
     const Vec3 right = normalized_or(cross(forward, {0.0, 0.0, 1.0}), {0.0, 1.0, 0.0});
     const Vec3 up = normalized_or(cross(right, forward), {0.0, 0.0, 1.0});
     const Vec3 from_eye = position_m - eye;
@@ -377,13 +655,13 @@ ProjectedPoint3D Camera3D::project(const Vec3& position_m) const
 
 Vec3 Camera3D::eye_direction() const
 {
-    return normalized_or(eye_position(), {1.0, 0.0, 0.0});
+    return normalized_or(eye_position() - target_m_, {1.0, 0.0, 0.0});
 }
 
 Vec3 Camera3D::ray_direction_for_pixel(double screen_x, double screen_y) const
 {
     const Vec3 eye = eye_position();
-    const Vec3 forward = normalized_or(Vec3{0.0, 0.0, 0.0} - eye, {-1.0, 0.0, 0.0});
+    const Vec3 forward = normalized_or(target_m_ - eye, {-1.0, 0.0, 0.0});
     const Vec3 right = normalized_or(cross(forward, {0.0, 0.0, 1.0}), {0.0, 1.0, 0.0});
     const Vec3 up = normalized_or(cross(right, forward), {0.0, 0.0, 1.0});
     const double min_extent_px = static_cast<double>(std::min(rect_width(viewport_), rect_height(viewport_)));
@@ -400,7 +678,7 @@ Vec3 Camera3D::ray_direction_for_pixel(double screen_x, double screen_y) const
 Matrix4D Camera3D::view_matrix() const
 {
     const Vec3 eye = eye_position();
-    const Vec3 forward = normalized_or(Vec3{0.0, 0.0, 0.0} - eye, {-1.0, 0.0, 0.0});
+    const Vec3 forward = normalized_or(target_m_ - eye, {-1.0, 0.0, 0.0});
     const Vec3 right = normalized_or(cross(forward, {0.0, 0.0, 1.0}), {0.0, 1.0, 0.0});
     const Vec3 up = normalized_or(cross(right, forward), {0.0, 0.0, 1.0});
 
@@ -471,12 +749,14 @@ double Camera3D::max_distance_m() const
 
 double Camera3D::near_clip_m() const
 {
-    return std::max(10.0, distance_m_ - 1.30 * scene_radius_m_);
+    const double world_radius_m = post2::vehicle::norm(target_m_) + 1.30 * scene_radius_m_;
+    return std::max(10.0, distance_m_ - world_radius_m);
 }
 
 double Camera3D::far_clip_m() const
 {
-    return std::max(near_clip_m() + 1000.0, distance_m_ + 1.30 * scene_radius_m_);
+    const double world_radius_m = post2::vehicle::norm(target_m_) + 1.30 * scene_radius_m_;
+    return std::max(near_clip_m() + 1000.0, distance_m_ + world_radius_m);
 }
 
 Vec3 Camera3D::eye_position() const
@@ -484,7 +764,7 @@ Vec3 Camera3D::eye_position() const
     const double yaw = yaw_deg_ * kDegToRad;
     const double pitch = pitch_deg_ * kDegToRad;
     const double cp = std::cos(pitch);
-    return {
+    return target_m_ + Vec3{
         distance_m_ * cp * std::cos(yaw),
         distance_m_ * cp * std::sin(yaw),
         distance_m_ * std::sin(pitch),
@@ -576,9 +856,21 @@ void OpenGLSceneRenderer::destroy()
             glDeleteTextures(1, &earth_texture_);
             earth_texture_ = 0;
         }
+        if (overview_earth_texture_ != 0) {
+            glDeleteTextures(1, &overview_earth_texture_);
+            overview_earth_texture_ = 0;
+        }
         if (earth_display_list_ != 0) {
             glDeleteLists(earth_display_list_, 1);
             earth_display_list_ = 0;
+        }
+        if (overview_earth_display_list_ != 0) {
+            glDeleteLists(overview_earth_display_list_, 1);
+            overview_earth_display_list_ = 0;
+        }
+        if (coastline_display_list_ != 0) {
+            glDeleteLists(coastline_display_list_, 1);
+            coastline_display_list_ = 0;
         }
         wglMakeCurrent(nullptr, nullptr);
         wglDeleteContext(glrc_);
@@ -591,6 +883,9 @@ void OpenGLSceneRenderer::destroy()
     }
     hwnd_ = nullptr;
     texture_loaded_ = false;
+    earth_texture_width_ = 0;
+    earth_texture_height_ = 0;
+    earth_texture_rgb_.clear();
 }
 
 void OpenGLSceneRenderer::resize(int width, int height)
@@ -608,7 +903,7 @@ void OpenGLSceneRenderer::render(
     const std::vector<post2::core::PredictedTrajectoryPath>& predicted_paths,
     double earth_rotation_at_epoch_rad,
     double earth_rotation_rad_per_s,
-    bool earth_fixed_view)
+    const SceneRenderOptions& options)
 {
     if (!make_current()) {
         return;
@@ -620,7 +915,7 @@ void OpenGLSceneRenderer::render(
         resize(rect_width(client), rect_height(client));
     }
 
-    draw_scene(camera, state_log, predicted_paths, earth_rotation_at_epoch_rad, earth_rotation_rad_per_s, earth_fixed_view);
+    draw_scene(camera, state_log, predicted_paths, earth_rotation_at_epoch_rad, earth_rotation_rad_per_s, options);
     SwapBuffers(hdc_);
 }
 
@@ -635,6 +930,10 @@ bool OpenGLSceneRenderer::load_earth_texture()
     if (!texture.valid()) {
         return false;
     }
+
+    earth_texture_width_ = texture.width;
+    earth_texture_height_ = texture.height;
+    earth_texture_rgb_ = texture.rgb;
 
     glGenTextures(1, &earth_texture_);
     if (earth_texture_ == 0) {
@@ -657,6 +956,56 @@ bool OpenGLSceneRenderer::load_earth_texture()
         GL_RGB,
         GL_UNSIGNED_BYTE,
         texture.rgb.data());
+    if (glGetError() != GL_NO_ERROR) {
+        return false;
+    }
+
+    std::vector<std::uint8_t> overview_rgb(
+        static_cast<std::size_t>(texture.width) * static_cast<std::size_t>(texture.height) * 3U);
+    for (int y = 0; y < texture.height; ++y) {
+        const double v = (static_cast<double>(y) + 0.5) / static_cast<double>(texture.height);
+        for (int x = 0; x < texture.width; ++x) {
+            const double u = (static_cast<double>(x) + 0.5) / static_cast<double>(texture.width);
+            const double water = texture_water_score_at(texture.rgb, texture.width, texture.height, u, v);
+            const double t = clamp((water - 0.44) / 0.12, 0.0, 1.0);
+            const double land_r = 186.0;
+            const double land_g = 194.0;
+            const double land_b = 164.0;
+            const double ocean_r = 86.0;
+            const double ocean_g = 141.0;
+            const double ocean_b = 188.0;
+            const std::size_t index =
+                (static_cast<std::size_t>(y) * static_cast<std::size_t>(texture.width) +
+                 static_cast<std::size_t>(x)) * 3U;
+            overview_rgb[index + 0] = static_cast<std::uint8_t>(
+                std::lround(land_r + (ocean_r - land_r) * t));
+            overview_rgb[index + 1] = static_cast<std::uint8_t>(
+                std::lround(land_g + (ocean_g - land_g) * t));
+            overview_rgb[index + 2] = static_cast<std::uint8_t>(
+                std::lround(land_b + (ocean_b - land_b) * t));
+        }
+    }
+
+    glGenTextures(1, &overview_earth_texture_);
+    if (overview_earth_texture_ == 0) {
+        return false;
+    }
+    glBindTexture(GL_TEXTURE_2D, overview_earth_texture_);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP);
+    glTexImage2D(
+        GL_TEXTURE_2D,
+        0,
+        GL_RGB,
+        texture.width,
+        texture.height,
+        0,
+        GL_RGB,
+        GL_UNSIGNED_BYTE,
+        overview_rgb.data());
     return glGetError() == GL_NO_ERROR;
 }
 
@@ -670,6 +1019,20 @@ void OpenGLSceneRenderer::build_earth_mesh()
     glNewList(earth_display_list_, GL_COMPILE);
     emit_earth_sphere_mesh();
     glEndList();
+
+    overview_earth_display_list_ = glGenLists(1);
+    if (overview_earth_display_list_ != 0) {
+        glNewList(overview_earth_display_list_, GL_COMPILE);
+        emit_overview_earth_mesh(earth_texture_rgb_, earth_texture_width_, earth_texture_height_);
+        glEndList();
+    }
+
+    coastline_display_list_ = glGenLists(1);
+    if (coastline_display_list_ != 0) {
+        glNewList(coastline_display_list_, GL_COMPILE);
+        emit_coastline_segments(earth_texture_rgb_, earth_texture_width_, earth_texture_height_);
+        glEndList();
+    }
 }
 
 void OpenGLSceneRenderer::draw_scene(
@@ -678,7 +1041,7 @@ void OpenGLSceneRenderer::draw_scene(
     const std::vector<post2::core::PredictedTrajectoryPath>& predicted_paths,
     double earth_rotation_at_epoch_rad,
     double earth_rotation_rad_per_s,
-    bool earth_fixed_view)
+    const SceneRenderOptions& options)
 {
     glViewport(0, 0, width_, height_);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
@@ -694,14 +1057,16 @@ void OpenGLSceneRenderer::draw_scene(
         glEnable(GL_DEPTH_TEST);
         glDepthFunc(GL_LEQUAL);
         glDepthMask(GL_TRUE);
-        const double earth_rotation_for_display_rad = earth_fixed_view
+        const double earth_rotation_for_display_rad = options.earth_fixed_view
             ? 0.0
             : post2::core::frames::earth_rotation_angle_rad(
                 earth_rotation_at_epoch_rad,
                 earth_rotation_rad_per_s,
                 takeoff_time_s_for_display(state_log));
-        draw_earth(earth_rotation_for_display_rad);
-        draw_axis();
+        draw_earth(earth_rotation_for_display_rad, options.overview_mode);
+        if (!options.overview_mode) {
+            draw_axis();
+        }
         const post2::core::PredictedTrajectoryPath* marker_prediction = nullptr;
         for (const auto& predicted_path : predicted_paths) {
             if (!predicted_path.state_log.empty()) {
@@ -713,24 +1078,27 @@ void OpenGLSceneRenderer::draw_scene(
                 predicted_path,
                 earth_rotation_at_epoch_rad,
                 earth_rotation_rad_per_s,
-                earth_fixed_view,
-                &predicted_path == marker_prediction);
+                options,
+                !options.overview_mode && &predicted_path == marker_prediction);
         }
-        draw_trajectory(state_log, earth_rotation_at_epoch_rad, earth_rotation_rad_per_s, earth_fixed_view);
-        draw_markers(state_log, earth_rotation_at_epoch_rad, earth_rotation_rad_per_s, earth_fixed_view);
+        draw_trajectory(state_log, earth_rotation_at_epoch_rad, earth_rotation_rad_per_s, options);
+        draw_markers(state_log, earth_rotation_at_epoch_rad, earth_rotation_rad_per_s, options.earth_fixed_view);
     }
 
     draw_border();
 }
 
-void OpenGLSceneRenderer::draw_earth(double rotation_rad) const
+void OpenGLSceneRenderer::draw_earth(double rotation_rad, bool overview_mode) const
 {
     glPushMatrix();
     glRotated(rotation_rad / kDegToRad, 0.0, 0.0, 1.0);
 
     glDepthMask(GL_TRUE);
     glColor3f(1.0f, 1.0f, 1.0f);
-    if (texture_loaded_ && earth_texture_ != 0) {
+    if (overview_mode && overview_earth_texture_ != 0) {
+        glEnable(GL_TEXTURE_2D);
+        glBindTexture(GL_TEXTURE_2D, overview_earth_texture_);
+    } else if (!overview_mode && texture_loaded_ && earth_texture_ != 0) {
         glEnable(GL_TEXTURE_2D);
         glBindTexture(GL_TEXTURE_2D, earth_texture_);
     } else {
@@ -738,12 +1106,21 @@ void OpenGLSceneRenderer::draw_earth(double rotation_rad) const
         glColor3ub(92, 148, 214);
     }
 
-    if (earth_display_list_ != 0) {
+    if (overview_mode && overview_earth_display_list_ != 0) {
+        glCallList(overview_earth_display_list_);
+    } else if (earth_display_list_ != 0) {
         glCallList(earth_display_list_);
     } else {
         emit_earth_sphere_mesh();
     }
     glDisable(GL_TEXTURE_2D);
+    if (overview_mode && coastline_display_list_ != 0) {
+        glDepthMask(GL_FALSE);
+        glLineWidth(1.0f);
+        glColor3ub(31, 41, 55);
+        glCallList(coastline_display_list_);
+        glDepthMask(GL_TRUE);
+    }
     glPopMatrix();
 }
 
@@ -773,7 +1150,7 @@ void OpenGLSceneRenderer::draw_trajectory(
     const post2::core::StateLog& state_log,
     double earth_rotation_at_epoch_rad,
     double earth_rotation_rad_per_s,
-    bool earth_fixed_view) const
+    const SceneRenderOptions& options) const
 {
     const auto& entries = state_log.entries();
     if (entries.size() < 2) {
@@ -782,21 +1159,67 @@ void OpenGLSceneRenderer::draw_trajectory(
 
     glDisable(GL_TEXTURE_2D);
     glDepthMask(GL_FALSE);
-    glLineWidth(2.5f);
-    glColor3ub(220, 38, 38);
-    glBegin(GL_LINE_STRIP);
+
     const std::size_t stride = trajectory_draw_stride(entries.size());
-    for (std::size_t index = 0; index < entries.size(); index += stride) {
-        const Vec3 position = lifted_for_display(position_for_display(
-            entries[index], earth_rotation_at_epoch_rad, earth_rotation_rad_per_s, earth_fixed_view));
-        glVertex3d(position.x, position.y, position.z);
+    const auto draw_pass = [&](bool primary_pass) {
+        if (primary_pass) {
+            glLineWidth(options.overview_mode ? 3.0f : 2.5f);
+            glColor4ub(220, 38, 38, 255);
+        } else {
+            glLineWidth(1.5f);
+            glColor4ub(100, 116, 139, 120);
+        }
+
+        bool strip_open = false;
+        double prev_time = 0.0;
+        const auto close_strip = [&]() {
+            if (strip_open) {
+                glEnd();
+                strip_open = false;
+            }
+        };
+        const auto emit = [&](const auto& entry) {
+            const bool primary = phase_is_primary(options, entry.phase_index);
+            if (primary != primary_pass) {
+                close_strip();
+                return;
+            }
+
+            // Break the strip at a backward time jump: a recovery branch rewinds
+            // the clock to its stage's separation time, so connecting across it
+            // would draw a straight line from the orbit point back to MECO.
+            if (strip_open && entry.time_s < prev_time) {
+                close_strip();
+            }
+            if (!strip_open) {
+                glBegin(GL_LINE_STRIP);
+                strip_open = true;
+            }
+
+            const Vec3 position = lifted_for_display(position_for_display(
+                entry, earth_rotation_at_epoch_rad, earth_rotation_rad_per_s, options.earth_fixed_view));
+            glVertex3d(position.x, position.y, position.z);
+            prev_time = entry.time_s;
+        };
+        for (std::size_t index = 0; index < entries.size(); index += stride) {
+            emit(entries[index]);
+        }
+        if ((entries.size() - 1) % stride != 0) {
+            emit(entries.back());
+        }
+        close_strip();
+    };
+
+    if (options.overview_mode && !options.primary_phase_indices.empty()) {
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        draw_pass(false);
+        draw_pass(true);
+        glDisable(GL_BLEND);
+    } else {
+        draw_pass(true);
     }
-    if ((entries.size() - 1) % stride != 0) {
-        const Vec3 position = lifted_for_display(position_for_display(
-            entries.back(), earth_rotation_at_epoch_rad, earth_rotation_rad_per_s, earth_fixed_view));
-        glVertex3d(position.x, position.y, position.z);
-    }
-    glEnd();
+
     glLineWidth(1.0f);
     glDepthMask(GL_TRUE);
 }
@@ -832,7 +1255,7 @@ void OpenGLSceneRenderer::draw_predicted_path(
     const post2::core::PredictedTrajectoryPath& predicted_path,
     double earth_rotation_at_epoch_rad,
     double earth_rotation_rad_per_s,
-    bool earth_fixed_view,
+    const SceneRenderOptions& options,
     bool draw_apsis_markers) const
 {
     const auto& entries = predicted_path.state_log.entries();
@@ -842,19 +1265,27 @@ void OpenGLSceneRenderer::draw_predicted_path(
 
     glDisable(GL_TEXTURE_2D);
     glDepthMask(GL_FALSE);
+    if (options.overview_mode) {
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    }
 
     // Dashed integrated prediction path, distinct from the solid red ascent.
     glEnable(GL_LINE_STIPPLE);
     glLineStipple(2, 0x00FF);
-    glLineWidth(2.0f);
-    glColor3ub(
-        static_cast<GLubyte>(std::clamp(predicted_path.color.red, 0, 255)),
-        static_cast<GLubyte>(std::clamp(predicted_path.color.green, 0, 255)),
-        static_cast<GLubyte>(std::clamp(predicted_path.color.blue, 0, 255)));
+    glLineWidth(options.overview_mode ? 1.0f : 2.0f);
+    if (options.overview_mode) {
+        glColor4ub(100, 116, 139, 78);
+    } else {
+        glColor3ub(
+            static_cast<GLubyte>(std::clamp(predicted_path.color.red, 0, 255)),
+            static_cast<GLubyte>(std::clamp(predicted_path.color.green, 0, 255)),
+            static_cast<GLubyte>(std::clamp(predicted_path.color.blue, 0, 255)));
+    }
     glBegin(GL_LINE_STRIP);
     for (const auto& entry : entries) {
         const Vec3 position = lifted_for_display(position_for_display(
-            entry, earth_rotation_at_epoch_rad, earth_rotation_rad_per_s, earth_fixed_view));
+            entry, earth_rotation_at_epoch_rad, earth_rotation_rad_per_s, options.earth_fixed_view));
         glVertex3d(position.x, position.y, position.z);
     }
     glEnd();
@@ -863,6 +1294,9 @@ void OpenGLSceneRenderer::draw_predicted_path(
     if (!draw_apsis_markers) {
         glLineWidth(1.0f);
         glDepthMask(GL_TRUE);
+        if (options.overview_mode) {
+            glDisable(GL_BLEND);
+        }
         return;
     }
 
@@ -880,11 +1314,11 @@ void OpenGLSceneRenderer::draw_predicted_path(
     glPointSize(9.0f);
     glBegin(GL_POINTS);
     const Vec3 apo_pos = lifted_for_display(position_for_display(
-        *apo, earth_rotation_at_epoch_rad, earth_rotation_rad_per_s, earth_fixed_view));
+        *apo, earth_rotation_at_epoch_rad, earth_rotation_rad_per_s, options.earth_fixed_view));
     glColor3ub(37, 99, 235);   // blue = apoapsis (A)
     glVertex3d(apo_pos.x, apo_pos.y, apo_pos.z);
     const Vec3 peri_pos = lifted_for_display(position_for_display(
-        *peri, earth_rotation_at_epoch_rad, earth_rotation_rad_per_s, earth_fixed_view));
+        *peri, earth_rotation_at_epoch_rad, earth_rotation_rad_per_s, options.earth_fixed_view));
     glColor3ub(219, 39, 119);  // magenta = periapsis (P)
     glVertex3d(peri_pos.x, peri_pos.y, peri_pos.z);
     glEnd();
@@ -892,6 +1326,9 @@ void OpenGLSceneRenderer::draw_predicted_path(
 
     glLineWidth(1.0f);
     glDepthMask(GL_TRUE);
+    if (options.overview_mode) {
+        glDisable(GL_BLEND);
+    }
 }
 
 void OpenGLSceneRenderer::draw_border() const

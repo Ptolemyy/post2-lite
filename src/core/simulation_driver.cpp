@@ -1,8 +1,10 @@
 #include "post2/core/simulation_driver.hpp"
 
+#include "post2/aero/aero_model.hpp"
 #include "post2/core/control_models.hpp"
 #include "post2/core/coordinates.hpp"
 #include "post2/core/frames.hpp"
+#include "post2/core/gfold_solver.hpp"
 #include "post2/environment/atmosphere.hpp"
 #include "post2/integrators/dopri5.hpp"
 #include "post2/integrators/integrator.hpp"
@@ -19,6 +21,7 @@
 #include <exception>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -525,15 +528,26 @@ State apply_two_point_five_dof_constraint(const State& state, const DynamicsPlan
     };
 }
 
-DynamicsPlane make_two_point_five_dof_plane(const State& state, const Vec3& direction_hint_eci)
+// Geometric gravity vector used to orient the 2.5-DOF plane. Uses the phase's
+// gravity model where one is defined (point mass / J2), independent of whether
+// the gravity *force* is enabled, so the plane always follows the true local
+// "down". Falls back to the radial direction (-position) when no usable model
+// is configured, which reproduces the orbital plane.
+Vec3 plane_gravity_vector(const SimulationConfig& config, const Vec3& position_m)
+{
+    const std::string& type = config.gravity_model.type;
+    if (type == "point_mass" || type == "j2") {
+        return post2::propagation::gravity_acceleration_mps2(config, position_m);
+    }
+    return position_m * -1.0;
+}
+
+DynamicsPlane make_two_point_five_dof_plane(
+    const State& state,
+    const Vec3& gravity_mps2,
+    const Vec3& direction_hint_eci)
 {
     DynamicsPlane plane;
-    const double r_norm = post2::vehicle::norm(state.position_m);
-    if (r_norm <= 1.0e-12) {
-        plane.enabled = true;
-        set_two_point_five_dof_plane_basis(&plane, state, direction_hint_eci);
-        return plane;
-    }
 
     auto use_normal_if_valid = [&plane](const Vec3& candidate, double threshold) {
         const double n = post2::vehicle::norm(candidate);
@@ -545,13 +559,36 @@ DynamicsPlane make_two_point_five_dof_plane(const State& state, const Vec3& dire
         return true;
     };
 
+    const double r_norm = post2::vehicle::norm(state.position_m);
+    const double v_norm = post2::vehicle::norm(state.velocity_mps);
+    const double g_norm = post2::vehicle::norm(gravity_mps2);
     const Vec3 hint_unit = normalized_or(direction_hint_eci, {0.0, 0.0, 0.0});
-    if (use_normal_if_valid(cross_product(state.position_m, hint_unit), r_norm * 1.0e-9)) {
+
+    // Primary: the plane spanned by the velocity and gravity vectors -- the true
+    // "vertical plane" of motion, its normal perpendicular to both. For central
+    // gravity this coincides with the orbital plane; under J2 it follows the
+    // actual local down direction rather than the pure radial.
+    if (use_normal_if_valid(
+            cross_product(gravity_mps2, state.velocity_mps),
+            std::max(1.0, g_norm) * std::max(1.0, v_norm) * 1.0e-9)) {
         set_two_point_five_dof_plane_basis(&plane, state, direction_hint_eci);
         return plane;
     }
 
-    const double v_norm = post2::vehicle::norm(state.velocity_mps);
+    // Velocity (anti)parallel to gravity -- e.g. vertical ascent. Pick the plane
+    // azimuth from the steering/heading hint crossed with gravity.
+    if (use_normal_if_valid(
+            cross_product(gravity_mps2, hint_unit),
+            std::max(1.0, g_norm) * 1.0e-9)) {
+        set_two_point_five_dof_plane_basis(&plane, state, direction_hint_eci);
+        return plane;
+    }
+
+    // Gravity degenerate / unavailable: fall back to the orbital-plane geometry.
+    if (use_normal_if_valid(cross_product(state.position_m, hint_unit), r_norm * 1.0e-9)) {
+        set_two_point_five_dof_plane_basis(&plane, state, direction_hint_eci);
+        return plane;
+    }
     if (use_normal_if_valid(
             cross_product(state.position_m, state.velocity_mps),
             r_norm * std::max(1.0, v_norm) * 1.0e-12)) {
@@ -559,14 +596,14 @@ DynamicsPlane make_two_point_five_dof_plane(const State& state, const Vec3& dire
         return plane;
     }
 
-    const Vec3 r_hat = state.position_m / r_norm;
-    const Vec3 reference = std::abs(r_hat.z) < 0.9
+    // Last resort: a reference plane that still contains the radial direction.
+    const Vec3 anchor = r_norm > 1.0e-12 ? state.position_m : hint_unit;
+    const Vec3 anchor_unit = normalized_or(anchor, {1.0, 0.0, 0.0});
+    const Vec3 reference = std::abs(anchor_unit.z) < 0.9
         ? Vec3{0.0, 0.0, 1.0}
         : Vec3{0.0, 1.0, 0.0};
-    use_normal_if_valid(cross_product(state.position_m, reference), r_norm * 1.0e-12);
-    if (!plane.enabled) {
-        plane.enabled = true;
-    }
+    use_normal_if_valid(cross_product(anchor, reference), 1.0e-12);
+    plane.enabled = true;
     set_two_point_five_dof_plane_basis(&plane, state, direction_hint_eci);
     return plane;
 }
@@ -781,6 +818,20 @@ void append_entry_with_environment(
     entry.dynamic_pressure_pa = 0.5 * env.density_kgpm3 * v_rel_mag * v_rel_mag;
     entry.mach_number = env.speed_of_sound_mps > 0.0
         ? v_rel_mag / env.speed_of_sound_mps : 0.0;
+    // Heat-flux nose radius follows the currently-attached vehicle configuration
+    // (same selection the force model uses for the CD/CL table), so a separated
+    // booster flying alone heats per its own geometry rather than the full stack.
+    const post2::vehicle::AeroConfig& aero = state_log->vehicle_config().aero;
+    double nose_radius_input = aero.nose_radius_m;
+    double ref_diameter_m = aero.ref_diameter_m;
+    if (const post2::vehicle::AeroStageTable* active =
+            post2::vehicle::select_active_aero_stage_table(aero, runtime)) {
+        nose_radius_input = active->nose_radius_m;
+        ref_diameter_m = active->ref_diameter_m;
+    }
+    entry.heat_flux_wpm2 = post2::aero::stagnation_heat_flux_wpm2(
+        env.density_kgpm3, v_rel_mag,
+        post2::aero::effective_nose_radius_m(nose_radius_input, ref_diameter_m));
     state_log->append(entry);
 }
 
@@ -1152,13 +1203,24 @@ bool validate_case_config(const CaseConfig& config, std::string* error)
                 " dynamics_dof must be \"3dof\" or \"2.5dof\"";
             return false;
         }
+        const bool is_gfold_steering = lowercase(phase.steering_model.type) == "gfold";
+        if (is_gfold_steering && phase_dof != DynamicsDof::TwoPointFiveDof) {
+            *error = "phase " + std::to_string(i) +
+                " steering_model \"gfold\" requires dynamics_dof \"2.5dof\"";
+            return false;
+        }
         if (phase_dof == DynamicsDof::TwoPointFiveDof) {
-            if (config.vehicle.rigid_body.moment_of_inertia_kgm2 <= 0.0) {
+            // The G-FOLD landing owns its whole phase (it solves and plays back a
+            // discrete trajectory rather than integrating attitude dynamics), so
+            // it is exempt from the rigid-body / default-steering requirements.
+            if (!is_gfold_steering &&
+                config.vehicle.rigid_body.moment_of_inertia_kgm2 <= 0.0) {
                 *error = "phase " + std::to_string(i) +
                     " dynamics_dof \"2.5dof\" requires vehicle.rigid_body.moment_of_inertia_kgm2 > 0";
                 return false;
             }
-            if (!steering_model_is_default_for_two_point_five_dof(phase.steering_model)) {
+            if (!is_gfold_steering &&
+                !steering_model_is_default_for_two_point_five_dof(phase.steering_model)) {
                 *error = "phase " + std::to_string(i) +
                     " dynamics_dof \"2.5dof\" does not support steering_model; use vehicle.rigid_body initial attitude/omega and engine.direction_body";
                 return false;
@@ -1478,6 +1540,8 @@ post2::propagation::EngineCommand make_engine_command(
     post2::propagation::EngineCommand command;
     command.enabled = engine_enabled;
     command.throttle = throttle_model.throttle(phase_time_s, runtime_for_model, context);
+    command.ignited_engine_count =
+        throttle_model.ignited_engine_count(phase_time_s, runtime_for_model, context);
     command.direction_eci = steering_model.thrust_direction_eci(
         phase_time_s,
         state,
@@ -1509,6 +1573,8 @@ post2::propagation::EngineCommand make_two_point_five_dof_engine_command(
     post2::propagation::EngineCommand command;
     command.enabled = engine_enabled;
     command.throttle = throttle_model.throttle(phase_time_s, runtime_for_model, context);
+    command.ignited_engine_count =
+        throttle_model.ignited_engine_count(phase_time_s, runtime_for_model, context);
     if (context.case_config) {
         command.controlled_stage_index =
             phase_controlled_stage_index(*context.case_config, phase);
@@ -1541,14 +1607,135 @@ void merge_phase_log(StateLog* merged, const StateLog& phase_log)
     }
 }
 
+// A G-FOLD landing phase does NOT integrate. It solves the 2D fuel-optimal
+// powered-descent SOCP (golden-section over time-of-flight) in the vehicle's
+// 2.5-DOF vertical plane, lifts each discrete node back to 3D ECI, and writes
+// the trajectory straight into the state log. Mass/thrust come from the runtime
+// landing stack; the convex-problem knobs come from steering_model.gfold. On
+// solver failure it records only the inherited handoff state (no landing).
+StateLog propagate_gfold_landing_phase(
+    const CaseConfig& case_config,
+    const PhaseConfig& phase,
+    std::size_t phase_index,
+    double phase_start_time_s,
+    const post2::vehicle::VehicleRuntimeState& initial_runtime)
+{
+    const SimulationConfig simulation_config = make_phase_simulation_config(
+        case_config, phase, phase_start_time_s + kMaxPhaseTimeS);
+
+    StateLog state_log(case_config.earth_radius_m, case_config.vehicle);
+    state_log.set_phase_metadata(static_cast<int>(phase_index), phase.name);
+
+    auto runtime = initial_runtime;
+    runtime.time_s = phase_start_time_s;
+    mount_phase_controller_vehicle(phase, case_config, &runtime);
+
+    const State motion0 = runtime.vehicle.motion;
+    const Vec3 gravity0 = plane_gravity_vector(simulation_config, motion0.position_m);
+    const DynamicsPlane plane =
+        make_two_point_five_dof_plane(motion0, gravity0, motion0.velocity_mps);
+    const Vec3 up = plane.axis_u;        // local vertical (radial) in ECI
+    const Vec3 down = plane.axis_v;      // downrange / horizontal in ECI
+
+    // Records one state-log entry from explicit 3D values (no integrator).
+    auto write_entry = [&](double t_s, const Vec3& pos, const Vec3& vel,
+                           const Vec3& thrust_dir_eci, double throttle, double thrust_n,
+                           double mass_kg, double m_dry_kg, const Vec3& accel_eci) {
+        runtime.time_s = t_s;
+        runtime.vehicle.motion = {pos, vel};
+        runtime.vehicle.total_mass_kg = mass_kg;
+        runtime.vehicle.propellant_mass_kg = std::max(0.0, mass_kg - m_dry_kg);
+        runtime.vehicle.rigid_body.attitude_rad = std::atan2(
+            post2::vehicle::dot(thrust_dir_eci, down),
+            post2::vehicle::dot(thrust_dir_eci, up));
+        runtime.engine.enabled = thrust_n > 0.0;
+        runtime.engine.firing = thrust_n > 0.0;
+        runtime.engine.throttle = throttle;
+        runtime.engine.actual_thrust_n = thrust_n;
+        // build_entry copies engine.direction_body into engine_direction_eci.
+        runtime.engine.direction_body = thrust_dir_eci;
+        const auto env = make_environment_state(
+            simulation_config, phase, t_s, runtime.vehicle.motion);
+        append_entry_with_environment(
+            &state_log, runtime, env, simulation_config.earth_rotation_rad_per_s, accel_eci);
+    };
+
+    const double m_wet = runtime.vehicle.total_mass_kg;
+    const double m_dry = std::max(1.0, m_wet - runtime.vehicle.propellant_mass_kg);
+
+    const int controlled = phase_controlled_stage_index(case_config, phase);
+    const post2::vehicle::EngineConfig engine =
+        selected_engine_config_for_command(case_config, runtime, controlled);
+    const auto env0 = make_environment_state(
+        simulation_config, phase, phase_start_time_s, motion0);
+    double per_engine_n = engine.thrust_vac_n;
+    if (engine.nozzle_exit_area_m2 > 0.0) {
+        per_engine_n = engine.thrust_vac_n - env0.pressure_pa * engine.nozzle_exit_area_m2;
+    }
+    if (per_engine_n <= 0.0) {
+        per_engine_n = engine.thrust_vac_n;
+    }
+
+    const GfoldConfig& g = phase.steering_model.gfold;
+    GfoldProblem problem;
+    problem.g0 = post2::vehicle::norm(gravity0);
+    problem.m_wet = m_wet;
+    problem.m_dry = m_dry;
+    problem.exhaust_velocity_mps = engine.isp_vac_s * 9.80665;
+    problem.t_max_n = std::max(1, g.engine_count) * per_engine_n;
+    problem.min_throttle = g.min_throttle;
+    problem.max_throttle = g.max_throttle;
+    problem.max_tilt_deg = g.max_tilt_deg;
+    problem.glide_slope_deg = g.glide_slope_deg;
+    problem.r0x = 0.0;
+    problem.r0y = post2::core::frames::ecef_to_geodetic(motion0.position_m).altitude_m;
+    problem.v0x = post2::vehicle::dot(motion0.velocity_mps, down);
+    problem.v0y = post2::vehicle::dot(motion0.velocity_mps, up);
+    problem.rfx = 0.0;
+    problem.rfy = 0.0;
+    problem.free_landing = g.free_landing;
+
+    const GfoldSolution solution = gfold_solve_optimal(
+        problem, std::max(4, g.num_nodes), g.tf_min_s, g.tf_max_s);
+
+    if (!solution.feasible || solution.nodes.empty()) {
+        // No feasible landing: discard the phase entirely (return no entries).
+        // The driver then continues from the previous phase's final state -- a
+        // following phase inherits it, or, if this was the last phase, the
+        // trajectory-prediction pass extrapolates the ballistic descent.
+        return StateLog(case_config.earth_radius_m, case_config.vehicle);
+    }
+
+    const double alt0 = problem.r0y;
+    for (const auto& nd : solution.nodes) {
+        // Lift the planar node into 3D ECI on the tangent plane through the
+        // handoff point (flat-ground / constant-gravity GFOLD approximation):
+        // downrange along axis_v, altitude change along axis_u.
+        const Vec3 pos = motion0.position_m + down * nd.rx + up * (nd.ry - alt0);
+        const Vec3 vel = down * nd.vx + up * nd.vy;
+        const Vec3 thrust_accel = down * nd.ux + up * nd.uy;
+        const Vec3 thrust_dir = normalized_or(thrust_accel, up);
+        const Vec3 accel = thrust_accel + gravity0;
+        write_entry(phase_start_time_s + nd.t_s, pos, vel, thrust_dir,
+                    nd.throttle, nd.thrust_n, nd.mass_kg, m_dry, accel);
+    }
+    return state_log;
+}
+
 StateLog propagate_phase(
     const CaseConfig& case_config,
     const PhaseConfig& phase,
     std::size_t phase_index,
     double phase_start_time_s,
     const post2::vehicle::VehicleRuntimeState& initial_runtime,
-    MissionEventsState* mission_events)
+    MissionEventsState* mission_events,
+    const std::optional<Vec3>& inherited_orientation_eci = std::nullopt)
 {
+    // A G-FOLD landing phase is solved and played back, not integrated.
+    if (lowercase(phase.steering_model.type) == "gfold") {
+        return propagate_gfold_landing_phase(
+            case_config, phase, phase_index, phase_start_time_s, initial_runtime);
+    }
     const bool time_terminated = phase.termination.type == "time";
     const double phase_horizon_s = time_terminated ? phase.termination.value : kMaxPhaseTimeS;
     const double phase_end_time_s = phase_start_time_s + phase_horizon_s;
@@ -1602,11 +1789,38 @@ StateLog propagate_phase(
             dynamics_plane.enabled) {
             return;
         }
+        // The 2.5-DOF vertical plane is spanned by the local radial direction and
+        // the in-plane heading; building it from velocity keeps the orbital plane
+        // (so projecting position/velocity onto it is loss-free and the trajectory
+        // stays continuous). On a 3-DOF -> 2.5-DOF switch the inherited orientation
+        // (the previous phase's 3-D thrust direction) only seeds the plane azimuth
+        // when the vehicle is essentially at rest and velocity carries no heading.
+        Vec3 plane_hint = runtime.vehicle.motion.velocity_mps;
+        if (inherited_orientation_eci &&
+            post2::vehicle::norm(*inherited_orientation_eci) > 1.0e-12 &&
+            post2::vehicle::norm(runtime.vehicle.motion.velocity_mps) <= 1.0e-3) {
+            plane_hint = *inherited_orientation_eci;
+        }
+        const Vec3 gravity_mps2 =
+            plane_gravity_vector(simulation_config, runtime.vehicle.motion.position_m);
         dynamics_plane = make_two_point_five_dof_plane(
             runtime.vehicle.motion,
-            runtime.vehicle.motion.velocity_mps);
+            gravity_mps2,
+            plane_hint);
         runtime.vehicle.motion =
             apply_two_point_five_dof_constraint(runtime.vehicle.motion, dynamics_plane);
+        // Project the inherited 3-D orientation into the plane and seed the
+        // rigid-body pitch so the body axis matches the pre-switch heading,
+        // avoiding an attitude discontinuity at the 3-DOF -> 2.5-DOF boundary.
+        if (inherited_orientation_eci) {
+            const Vec3 projected =
+                project_onto_plane(*inherited_orientation_eci, dynamics_plane);
+            if (post2::vehicle::norm(projected) > 1.0e-12) {
+                runtime.vehicle.rigid_body.attitude_rad = std::atan2(
+                    post2::vehicle::dot(projected, dynamics_plane.axis_v),
+                    post2::vehicle::dot(projected, dynamics_plane.axis_u));
+            }
+        }
     };
     ensure_two_point_five_dof_plane();
 
@@ -1643,9 +1857,14 @@ StateLog propagate_phase(
             suggested_step_s = case_config.step_s;
         }
         ensure_two_point_five_dof_plane();
-        // The integrator events localize crossings inside the next step; this
+        // A powered UPFG phase owns its own cutoff (tgo->0, below), so the manual
+        // terminal condition is ignored for it -- the algorithm terminates the
+        // phase, not the user-set trigger. For every other phase the integrator
+        // events localize crossings inside the next step; this discrete check
         // covers phase/action boundaries where the condition is already true.
-        if (!time_terminated &&
+        const bool powered_upfg =
+            !time_terminated && is_powered_upfg_phase(phase, control, actions);
+        if (!time_terminated && !powered_upfg &&
             trigger_condition_is_satisfied(
                 phase.termination,
                 runtime,
@@ -1654,13 +1873,24 @@ StateLog propagate_phase(
                 phase_start_time_s)) {
             break;
         }
-        const bool powered_upfg =
-            !time_terminated && is_powered_upfg_phase(phase, control, actions);
         const double burnout_margin_s = std::max(1.0e-3, min_effective_step_s);
+        // UPFG steers the orbit to the target exactly at tgo=0, so the algorithm's
+        // own cutoff is tgo<=0 (insertion / MECO) -- the same scheme post2_player
+        // flies (player main.cpp `cmd.tgo_s <= kBurnoutMarginS`). Recomputed at the
+        // committed state each step, bounded by propellant burnout: the phase ends
+        // at whichever comes first, the target being reached or the tank running
+        // dry. The offline integrator localizes the crossing finely, so a small
+        // (one-step) margin suffices here rather than the player's coarse 0.1 s.
+        const double upfg_tgo_s = powered_upfg
+            ? post2::core::upfg_time_to_go_s(
+                  case_config, phase.steering_model, runtime,
+                  runtime.vehicle.motion.position_m, runtime.vehicle.motion.velocity_mps)
+            : std::numeric_limits<double>::infinity();
         const double burn_time_remaining_s = powered_upfg
             ? active_propulsive_burn_time_s(case_config, runtime, control.controlled_stage_index)
             : std::numeric_limits<double>::infinity();
-        if (powered_upfg && burn_time_remaining_s <= burnout_margin_s) {
+        const double cutoff_remaining_s = std::min(burn_time_remaining_s, upfg_tgo_s);
+        if (powered_upfg && cutoff_remaining_s <= burnout_margin_s) {
             break;
         }
 
@@ -1673,13 +1903,13 @@ StateLog propagate_phase(
         if (next_action_absolute_s > time_s && next_action_absolute_s < time_s + step_s) {
             step_s = next_action_absolute_s - time_s;
         }
-        if (powered_upfg && burn_time_remaining_s < step_s + burnout_margin_s) {
-            step_s = burn_time_remaining_s - burnout_margin_s;
+        if (powered_upfg && cutoff_remaining_s < step_s + burnout_margin_s) {
+            step_s = cutoff_remaining_s - burnout_margin_s;
         }
         if (step_s <= 1.0e-12) {
             step_s = std::min(case_config.step_s, phase_end_time_s - time_s);
         }
-        if (powered_upfg && step_s > burn_time_remaining_s - burnout_margin_s) {
+        if (powered_upfg && step_s > cutoff_remaining_s - burnout_margin_s) {
             break;
         }
         // While clamped, if an engine is still spooling up toward its commanded
@@ -1785,10 +2015,15 @@ StateLog propagate_phase(
             }
 
             // Phase termination event (non-time terminations only — time
-            // termination is handled by the outer while-loop guard).
+            // termination is handled by the outer while-loop guard). A powered
+            // UPFG phase is excluded: its manual terminal condition is ignored in
+            // favour of the algorithm's own tgo->0 cutoff (handled above), so the
+            // trigger is registered as neither a discrete check nor an event.
+            const bool register_termination_event = !time_terminated && !powered_upfg;
             const std::size_t termination_event_index =
-                time_terminated ? std::numeric_limits<std::size_t>::max() : events.size();
-            if (!time_terminated) {
+                register_termination_event ? events.size()
+                                           : std::numeric_limits<std::size_t>::max();
+            if (register_termination_event) {
                 events.push_back(make_trigger_event(
                     phase.termination,
                     runtime,
@@ -2107,6 +2342,7 @@ StateLog GravityPropagator::propagate(const SimulationConfig& config, const Stat
     if (two_point_five_dof(phase_dof)) {
         dynamics_plane = make_two_point_five_dof_plane(
             current_runtime.vehicle.motion,
+            plane_gravity_vector(config, current_runtime.vehicle.motion.position_m),
             current_runtime.vehicle.motion.velocity_mps);
         current_runtime.vehicle.motion =
             apply_two_point_five_dof_constraint(current_runtime.vehicle.motion, dynamics_plane);
@@ -2231,6 +2467,19 @@ SimulationResult SimulationDriver::run(const CaseConfig& config) const
         MissionEventsState mission_events;
         mission_events.runtimes.assign(config.events.size(), MissionEventRuntime{});
 
+        // Separation branching: when a stage detaches, snapshot the pre-detach
+        // runtime + time. A detached-controller (recovery) phase then starts its
+        // controlled stage from that separation state instead of inheriting the
+        // main stack's continued (orbit) state, so one run can hold both the main
+        // mission AND the booster's recovery in the same state log.
+        struct SeparationSnapshot {
+            int stage_index = -1;
+            double time_s = 0.0;
+            post2::vehicle::VehicleRuntimeState runtime;
+        };
+        std::vector<SeparationSnapshot> separation_snapshots;
+        std::vector<int> recovered_stages;
+
         double phase_start_time_s = 0.0;
         for (std::size_t phase_index = 0; phase_index < config.phases.size(); ++phase_index) {
             // Mutable copy: phase-boundary continuity may re-anchor the throttle
@@ -2256,9 +2505,48 @@ SimulationResult SimulationDriver::run(const CaseConfig& config) const
                 return {false, "phase " + std::to_string(phase_index) + " has no initial state", state_log};
             }
 
+            // Snapshot the pre-detach runtime for any stage this phase detaches
+            // (one snapshot per stage, the first time it separates).
+            for (const auto& action : phase.actions) {
+                if (action.type != "set_stage_attached" || action.value ||
+                    action.stage_index < 0) {
+                    continue;
+                }
+                const bool have = std::any_of(
+                    separation_snapshots.begin(), separation_snapshots.end(),
+                    [&](const SeparationSnapshot& s) { return s.stage_index == action.stage_index; });
+                if (!have) {
+                    separation_snapshots.push_back(
+                        {action.stage_index, phase_start_time_s, initial_runtime});
+                }
+            }
+
+            // A recovery (detached-controller) phase begins its controlled stage
+            // from that stage's separation snapshot rather than the inherited
+            // state, and rewinds the phase clock to the separation time.
+            bool branched_from_separation = false;
+            if (phase.controller_detached_stage) {
+                const int controlled = phase_controlled_stage_index(config, phase);
+                const bool already = std::find(recovered_stages.begin(),
+                    recovered_stages.end(), controlled) != recovered_stages.end();
+                if (controlled >= 0 && !already) {
+                    for (const auto& snap : separation_snapshots) {
+                        if (snap.stage_index == controlled) {
+                            initial_runtime = snap.runtime;
+                            phase_start_time_s = snap.time_s;
+                            recovered_stages.push_back(controlled);
+                            branched_from_separation = true;
+                            break;
+                        }
+                    }
+                }
+            }
+
             // At a phase switch, re-anchor any continuity-enabled throttle/
-            // steering constants to the previous phase's final state.
-            if (!state_log.empty()) {
+            // steering constants to the previous phase's final state. Skipped for
+            // a branch (the recovery starts fresh from separation, not continuous
+            // with the main stack's final state).
+            if (!branched_from_separation && !state_log.empty()) {
                 apply_phase_start_continuity(
                     &phase,
                     config,
@@ -2267,8 +2555,31 @@ SimulationResult SimulationDriver::run(const CaseConfig& config) const
                     state_log.back().engine_direction_eci);
             }
 
+            // On a 3-DOF -> 2.5-DOF switch that continues from the previous phase,
+            // hand propagate_phase the previous phase's final 3-D thrust direction
+            // so it can project the orientation into the new vertical plane and seed
+            // the rigid-body pitch. Skipped when the previous phase was already
+            // 2.5-DOF (its attitude is meaningful and inherited as-is) or when this
+            // phase starts fresh (own initial state / separation branch).
+            std::optional<Vec3> inherited_orientation_eci;
+            if (phase.inherit_initial_state && !branched_from_separation &&
+                !state_log.empty()) {
+                DynamicsDof this_dof = DynamicsDof::ThreeDof;
+                dynamics_dof_from_string(phase.dynamics_dof, &this_dof);
+                DynamicsDof previous_dof = DynamicsDof::ThreeDof;
+                if (phase_index > 0) {
+                    dynamics_dof_from_string(
+                        config.phases[phase_index - 1].dynamics_dof, &previous_dof);
+                }
+                if (this_dof == DynamicsDof::TwoPointFiveDof &&
+                    previous_dof != DynamicsDof::TwoPointFiveDof) {
+                    inherited_orientation_eci = state_log.back().engine_direction_eci;
+                }
+            }
+
             const StateLog phase_log = propagate_phase(
-                config, phase, phase_index, phase_start_time_s, initial_runtime, &mission_events);
+                config, phase, phase_index, phase_start_time_s, initial_runtime,
+                &mission_events, inherited_orientation_eci);
             merge_phase_log(&state_log, phase_log);
             if (case_vehicle_impacted_earth(state_log, config)) {
                 return {false, "vehicle impacted Earth during propagation", state_log};

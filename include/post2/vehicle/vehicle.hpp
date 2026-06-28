@@ -114,6 +114,14 @@ struct EngineConfig {
     // linearly. Default 1 reproduces the pre-cluster (aggregated) behavior.
     int engine_count = 1;
 
+    // Allowed numbers of engines that may be ignited together (a discrete
+    // cluster-ignition constraint). E.g. Falcon 9 = {1, 3, 9}: the center
+    // engine, the 3-engine entry/landing set, or all 9. Empty means "any count
+    // from 1..engine_count is allowed" (no discrete restriction). Values are
+    // clamped to [1, engine_count]; used by throttle models that pick how many
+    // engines to light (e.g. the re-entry burn) to realise a commanded thrust.
+    std::vector<int> ignition_count_options;
+
     // Gimbal envelope. Fields are persisted but not enforced at runtime
     // (enforcing the half-angle cone requires the vehicle body axis, which
     // depends on the attitude state that is out of scope here).
@@ -177,9 +185,24 @@ struct AeroStageTable {
     double nose_length_m = 0.0;
     double base_diameter_m = 0.0;
     // Highest still-attached stage index this table represents; -1 == open to
-    // the top of the stack. Appended last to keep aggregate initialisers that
-    // predate this field valid (they default it to -1 = open-top).
+    // the top of the stack. Appended before nose_radius_m to keep aggregate
+    // initialisers that predate this field valid (they default it to -1).
     int max_attached_stage = -1;
+    // Stagnation-point nose radius [m] for the heat-flux diagnostic in this
+    // configuration. Zero means "auto" (derived from this table's ref_diameter_m).
+    // Appended last so older positional aggregate initialisers stay valid.
+    double nose_radius_m = 0.0;
+};
+
+// Deployed grid fins on a returning booster. count = number of fins (片数);
+// area_per_fin_m2 = planform reference area of one fin (参考面积).
+struct GridFinConfig {
+    int count = 0;
+    double area_per_fin_m2 = 0.0;
+
+    double total_area_m2() const {
+        return count > 0 ? count * area_per_fin_m2 : 0.0;
+    }
 };
 
 struct AeroConfig {
@@ -211,6 +234,26 @@ struct AeroConfig {
     double body_length_m = 0.0;
     double nose_length_m = 0.0;
     double base_diameter_m = 0.0;
+
+    // Stagnation-point nose radius [m] for the Sutton-Graves aerodynamic
+    // heat-flux diagnostic. Zero means "auto" (derived from ref_diameter_m).
+    double nose_radius_m = 0.0;
+
+    // Base-first descent aerodynamics (booster reentry). The semi-empirical
+    // CD/CL tables only cover slender nose-first flight (alpha 0..20 deg); a
+    // returning booster flies engine-first (alpha ~180 deg), a bluff body whose
+    // drag the tables grossly under-predict. When descent_cd > 0 and the vehicle
+    // is flying base-first (alpha > 90 deg), the drag model uses this bluff-body
+    // coefficient (referenced to reference_area_m2) instead of the table value,
+    // plus the deployed grid-fin drag below. Zero keeps the legacy table-only drag.
+    double descent_cd = 0.0;
+
+    // Deployed grid fins on the returning booster (lattice control surfaces).
+    // count = number of fins (片数), area_per_fin_m2 = planform area of one fin
+    // (参考面积). Their Mach-dependent drag/lift is computed by the post2::aero
+    // grid-fin model: baked into the booster-only aero table at generation time,
+    // and added to the base-first descent drag at runtime. count <= 0 disables.
+    GridFinConfig grid_fins;
 };
 
 struct VehicleConfig {

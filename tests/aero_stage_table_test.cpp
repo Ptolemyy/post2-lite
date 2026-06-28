@@ -6,6 +6,7 @@
 #include "post2/core/types.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -88,6 +89,8 @@ void test_three_stage_ladder()
     check("first_stage_table mirrors stage1-alone",
           cfg.vehicle.aero.first_stage_table.max_attached_stage == 0 &&
               cfg.vehicle.aero.first_stage_table.activate_at_min_attached_stage == 0);
+    check("first stage heat radius uses booster base radius",
+          std::abs(cfg.vehicle.aero.first_stage_table.nose_radius_m - 1.8) < 1.0e-12);
 
     // The full stack must reference the longest body; single stages are shorter.
     const post2::vehicle::AeroStageTable* full = nullptr;
@@ -141,6 +144,7 @@ void test_max_attached_stage_roundtrip()
     if (t.size() == 3) {
         check("full open-top preserved", t[0].max_attached_stage == -1);
         check("single-stage bound preserved", t[1].max_attached_stage == 0);
+        check("stage-table heat radius preserved", t[1].nose_radius_m == 0.0);
         check("upper open-top preserved", t[2].max_attached_stage == -1);
     }
 }

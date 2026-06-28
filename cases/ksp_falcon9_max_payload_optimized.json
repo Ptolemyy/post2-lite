@@ -159,6 +159,10 @@
           "value": true
         }
       ],
+      "controller_detached_stage": false,
+      "controller_stage_index": -1,
+      "controller_stage_name": "",
+      "dynamics_dof": "3dof",
       "force_models": {
         "aero_model": {
           "type": "none"
@@ -166,7 +170,7 @@
         "aerodynamic": true,
         "atmosphere_model": {
           "table_path": "",
-          "type": "exponential"
+          "type": "us_standard_1976"
         },
         "gravity": true,
         "gravity_model": {
@@ -253,6 +257,14 @@
         "c1": 0,
         "c2": 0,
         "continuity": false,
+        "entry_burn": {
+          "drag_cd": 0.80000000000000004,
+          "heat_flux_limit_wpm2": 0,
+          "max_entry_engines": 3,
+          "q_limit_pa": 0,
+          "safety_margin": 0.050000000000000003,
+          "trigger_fraction": 0.29999999999999999
+        },
         "points": [],
         "segmented_poly": {
           "continuity": true,
@@ -263,6 +275,8 @@
         "type": "poly"
       },
       "tolerances": {
+        "atol_angular_velocity_radps": 1.0000000000000001e-09,
+        "atol_attitude_rad": 1.0000000000000001e-09,
         "atol_position_m": 0.001,
         "atol_tank_mass_kg": 0.001,
         "atol_velocity_mps": 9.9999999999999995e-07,
@@ -279,6 +293,10 @@
           "value": true
         }
       ],
+      "controller_detached_stage": false,
+      "controller_stage_index": -1,
+      "controller_stage_name": "",
+      "dynamics_dof": "3dof",
       "force_models": {
         "aero_model": {
           "type": "none"
@@ -286,7 +304,7 @@
         "aerodynamic": true,
         "atmosphere_model": {
           "table_path": "",
-          "type": "exponential"
+          "type": "us_standard_1976"
         },
         "gravity": true,
         "gravity_model": {
@@ -373,6 +391,14 @@
         "c1": 0,
         "c2": 0,
         "continuity": false,
+        "entry_burn": {
+          "drag_cd": 0.80000000000000004,
+          "heat_flux_limit_wpm2": 0,
+          "max_entry_engines": 3,
+          "q_limit_pa": 0,
+          "safety_margin": 0.050000000000000003,
+          "trigger_fraction": 0.29999999999999999
+        },
         "points": [],
         "segmented_poly": {
           "continuity": true,
@@ -383,6 +409,8 @@
         "type": "poly"
       },
       "tolerances": {
+        "atol_angular_velocity_radps": 1.0000000000000001e-09,
+        "atol_attitude_rad": 1.0000000000000001e-09,
         "atol_position_m": 0.001,
         "atol_tank_mass_kg": 0.001,
         "atol_velocity_mps": 9.9999999999999995e-07,
@@ -399,6 +427,10 @@
           "value": true
         }
       ],
+      "controller_detached_stage": false,
+      "controller_stage_index": -1,
+      "controller_stage_name": "",
+      "dynamics_dof": "3dof",
       "force_models": {
         "aero_model": {
           "type": "none"
@@ -406,7 +438,7 @@
         "aerodynamic": true,
         "atmosphere_model": {
           "table_path": "",
-          "type": "exponential"
+          "type": "us_standard_1976"
         },
         "gravity": true,
         "gravity_model": {
@@ -533,6 +565,14 @@
         "c1": 0,
         "c2": 0,
         "continuity": false,
+        "entry_burn": {
+          "drag_cd": 0.80000000000000004,
+          "heat_flux_limit_wpm2": 0,
+          "max_entry_engines": 3,
+          "q_limit_pa": 0,
+          "safety_margin": 0.050000000000000003,
+          "trigger_fraction": 0.29999999999999999
+        },
         "points": [],
         "segmented_poly": {
           "continuity": true,
@@ -543,6 +583,8 @@
         "type": "poly"
       },
       "tolerances": {
+        "atol_angular_velocity_radps": 1.0000000000000001e-09,
+        "atol_attitude_rad": 1.0000000000000001e-09,
         "atol_position_m": 0.001,
         "atol_tank_mass_kg": 0.001,
         "atol_velocity_mps": 9.9999999999999995e-07,
@@ -580,14 +622,18 @@
           "value": true
         }
       ],
+      "controller_detached_stage": false,
+      "controller_stage_index": -1,
+      "controller_stage_name": "",
+      "dynamics_dof": "3dof",
       "force_models": {
         "aero_model": {
           "type": "none"
         },
-        "aerodynamic": false,
+        "aerodynamic": true,
         "atmosphere_model": {
           "table_path": "",
-          "type": "exponential"
+          "type": "us_standard_1976"
         },
         "gravity": true,
         "gravity_model": {
@@ -674,6 +720,14 @@
         "c1": 0,
         "c2": 0,
         "continuity": false,
+        "entry_burn": {
+          "drag_cd": 0.80000000000000004,
+          "heat_flux_limit_wpm2": 0,
+          "max_entry_engines": 3,
+          "q_limit_pa": 0,
+          "safety_margin": 0.050000000000000003,
+          "trigger_fraction": 0.29999999999999999
+        },
         "points": [],
         "segmented_poly": {
           "continuity": true,
@@ -684,6 +738,8 @@
         "type": "poly"
       },
       "tolerances": {
+        "atol_angular_velocity_radps": 1.0000000000000001e-09,
+        "atol_attitude_rad": 1.0000000000000001e-09,
         "atol_position_m": 0.001,
         "atol_tank_mass_kg": 0.001,
         "atol_velocity_mps": 9.9999999999999995e-07,
@@ -694,17 +750,85 @@
   "step_s": 1,
   "vehicle": {
     "aero": {
-      "aero_table_path": "",
-      "base_diameter_m": 0,
-      "body_length_m": 0,
+      "aero_table_path": "C:\\Users\\32796\\Desktop\\post2-lite\\cases\\aero_table_full.csv",
+      "base_diameter_m": 3.6600000000000001,
+      "body_length_m": 70,
       "cd": 0.5,
       "cl": 0,
       "enabled": true,
-      "nose_length_m": 0,
-      "ref_diameter_m": 0,
-      "reference_area_m2": 10.5,
-      "stage_tables": [],
-      "use_table": false
+      "first_stage_table": {
+        "activate_at_min_attached_stage": 0,
+        "base_diameter_m": 3.6600000000000001,
+        "body_length_m": 42,
+        "max_attached_stage": 0,
+        "nose_length_m": 12.6,
+        "nose_radius_m": 0,
+        "ref_diameter_m": 3.6600000000000001,
+        "reference_area_m2": 10.520879637606859,
+        "table_path": "C:\\Users\\32796\\Desktop\\post2-lite\\cases\\aero_table_stage1_only.csv"
+      },
+      "nose_length_m": 12.6,
+      "nose_radius_m": 0,
+      "ref_diameter_m": 5.2000000000000002,
+      "reference_area_m2": 21.237166338267002,
+      "stage_tables": [
+        {
+          "activate_at_min_attached_stage": 0,
+          "base_diameter_m": 3.6600000000000001,
+          "body_length_m": 70,
+          "max_attached_stage": -1,
+          "nose_length_m": 12.6,
+          "nose_radius_m": 0,
+          "ref_diameter_m": 5.2000000000000002,
+          "reference_area_m2": 21.237166338267002,
+          "table_path": "C:\\Users\\32796\\Desktop\\post2-lite\\cases\\aero_table_full.csv"
+        },
+        {
+          "activate_at_min_attached_stage": 1,
+          "base_diameter_m": 3.6600000000000001,
+          "body_length_m": 27.999999999999996,
+          "max_attached_stage": -1,
+          "nose_length_m": 12.6,
+          "nose_radius_m": 0,
+          "ref_diameter_m": 5.2000000000000002,
+          "reference_area_m2": 21.237166338267002,
+          "table_path": "C:\\Users\\32796\\Desktop\\post2-lite\\cases\\aero_table_stage2.csv"
+        },
+        {
+          "activate_at_min_attached_stage": 2,
+          "base_diameter_m": 3.6600000000000001,
+          "body_length_m": 6.4619194021599604,
+          "max_attached_stage": -1,
+          "nose_length_m": 6.4619194021599604,
+          "nose_radius_m": 0,
+          "ref_diameter_m": 5.2000000000000002,
+          "reference_area_m2": 21.237166338267002,
+          "table_path": "C:\\Users\\32796\\Desktop\\post2-lite\\cases\\aero_table_stage3.csv"
+        },
+        {
+          "activate_at_min_attached_stage": 0,
+          "base_diameter_m": 3.6600000000000001,
+          "body_length_m": 42,
+          "max_attached_stage": 0,
+          "nose_length_m": 12.6,
+          "nose_radius_m": 0,
+          "ref_diameter_m": 3.6600000000000001,
+          "reference_area_m2": 10.520879637606859,
+          "table_path": "C:\\Users\\32796\\Desktop\\post2-lite\\cases\\aero_table_stage1_only.csv"
+        },
+        {
+          "activate_at_min_attached_stage": 1,
+          "base_diameter_m": 3.6600000000000001,
+          "body_length_m": 21.538080597840036,
+          "max_attached_stage": 1,
+          "nose_length_m": 12.6,
+          "nose_radius_m": 0,
+          "ref_diameter_m": 3.6600000000000001,
+          "reference_area_m2": 10.520879637606859,
+          "table_path": "C:\\Users\\32796\\Desktop\\post2-lite\\cases\\aero_table_stage2_only.csv"
+        }
+      ],
+      "use_table": true
     },
     "dry_mass_kg": 16226.195623,
     "engine": {
@@ -723,6 +847,7 @@
       ],
       "gimbal_max_rad": 0,
       "gimbal_rate_rad_s": 0,
+      "ignition_count_options": [],
       "ignition_delay_s": 2.3999999999999999,
       "isp_sl_s": 283.00000317684413,
       "isp_vac_s": 312.00000508295057,
@@ -738,6 +863,12 @@
       "thrust_vac_n": 8429489.8681640625
     },
     "name": "PMBT-SpaceX Falcon 9 v1.2 Block-5",
+    "rigid_body": {
+      "engine_moment_arm_m": 0,
+      "initial_angular_velocity_radps": 0,
+      "initial_attitude_rad": 0,
+      "moment_of_inertia_kgm2": 0
+    },
     "stages": [
       {
         "active": true,
@@ -759,6 +890,7 @@
           ],
           "gimbal_max_rad": 0,
           "gimbal_rate_rad_s": 0,
+          "ignition_count_options": [],
           "ignition_delay_s": 2.3999999999999999,
           "isp_sl_s": 283.00000317684413,
           "isp_vac_s": 312.00000508295057,
@@ -803,6 +935,7 @@
           ],
           "gimbal_max_rad": 0,
           "gimbal_rate_rad_s": 0,
+          "ignition_count_options": [],
           "ignition_delay_s": 2.3999999999999999,
           "isp_sl_s": 250.00000104900954,
           "isp_vac_s": 348.00001433646514,
@@ -842,6 +975,7 @@
           "feed_tanks": [],
           "gimbal_max_rad": 0,
           "gimbal_rate_rad_s": 0,
+          "ignition_count_options": [],
           "ignition_delay_s": 0,
           "isp_sl_s": 0,
           "isp_vac_s": 0,

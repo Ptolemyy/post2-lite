@@ -375,6 +375,31 @@ int main()
             std::cerr << "segmented poly optimization path failed: " << error << '\n';
             return 1;
         }
+        if (!post2::core::write_optimization_variable(
+                &segmented_case,
+                "phases[0].throttle_model.entry_burn.q_limit_pa",
+                35000.0,
+                &error) ||
+            !post2::core::read_optimization_variable(
+                segmented_case,
+                "phases[0].throttle_model.entry_burn.q_limit_pa",
+                &value,
+                &error) ||
+            !near(value, 35000.0, 1.0e-12) ||
+            !post2::core::write_optimization_variable(
+                &segmented_case,
+                "phases[0].throttle_model.entry_burn.max_entry_engines",
+                2.7,
+                &error) ||
+            !post2::core::read_optimization_variable(
+                segmented_case,
+                "phases[0].throttle_model.entry_burn.max_entry_engines",
+                &value,
+                &error) ||
+            !near(value, 3.0, 1.0e-12)) {
+            std::cerr << "entry burn throttle optimization path failed: " << error << '\n';
+            return 1;
+        }
 
         post2::core::NlpProblem problem;
         if (!post2::core::build_nlp_problem_from_case(segmented_case, &problem, &error) ||
@@ -454,6 +479,58 @@ int main()
         const auto result = optimizer.solve(problem, evaluator, options);
         if (result.best_z.empty() || result.messages.empty()) {
             std::cerr << "optimizer interface did not report a candidate\n";
+            return 1;
+        }
+    }
+
+    {
+        // The augmented-Lagrangian (fmincon) path must stream live progress: the
+        // callback should fire at least once with monotonic non-decreasing
+        // counters and forward the per-iteration log lines.
+        post2::core::CaseConfig nlp_case = make_drop_case();
+        nlp_case.optimization.variables.push_back({"phases[0].termination.value", true, 0.5, 2.0});
+        nlp_case.optimization.targets.push_back({"terminal_altitude_m", "equal", 950.0, 0.0, 0.0, 1.0});
+        post2::core::NlpProblem problem;
+        std::string error;
+        if (!post2::core::build_nlp_problem_from_case(nlp_case, &problem, &error)) {
+            std::cerr << "NLP build failed: " << error << '\n';
+            return 1;
+        }
+        post2::core::NlpEvaluator evaluator(nlp_case, service);
+        post2::core::AugmentedLagrangianBfgsOptimizer optimizer;
+        post2::core::OptimizerOptions options;
+        options.max_iterations = 8;
+        options.constraint_tolerance = 1.0e-8;
+
+        int callbacks = 0;
+        int last_iterations = -1;
+        int last_evaluations = -1;
+        int streamed_messages = 0;
+        bool monotonic = true;
+        options.progress = [&](const post2::core::OptimizerProgress& p) {
+            ++callbacks;
+            if (p.iterations < last_iterations || p.evaluations < last_evaluations) {
+                monotonic = false;
+            }
+            last_iterations = p.iterations;
+            last_evaluations = p.evaluations;
+            streamed_messages += static_cast<int>(p.new_messages.size());
+        };
+        const auto result = optimizer.solve(problem, evaluator, options);
+        if (result.best_z.empty()) {
+            std::cerr << "progress-callback solve produced no candidate\n";
+            return 1;
+        }
+        if (callbacks == 0) {
+            std::cerr << "optimizer progress callback never fired\n";
+            return 1;
+        }
+        if (!monotonic) {
+            std::cerr << "optimizer progress counters went backwards\n";
+            return 1;
+        }
+        if (streamed_messages == 0) {
+            std::cerr << "optimizer progress streamed no log lines\n";
             return 1;
         }
     }

@@ -98,6 +98,39 @@ void test_table_roundtrip()
     std::remove(path.c_str());
 }
 
+void test_heat_flux()
+{
+    // Zero / non-positive inputs yield no heating (no stagnation point).
+    check("heat flux zero at v=0",
+          post2::aero::stagnation_heat_flux_wpm2(1.0, 0.0, 0.5) == 0.0);
+    check("heat flux zero at rho=0",
+          post2::aero::stagnation_heat_flux_wpm2(0.0, 1000.0, 0.5) == 0.0);
+    check("heat flux zero at Rn=0",
+          post2::aero::stagnation_heat_flux_wpm2(1.0, 1000.0, 0.0) == 0.0);
+
+    // Sutton-Graves closed form: q = 1.7415e-4 * sqrt(rho/Rn) * V^3 [W/m^2].
+    const double q = post2::aero::stagnation_heat_flux_wpm2(0.3, 400.0, 2.6);
+    const double expected = 1.7415e-4 * std::sqrt(0.3 / 2.6) * 400.0 * 400.0 * 400.0;
+    check("heat flux matches Sutton-Graves", std::fabs(q - expected) < 1e-6 * expected);
+
+    // Scaling laws: cubic in speed, monotone in density, weaker with a blunter
+    // (larger-radius) nose.
+    const double q_fast = post2::aero::stagnation_heat_flux_wpm2(0.3, 800.0, 2.6);
+    check("heat flux cubic in speed", std::fabs(q_fast - 8.0 * q) < 1e-6 * q_fast);
+    check("heat flux rises with density",
+          post2::aero::stagnation_heat_flux_wpm2(0.6, 400.0, 2.6) > q);
+    check("blunter nose lowers heat flux",
+          post2::aero::stagnation_heat_flux_wpm2(0.3, 400.0, 5.2) < q);
+
+    // Effective nose radius: configured value wins; auto derives from diameter.
+    check("nose radius uses configured value",
+          std::fabs(post2::aero::effective_nose_radius_m(0.8, 5.2) - 0.8) < 1e-12);
+    check("nose radius auto from diameter",
+          std::fabs(post2::aero::effective_nose_radius_m(0.0, 5.2) - 0.52) < 1e-12);
+    check("nose radius auto fallback when diameter unset",
+          std::fabs(post2::aero::effective_nose_radius_m(0.0, 0.0) - 0.5) < 1e-12);
+}
+
 void test_us1976_atmosphere()
 {
     const post2::environment::AtmosphereSample sea = post2::environment::us_standard_1976(0.0);
@@ -127,6 +160,41 @@ void test_us1976_atmosphere()
               h200.speed_of_sound_mps > 0.0);
 }
 
+void test_grid_fins()
+{
+    using namespace post2::aero;
+    // Lattice fins choke transonically: drag peaks near M~1.1, above the subsonic
+    // and high-supersonic values.
+    check("grid fin transonic peak > subsonic",
+          grid_fin_drag_coefficient(1.1) > grid_fin_drag_coefficient(0.5));
+    check("grid fin transonic peak > supersonic",
+          grid_fin_drag_coefficient(1.1) > grid_fin_drag_coefficient(4.0));
+    check("grid fin disabled => zero",
+          GridFinSpec{}.total_area_m2() == 0.0);
+
+    // Generating a booster-only table with fins raises Cd vs without.
+    AeroGeometry g;
+    g.ref_diameter_m = 3.66;
+    g.total_length_m = 42.0;
+    g.nose_length_m = 5.0;
+    g.base_diameter_m = 3.66;
+    g.power_on = true;
+    GridFinSpec fins;
+    fins.count = 4;
+    fins.area_per_fin_m2 = 1.25;
+    const AeroTable bare = generate_aero_table(g, {}, {});
+    const AeroTable finned = generate_aero_table(g, {}, {}, fins);
+    const std::size_t na = bare.alpha_deg.size();
+    bool any_higher = false;
+    for (std::size_t i = 0; i < bare.mach.size(); ++i) {
+        if (finned.cd[i * na] > bare.cd[i * na] + 1.0e-9) {
+            any_higher = true;
+            break;
+        }
+    }
+    check("grid fins raise booster table Cd", any_higher);
+}
+
 } // namespace
 
 int main()
@@ -135,7 +203,9 @@ int main()
     test_transonic_drag_rise();
     test_lift_vs_alpha();
     test_table_roundtrip();
+    test_heat_flux();
     test_us1976_atmosphere();
+    test_grid_fins();
     if (g_failures != 0) {
         std::cerr << g_failures << " aero checks failed\n";
         return 1;

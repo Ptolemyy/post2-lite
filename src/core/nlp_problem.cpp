@@ -89,6 +89,53 @@ bool metric_has_phase_prefix(const std::string& metric)
     return consume_indexed(&text, "phases", &index) && !text.empty() && text.front() == '.';
 }
 
+bool consume_bracket_token(std::string_view* text, std::string_view id)
+{
+    std::string_view working = *text;
+    if (!consume_identifier(&working, id) || working.empty() || working.front() != '[') {
+        return false;
+    }
+    working.remove_prefix(1);
+    const std::size_t close = working.find(']');
+    if (close == std::string_view::npos || close == 0) {
+        return false;
+    }
+    working.remove_prefix(close + 1);
+    *text = working;
+    return true;
+}
+
+bool metric_has_controller_prefix(const std::string& metric)
+{
+    std::string_view text(metric);
+    return (consume_bracket_token(&text, "controllers") ||
+            consume_bracket_token(&text, "controller")) &&
+        !text.empty() && text.front() == '.';
+}
+
+bool metric_has_scope_prefix(const std::string& metric)
+{
+    return metric_has_phase_prefix(metric) || metric_has_controller_prefix(metric);
+}
+
+std::string_view unscoped_metric_name(const std::string& metric)
+{
+    std::string_view text(metric);
+    int index = -1;
+    if (consume_indexed(&text, "phases", &index) && !text.empty() && text.front() == '.') {
+        text.remove_prefix(1);
+        return text;
+    }
+    text = metric;
+    if ((consume_bracket_token(&text, "controllers") ||
+            consume_bracket_token(&text, "controller")) &&
+        !text.empty() && text.front() == '.') {
+        text.remove_prefix(1);
+        return text;
+    }
+    return metric;
+}
+
 std::string lowercase(std::string text)
 {
     std::transform(text.begin(), text.end(), text.begin(), [](unsigned char ch) {
@@ -107,7 +154,7 @@ bool is_segmented_poly_type(const std::string& type)
 
 std::string scoped_metric(const OptimizationTargetConfig& target)
 {
-    if (target.phase_index >= 0 && !metric_has_phase_prefix(target.metric)) {
+    if (target.phase_index >= 0 && !metric_has_scope_prefix(target.metric)) {
         return "phases[" + std::to_string(target.phase_index) + "]." + target.metric;
     }
     return target.metric;
@@ -279,16 +326,7 @@ bool parse_nlp_constraint_type(const std::string& text, NlpConstraintType* type)
 
 double nlp_default_metric_scale(const std::string& metric)
 {
-    std::string_view name(metric);
-    if (metric_has_phase_prefix(metric)) {
-        std::string_view text(metric);
-        int index = -1;
-        consume_indexed(&text, "phases", &index);
-        if (!text.empty() && text.front() == '.') {
-            text.remove_prefix(1);
-            name = text;
-        }
-    }
+    std::string_view name = unscoped_metric_name(metric);
     if (name == "terminal_altitude_m" ||
         name == "periapsis_altitude_m" ||
         name == "apoapsis_altitude_m" ||

@@ -5,6 +5,12 @@
 // with the GUI so the output is identical.
 //
 //   post2_regen_aero <vehicle_launchsite.json> <case.json> [case2.json ...]
+//
+// Pass "--geometry-only" (or "-") as the source to skip the vehicle re-import
+// and regenerate the tables from each case's EXISTING aero geometry only. This
+// preserves edits to the vehicle (engine_count, ignition_count_options, masses)
+// while upgrading old cases to the current per-staging table set (incl. the
+// single-stage booster-alone [i,i] tables that older imports never wrote).
 
 #include <filesystem>
 #include <iostream>
@@ -17,12 +23,13 @@
 int main(int argc, char** argv)
 {
     if (argc < 3) {
-        std::cerr << "usage: post2_regen_aero <vehicle_launchsite.json> "
+        std::cerr << "usage: post2_regen_aero <vehicle_launchsite.json|--geometry-only> "
                      "<case.json> [case2.json ...]\n";
         return 2;
     }
 
     const std::string source = argv[1];
+    const bool geometry_only = (source == "--geometry-only" || source == "-");
     int failures = 0;
 
     for (int i = 2; i < argc; ++i) {
@@ -36,15 +43,18 @@ int main(int argc, char** argv)
             continue;
         }
 
-        // Preserve the case's existing aero so the import can carry geometry
-        // forward, then re-import the vehicle + launch site.
+        // Geometry-only: leave the vehicle untouched and regenerate tables from
+        // the case's existing aero geometry (empty import). Otherwise re-import
+        // the vehicle + launch site from `source` first.
         post2::core::KspVehicleSiteImport imported;
-        if (!post2::core::load_ksp_vehicle_site_import_file(
-                source, config.vehicle.aero, &imported, &error)) {
-            std::cerr << source << ": import failed: " << error << "\n";
-            return 1;
+        if (!geometry_only) {
+            if (!post2::core::load_ksp_vehicle_site_import_file(
+                    source, config.vehicle.aero, &imported, &error)) {
+                std::cerr << source << ": import failed: " << error << "\n";
+                return 1;
+            }
+            post2::core::apply_ksp_vehicle_site_import(&config, imported);
         }
-        post2::core::apply_ksp_vehicle_site_import(&config, imported);
 
         // Write the table CSVs next to the case (absolute path so the simulator
         // finds them regardless of working directory), matching the GUI.

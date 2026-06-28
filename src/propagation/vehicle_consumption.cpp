@@ -240,6 +240,7 @@ DerivativeResult VehicleConsumptionPropagator::compute_derivatives(
             EnginePerformanceInputs steady_in;
             steady_in.throttle_command = throttle;
             steady_in.ambient_pressure_pa = command.ambient_pressure_pa;
+            steady_in.ignited_engine_count = command.ignited_engine_count;
             const EnginePerformanceOutputs steady = evaluate_engine(stage_cfg.engine, steady_in);
 
             // Transient spool: the actual throttle lags the command. The
@@ -269,6 +270,7 @@ DerivativeResult VehicleConsumptionPropagator::compute_derivatives(
             EnginePerformanceInputs perf_in;
             perf_in.throttle_command = spool_eff;
             perf_in.ambient_pressure_pa = command.ambient_pressure_pa;
+            perf_in.ignited_engine_count = command.ignited_engine_count;
             const EnginePerformanceOutputs perf = evaluate_engine(stage_cfg.engine, perf_in);
             if (perf.thrust_n <= 0.0 || perf.mdot_kgps <= 0.0) {
                 // Still in ignition dead-time / below min throttle: no thrust yet.

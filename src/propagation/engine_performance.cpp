@@ -49,7 +49,12 @@ EnginePerformanceOutputs evaluate_engine(
 {
     EnginePerformanceOutputs out;
 
-    const int count = std::max(0, engine.engine_count);
+    const int engine_count = std::max(0, engine.engine_count);
+    // Lit-engine count: a non-negative request is clamped into [0, engine_count];
+    // negative (default) lights the whole cluster (legacy behavior).
+    const int count = inputs.ignited_engine_count < 0
+        ? engine_count
+        : std::min(inputs.ignited_engine_count, engine_count);
     if (!engine.enabled ||
         count <= 0 ||
         engine.thrust_vac_n <= 0.0 ||

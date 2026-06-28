@@ -13,6 +13,10 @@ struct MetricQuery {
     std::string metric;
     std::string_view base_metric;
     int phase_index = -1;
+    std::string controller_name;
+    int controller_stage_index = -1;
+    bool controller_scope = false;
+    bool controller_detached_stage = false;
 };
 
 bool parse_metric_query(const std::string& metric, MetricQuery* query);

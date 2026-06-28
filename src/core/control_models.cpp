@@ -1,11 +1,15 @@
 #include "post2/core/control_models.hpp"
 
+#include "post2/aero/aero_model.hpp"
 #include "post2/core/coordinates.hpp"
+#include "post2/core/reentry_solver.hpp"
 #include "post2/core/upfg.hpp"
+#include "post2/environment/atmosphere.hpp"
 
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <limits>
 #include <memory>
 #include <string>
 #include <utility>
@@ -337,6 +341,200 @@ private:
     std::vector<ThrottlePoint> points_;
 };
 
+// Single re-entry deceleration burn. Throttle is 0 until the live dynamic
+// pressure / heat flux crosses the trigger fraction of the limit; then the model
+// solves the burn ONCE (Clarabel guidance), latches it, and during the solved
+// window commands the per-engine throttle + engine count that realise the
+// solved thrust. The latch lives in a mutable member: safe because the throttle
+// is evaluated once per committed step at monotonic time (the model is built
+// once per phase), so there is no RK-probe reentrancy as with steering.
+class EntryBurnThrottleModel final : public IThrottleModel {
+public:
+    explicit EntryBurnThrottleModel(ThrottleModelConfig config)
+        : config_(std::move(config))
+    {
+    }
+
+    double throttle(double phase_time_s,
+                    const post2::vehicle::VehicleRuntimeState& runtime,
+                    const PhaseContext& context) const override
+    {
+        const Plan& plan = ensure_plan(phase_time_s, runtime, context);
+        return in_burn(plan, phase_time_s) ? plan.per_engine_throttle : 0.0;
+    }
+
+    int ignited_engine_count(double phase_time_s,
+                             const post2::vehicle::VehicleRuntimeState& runtime,
+                             const PhaseContext& context) const override
+    {
+        const Plan& plan = ensure_plan(phase_time_s, runtime, context);
+        return in_burn(plan, phase_time_s) ? plan.engine_count : -1;
+    }
+
+private:
+    struct Plan {
+        bool decided = false;  // trigger fired and a solve was attempted
+        bool armed = false;    // a burn is scheduled
+        double solve_phase_time_s = 0.0;
+        double ignition_delay_s = 0.0;
+        double burn_duration_s = 0.0;
+        double per_engine_throttle = 0.0;
+        int engine_count = -1;
+    };
+
+    static bool in_burn(const Plan& plan, double phase_time_s)
+    {
+        if (!plan.armed) {
+            return false;
+        }
+        const double elapsed = phase_time_s - plan.solve_phase_time_s;
+        return elapsed >= plan.ignition_delay_s &&
+               elapsed <= plan.ignition_delay_s + plan.burn_duration_s;
+    }
+
+    const Plan& ensure_plan(double phase_time_s,
+                            const post2::vehicle::VehicleRuntimeState& runtime,
+                            const PhaseContext& context) const
+    {
+        if (plan_.decided || context.case_config == nullptr) {
+            return plan_;
+        }
+        const CaseConfig& cc = *context.case_config;
+
+        // Active firing stage's engine config (per-engine thrust, discrete
+        // ignition options, min throttle, Isp).
+        const std::vector<post2::vehicle::StageConfig> stages =
+            post2::vehicle::effective_stage_configs(cc.vehicle);
+        const post2::vehicle::EngineConfig* engine = nullptr;
+        for (std::size_t i = 0; i < runtime.stages.size() && i < stages.size(); ++i) {
+            if (runtime.stages[i].attached && runtime.stages[i].active &&
+                stages[i].engine.enabled && stages[i].engine.thrust_vac_n > 0.0) {
+                engine = &stages[i].engine;
+                break;
+            }
+        }
+        if (engine == nullptr) {
+            return plan_;  // nothing to burn with yet; re-check next step
+        }
+
+        // Atmosphere-relative state.
+        const Vec3 r = runtime.vehicle.motion.position_m;
+        const Vec3 v = runtime.vehicle.motion.velocity_mps;
+        const double radius = post2::vehicle::norm(r);
+        const double altitude = radius - cc.earth_radius_m;
+        const Vec3 omega{0.0, 0.0, cc.earth_rotation_rad_per_s};
+        const Vec3 v_rel = v - cross_product(omega, r);
+        const double speed = post2::vehicle::norm(v_rel);
+        if (altitude <= 0.0 || speed <= 1.0) {
+            return plan_;
+        }
+
+        const post2::environment::AtmosphereSample atm =
+            post2::environment::us_standard_1976(altitude);
+        const auto& eb = config_.entry_burn;
+        const post2::vehicle::AeroConfig& aero = cc.vehicle.aero;
+        double nose_radius_input = aero.nose_radius_m;
+        double nose_ref_diameter = aero.ref_diameter_m;
+        double ref_area = aero.reference_area_m2;
+        if (const post2::vehicle::AeroStageTable* active_table =
+                post2::vehicle::select_active_aero_stage_table(aero, runtime)) {
+            nose_radius_input = active_table->nose_radius_m;
+            nose_ref_diameter = active_table->ref_diameter_m;
+            if (active_table->reference_area_m2 > 0.0) {
+                ref_area = active_table->reference_area_m2;
+            }
+        }
+        const double nose_radius =
+            post2::aero::effective_nose_radius_m(nose_radius_input, nose_ref_diameter);
+        const double q = 0.5 * atm.density_kgpm3 * speed * speed;
+        const double hf = post2::aero::stagnation_heat_flux_wpm2(
+            atm.density_kgpm3, speed, nose_radius);
+
+        // Trigger: arm the solve once the live load reaches the trigger fraction
+        // of a limit. Below that we keep throttle 0 and re-check next step.
+        const bool q_trig = eb.q_limit_pa > 0.0 &&
+                            q >= std::max(0.0, eb.trigger_fraction) * eb.q_limit_pa;
+        const bool hf_trig = eb.heat_flux_limit_wpm2 > 0.0 &&
+                            hf >= std::max(0.0, eb.trigger_fraction) * eb.heat_flux_limit_wpm2;
+        if (!q_trig && !hf_trig) {
+            return plan_;
+        }
+
+        // Trigger fired: attempt the solve exactly once.
+        plan_.decided = true;
+        plan_.solve_phase_time_s = phase_time_s;
+
+        const double r_hat_scale = radius > 0.0 ? 1.0 / radius : 0.0;
+        const Vec3 r_hat{r.x * r_hat_scale, r.y * r_hat_scale, r.z * r_hat_scale};
+        const double v_radial = post2::vehicle::dot(v_rel, r_hat);  // <0 descending
+        const double fpa = std::asin(clamp(-v_radial / speed, -1.0, 1.0));
+
+        const double per_engine_thrust = engine->thrust_vac_n;
+        const double min_throttle = clamp(engine->min_throttle, 0.0, 1.0);
+        const double ve = engine->isp_vac_s * kStandardGravityMps2;
+
+        EntryBurnProblem prob;
+        prob.altitude_m = altitude;
+        prob.speed_mps = speed;
+        prob.flight_path_angle_rad = fpa;
+        prob.mass_kg = runtime.vehicle.total_mass_kg;
+        prob.max_thrust_n = std::max(1, eb.max_entry_engines) * per_engine_thrust;
+        prob.min_thrust_n = min_throttle * per_engine_thrust;
+        prob.exhaust_velocity_mps = ve > 0.0 ? ve : 3000.0;
+        prob.drag_cd = eb.drag_cd > 0.0 ? eb.drag_cd : 0.8;
+        // Use the reference area of the currently-attached aero configuration
+        // (e.g. the booster-alone [0,0] table when flying solo), not the full
+        // stack, so the predictor's drag matches the live force model.
+        prob.ref_area_m2 = ref_area;
+        // Match the live base-first descent drag (AeroConfig.descent_cd + grid
+        // fins) so the burn predictor's descent -- and therefore the burn
+        // timing/duration -- agrees with the force model's actual high drag.
+        // Without this the predictor uses the slender nose-first drag_cd and
+        // mistimes (or skips) the burn entirely.
+        if (aero.descent_cd > 0.0 && ref_area > 0.0) {
+            prob.drag_cd = aero.descent_cd;
+            const double fin_area = aero.grid_fins.total_area_m2();
+            if (fin_area > 0.0 && atm.speed_of_sound_mps > 0.0) {
+                const double fin_mach = speed / atm.speed_of_sound_mps;
+                prob.drag_cd +=
+                    post2::aero::grid_fin_drag_coefficient(fin_mach) * fin_area / ref_area;
+            }
+        }
+        prob.nose_radius_m = nose_radius;
+        prob.q_limit_pa = eb.q_limit_pa;
+        prob.heat_flux_limit_wpm2 = eb.heat_flux_limit_wpm2;
+        prob.earth_radius_m = cc.earth_radius_m;
+        prob.earth_mu_m3s2 = cc.earth_mu_m3s2;
+        prob.safety_margin = eb.safety_margin;
+
+        EntryBurnSolution sol;
+        if (!solve_entry_burn(prob, &sol) || !sol.ok || !sol.burn_needed ||
+            sol.burn_duration_s <= 0.0) {
+            return plan_;  // no solver / no burn -> stays disarmed (throttle 0)
+        }
+
+        int count = -1;
+        double per_engine = 0.0;
+        select_ignited_engines(sol.thrust_n, per_engine_thrust,
+                               engine->ignition_count_options, min_throttle,
+                               &count, &per_engine);
+        if (count <= 0) {
+            // No discrete restriction: fire the configured entry cluster.
+            count = std::max(1, eb.max_entry_engines);
+            per_engine = clamp(sol.thrust_n / (count * per_engine_thrust), min_throttle, 1.0);
+        }
+        plan_.armed = true;
+        plan_.ignition_delay_s = sol.ignition_delay_s;
+        plan_.burn_duration_s = sol.burn_duration_s;
+        plan_.engine_count = count;
+        plan_.per_engine_throttle = per_engine;
+        return plan_;
+    }
+
+    ThrottleModelConfig config_;
+    mutable Plan plan_;
+};
+
 class FixedEciSteeringModel final : public ISteeringModel {
 public:
     explicit FixedEciSteeringModel(Vec3 direction)
@@ -351,6 +549,40 @@ public:
 
 private:
     Vec3 direction_;
+};
+
+// Closed-loop velocity-aligned steering: points the thrust along (prograde) or
+// opposite (retrograde) the ATMOSPHERE-RELATIVE velocity, so a retrograde burn
+// decelerates against the airflow (the q/heat-flux-reducing direction). Like
+// UPFG it is a deterministic, reentrant function of the live state, so it is
+// safe under the integrator's per-RK-stage probing.
+class VelocityAlignedSteeringModel final : public ISteeringModel {
+public:
+    explicit VelocityAlignedSteeringModel(bool retrograde)
+        : sign_(retrograde ? -1.0 : 1.0)
+    {
+    }
+
+    Vec3 thrust_direction_eci(
+        double,
+        const State& state,
+        const post2::vehicle::VehicleRuntimeState&,
+        const PhaseContext& context) const override
+    {
+        const double omega = context.case_config
+            ? context.case_config->earth_rotation_rad_per_s : 0.0;
+        const Vec3 atmosphere_v = cross_product({0.0, 0.0, omega}, state.position_m);
+        const Vec3 v_rel = state.velocity_mps - atmosphere_v;
+        // Prefer atmosphere-relative velocity; fall back to inertial velocity,
+        // then radial, so a near-zero relative velocity never yields a NaN.
+        const Vec3 base = normalized_or(
+            v_rel, normalized_or(state.velocity_mps,
+                                 normalized_or(state.position_m, {1.0, 0.0, 0.0})));
+        return {sign_ * base.x, sign_ * base.y, sign_ * base.z};
+    }
+
+private:
+    double sign_;
 };
 
 class RollPitchYawPolySteeringModel final : public ISteeringModel {
@@ -793,6 +1025,97 @@ double clamp_throttle(double value)
     return clamp(value, 0.0, 1.0);
 }
 
+void select_ignited_engines(double target_thrust_n, double per_engine_thrust_n,
+                            const std::vector<int>& options, double min_throttle,
+                            int* count_out, double* throttle_out)
+{
+    if (count_out) {
+        *count_out = 0;
+    }
+    if (throttle_out) {
+        *throttle_out = 0.0;
+    }
+    if (per_engine_thrust_n <= 0.0 || options.empty()) {
+        return;  // no discrete restriction -> caller falls back to the full cluster
+    }
+    const double min_th = clamp(min_throttle, 0.0, 1.0);
+    int best_count = 0;
+    double best_throttle = 0.0;
+    double best_err = std::numeric_limits<double>::infinity();
+    for (int n : options) {
+        if (n <= 0) {
+            continue;
+        }
+        const double lo = n * min_th * per_engine_thrust_n;
+        const double hi = n * per_engine_thrust_n;
+        double achieved = 0.0;
+        double throttle = 0.0;
+        if (target_thrust_n < lo) {
+            achieved = lo;
+            throttle = min_th;
+        } else if (target_thrust_n > hi) {
+            achieved = hi;
+            throttle = 1.0;
+        } else {
+            achieved = target_thrust_n;
+            throttle = target_thrust_n / (n * per_engine_thrust_n);
+        }
+        const double err = std::fabs(achieved - target_thrust_n);
+        // Smallest realisation error; ties broken toward fewer engines.
+        if (err < best_err - 1.0e-6 ||
+            (std::fabs(err - best_err) <= 1.0e-6 && (best_count == 0 || n < best_count))) {
+            best_err = err;
+            best_count = n;
+            best_throttle = throttle;
+        }
+    }
+    if (count_out) {
+        *count_out = best_count;
+    }
+    if (throttle_out) {
+        *throttle_out = best_throttle;
+    }
+}
+
+double upfg_time_to_go_s(
+    const CaseConfig& case_config,
+    const SteeringModelConfig& steering,
+    const post2::vehicle::VehicleRuntimeState& runtime,
+    const Vec3& position_m,
+    const Vec3& velocity_mps)
+{
+    const double inf = std::numeric_limits<double>::infinity();
+    const double mu = case_config.earth_mu_m3s2;
+    const double body_radius_m = case_config.earth_radius_m;
+
+    const std::vector<post2::core::UpfgStage> stages = build_upfg_stages(case_config, runtime);
+    if (stages.empty()) {
+        return inf;
+    }
+
+    const post2::core::UpfgTarget target = post2::core::make_upfg_orbit_target(
+        steering.upfg.periapsis_km * 1000.0,
+        steering.upfg.apoapsis_km * 1000.0,
+        steering.upfg.inclination_deg,
+        position_m,
+        velocity_mps,
+        mu,
+        body_radius_m);
+
+    post2::core::UpfgVehicleState upfg_state;
+    upfg_state.time_s = runtime.time_s;
+    upfg_state.mass_kg = runtime.vehicle.total_mass_kg;
+    upfg_state.position_m = position_m;
+    upfg_state.velocity_mps = velocity_mps;
+
+    const post2::core::UpfgResult result =
+        post2::core::upfg_converge(stages, target, upfg_state, mu);
+    if (!result.ok) {
+        return inf;
+    }
+    return result.tgo_s;
+}
+
 std::unique_ptr<IThrottleModel> make_throttle_model(const ThrottleModelConfig& config)
 {
     const std::string type = lowercase(config.type);
@@ -805,6 +1128,9 @@ std::unique_ptr<IThrottleModel> make_throttle_model(const ThrottleModelConfig& c
     if (type == "segmented_poly" || type == "piecewise_poly") {
         return std::make_unique<ThrottleSegmentedPolyModel>(config);
     }
+    if (type == "entry_burn" || type == "reentry_burn") {
+        return std::make_unique<EntryBurnThrottleModel>(config);
+    }
     return std::make_unique<ThrottlePolyModel>(config);
 }
 
@@ -813,6 +1139,12 @@ std::unique_ptr<ISteeringModel> make_steering_model(const SteeringModelConfig& c
     const std::string type = lowercase(config.type);
     if (type == "fixed_eci") {
         return std::make_unique<FixedEciSteeringModel>(config.fixed_direction_eci);
+    }
+    if (type == "retrograde") {
+        return std::make_unique<VelocityAlignedSteeringModel>(/*retrograde=*/true);
+    }
+    if (type == "prograde") {
+        return std::make_unique<VelocityAlignedSteeringModel>(/*retrograde=*/false);
     }
     if (type == "rpy_poly" || type == "roll_pitch_yaw_poly") {
         return std::make_unique<RollPitchYawPolySteeringModel>(config);

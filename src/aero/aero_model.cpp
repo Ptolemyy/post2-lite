@@ -161,9 +161,61 @@ AeroCoefficients aero_coefficients(const AeroGeometry& geometry,
     return out;
 }
 
+double grid_fin_drag_coefficient(double mach) {
+    // Lattice fins: subsonic ~0.4, sharp transonic choking peak ~1.8 near M~1.1,
+    // then unchokes and decays supersonically toward ~0.6.
+    if (mach < 0.8) {
+        return 0.4;
+    }
+    if (mach <= 1.1) {
+        return 0.4 + (1.8 - 0.4) * (mach - 0.8) / 0.3;
+    }
+    if (mach <= 1.5) {
+        return 1.8 - (1.8 - 1.2) * (mach - 1.1) / 0.4;
+    }
+    return std::max(0.6, 1.2 * 1.5 / mach);
+}
+
+double grid_fin_normal_force_slope(double mach) {
+    // Control authority per radian: ~2.5 subsonic, drops through the transonic
+    // choking to ~1.2, then partially recovers supersonically toward ~2.0.
+    if (mach < 0.8) {
+        return 2.5;
+    }
+    if (mach <= 1.2) {
+        return 2.5 - (2.5 - 1.2) * (mach - 0.8) / 0.4;
+    }
+    return 1.2 + (2.0 - 1.2) * clampd((mach - 1.2) / 2.0, 0.0, 1.0);
+}
+
+AeroCoefficients grid_fin_coefficients(const GridFinSpec& fins,
+                                       double mach,
+                                       double alpha_rad,
+                                       double ref_area_m2) {
+    AeroCoefficients out;
+    const double area = fins.total_area_m2();
+    if (area <= 0.0 || ref_area_m2 <= 0.0) {
+        return out;
+    }
+    const double area_ratio = area / ref_area_m2;
+    const double a = std::fabs(alpha_rad);
+    const double sa = std::sin(a);
+    const double ca = std::cos(a);
+    // Axial drag (the lattice frontal area is ~angle-independent in axial flow).
+    const double cd_axial = grid_fin_drag_coefficient(mach) * area_ratio;
+    // Normal force from incidence (control surfaces): CN = a_slope * sin*cos.
+    const double cn = grid_fin_normal_force_slope(mach) * area_ratio * sa * ca;
+    out.ca = cd_axial;
+    out.cn = cn;
+    out.cd = cd_axial + cn * sa;   // wind-axis drag (axial + induced)
+    out.cl = cn * ca;              // wind-axis lift
+    return out;
+}
+
 AeroTable generate_aero_table(const AeroGeometry& geometry,
                               const AeroModelTuning& tuning,
-                              const AeroTableGridSpec& grid) {
+                              const AeroTableGridSpec& grid,
+                              const GridFinSpec& fins) {
     AeroGeometry geom = geometry;
     finalize_geometry(&geom);
 
@@ -185,13 +237,46 @@ AeroTable generate_aero_table(const AeroGeometry& geometry,
     const double deg2rad = kPi / 180.0;
     for (std::size_t i = 0; i < table.mach.size(); ++i) {
         for (std::size_t j = 0; j < na; ++j) {
-            const AeroCoefficients c =
-                aero_coefficients(geom, tuning, table.mach[i], table.alpha_deg[j] * deg2rad);
+            const double alpha_rad = table.alpha_deg[j] * deg2rad;
+            AeroCoefficients c = aero_coefficients(geom, tuning, table.mach[i], alpha_rad);
+            // Deployed grid fins (booster-only recovery config) add their drag and
+            // normal force on top of the body coefficients, so the table itself is
+            // grid-fin-inclusive.
+            if (fins.count > 0 && fins.area_per_fin_m2 > 0.0) {
+                const AeroCoefficients g =
+                    grid_fin_coefficients(fins, table.mach[i], alpha_rad, geom.ref_area_m2);
+                c.cd += g.cd;
+                c.cl += g.cl;
+            }
             table.cd[i * na + j] = c.cd;
             table.cl[i * na + j] = c.cl;
         }
     }
     return table;
+}
+
+double stagnation_heat_flux_wpm2(double density_kgpm3,
+                                 double speed_mps,
+                                 double nose_radius_m) {
+    if (density_kgpm3 <= 0.0 || speed_mps <= 0.0 || nose_radius_m <= 0.0) {
+        return 0.0;
+    }
+    // Sutton & Graves (1971) stagnation-point convective heating correlation for
+    // air. The constant is in SI form so the result comes out in W/m^2.
+    constexpr double kSuttonGraves = 1.7415e-4;
+    return kSuttonGraves * std::sqrt(density_kgpm3 / nose_radius_m) *
+           speed_mps * speed_mps * speed_mps;
+}
+
+double effective_nose_radius_m(double configured_nose_radius_m,
+                               double ref_diameter_m) {
+    if (configured_nose_radius_m > 0.0) {
+        return configured_nose_radius_m;
+    }
+    if (ref_diameter_m > 0.0) {
+        return std::max(0.05, 0.1 * ref_diameter_m);
+    }
+    return 0.5;
 }
 
 } // namespace post2::aero

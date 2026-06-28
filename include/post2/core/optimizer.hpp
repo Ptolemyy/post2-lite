@@ -1,11 +1,13 @@
 #pragma once
 
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
 
 #include "post2/core/finite_difference.hpp"
 #include "post2/core/nlp_evaluator.hpp"
+#include "post2/core/types.hpp"
 
 namespace post2::core {
 
@@ -20,6 +22,9 @@ struct OptimizerOptions {
     std::string qp_solver = "kkt-fallback";
     FiniteDifferenceOptions finite_difference;
     std::vector<double> initial_z;
+    // Optional live-progress sink, forwarded from OptimizationRunOptions::progress.
+    // Invoked once per optimizer outer iteration on the solving thread.
+    std::function<void(const OptimizerProgress&)> progress;
 };
 
 struct OptimizerResult {

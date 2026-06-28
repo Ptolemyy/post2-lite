@@ -48,6 +48,18 @@ struct AeroTableGridSpec {
     std::vector<double> alpha_deg;
 };
 
+// Deployed grid fins on a returning booster (lattice control surfaces). count is
+// the number of fins; area_per_fin_m2 is the planform reference area of one fin.
+// A zero count disables the grid-fin contribution.
+struct GridFinSpec {
+    int count = 0;
+    double area_per_fin_m2 = 0.0;
+
+    double total_area_m2() const {
+        return count > 0 ? count * area_per_fin_m2 : 0.0;
+    }
+};
+
 // Wind-axis coefficients at one operating point (alpha in radians, >= 0).
 struct AeroCoefficients {
     double cd = 0.0;  // along -v_rel
@@ -61,10 +73,45 @@ AeroCoefficients aero_coefficients(const AeroGeometry& geometry,
                                    double mach,
                                    double alpha_rad);
 
+// Grid-fin axial drag coefficient (referenced to one fin's planform area) vs
+// Mach. Lattice fins choke transonically (a sharp drag rise/peak near M~1.1),
+// then unchoke supersonically. Semi-empirical.
+double grid_fin_drag_coefficient(double mach);
+
+// Grid-fin normal-force slope per radian vs Mach (control authority; drops
+// transonically with the choking, partially recovers supersonically).
+double grid_fin_normal_force_slope(double mach);
+
+// Wind-axis grid-fin coefficients (cd along -v_rel, cl perpendicular), referenced
+// to ref_area_m2, for the whole fin set. The axial drag is ~angle-independent
+// (the lattice presents its frontal area in axial flow); the normal force is the
+// classic sin*cos law. Returns zeros when the spec is empty.
+AeroCoefficients grid_fin_coefficients(const GridFinSpec& fins,
+                                       double mach,
+                                       double alpha_rad,
+                                       double ref_area_m2);
+
+// Sutton-Graves stagnation-point convective heat flux [W/m^2]:
+//   q = K * sqrt(rho / R_n) * V^3,  K = 1.7415e-4 (SI, yields W/m^2).
+// density in kg/m^3, speed in m/s, nose_radius in m. Returns 0 for any
+// non-positive input (a sharp/zero-radius nose has no defined stagnation point).
+double stagnation_heat_flux_wpm2(double density_kgpm3,
+                                 double speed_mps,
+                                 double nose_radius_m);
+
+// Effective stagnation nose radius [m] used by the heat-flux model. Returns the
+// configured radius when positive; otherwise estimates a slender-launcher tip as
+// 10% of the reference diameter, falling back to 0.5 m when the diameter is unset.
+double effective_nose_radius_m(double configured_nose_radius_m,
+                               double ref_diameter_m);
+
 // Generates a (Mach x alpha) table of wind-axis CD/CL referenced to
-// geometry.ref_area_m2.
+// geometry.ref_area_m2. When fins.count > 0 the deployed grid-fin contribution
+// is added to every cell, so the generated table already includes the fins (used
+// for the booster-only recovery configuration).
 AeroTable generate_aero_table(const AeroGeometry& geometry,
                               const AeroModelTuning& tuning = {},
-                              const AeroTableGridSpec& grid = {});
+                              const AeroTableGridSpec& grid = {},
+                              const GridFinSpec& fins = {});
 
 } // namespace post2::aero

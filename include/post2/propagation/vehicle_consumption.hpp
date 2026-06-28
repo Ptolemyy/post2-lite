@@ -26,6 +26,11 @@ struct EngineCommand {
     // no controller filter, which is used by the main-stack controller and
     // preserves legacy all-attached-stage behavior.
     int controlled_stage_index = -1;
+    // Number of engines to light on the firing stage's cluster. Negative means
+    // "all" (legacy full-cluster). A throttle model that picks a discrete engine
+    // count (e.g. the re-entry burn choosing from ignition_count_options) sets
+    // this so thrust/mdot scale by the lit subset.
+    int ignited_engine_count = -1;
 };
 
 class EngineActionSchedule {

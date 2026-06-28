@@ -2,12 +2,15 @@
 
 #include "post2/core/frames.hpp"
 #include "post2/core/optimization.hpp"
+#include "post2/vehicle/runtime_state.hpp"
 #include "post2/vehicle/vehicle.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <future>
 #include <limits>
+#include <string>
 #include <string_view>
 #include <utility>
 
@@ -67,13 +70,124 @@ bool consume_indexed(std::string_view* text, std::string_view id, int* index)
     return true;
 }
 
+bool consume_bracket_token(std::string_view* text, std::string_view id, std::string_view* token)
+{
+    std::string_view working = *text;
+    if (!consume_identifier(&working, id) || working.empty() || working.front() != '[') {
+        return false;
+    }
+    working.remove_prefix(1);
+    const std::size_t close = working.find(']');
+    if (close == std::string_view::npos || close == 0) {
+        return false;
+    }
+    *token = working.substr(0, close);
+    working.remove_prefix(close + 1);
+    *text = working;
+    return true;
+}
+
+std::string lowercase_ascii(std::string text)
+{
+    std::transform(text.begin(), text.end(), text.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
+    return text;
+}
+
+std::string canonical_controller_token(std::string_view token)
+{
+    std::string out(token);
+    out = lowercase_ascii(out);
+    for (char& ch : out) {
+        if (ch == ' ' || ch == '-') {
+            ch = '_';
+        }
+    }
+    return out;
+}
+
+bool parse_nonnegative_int_token(std::string_view token, int* value)
+{
+    if (token.empty()) {
+        return false;
+    }
+    int parsed = 0;
+    for (char ch : token) {
+        if (ch < '0' || ch > '9') {
+            return false;
+        }
+        parsed = parsed * 10 + static_cast<int>(ch - '0');
+    }
+    if (value) {
+        *value = parsed;
+    }
+    return true;
+}
+
+int phase_controller_stage_index_for_metric(
+    const CaseConfig& config,
+    const PhaseConfig& phase)
+{
+    const std::vector<post2::vehicle::StageConfig> stages =
+        post2::vehicle::effective_stage_configs(config.vehicle);
+    if (stages.empty()) {
+        return -1;
+    }
+    if (phase.controller_stage_index >= 0 &&
+        static_cast<std::size_t>(phase.controller_stage_index) < stages.size()) {
+        return phase.controller_stage_index;
+    }
+    if (!phase.controller_stage_name.empty()) {
+        for (std::size_t i = 0; i < stages.size(); ++i) {
+            if (stages[i].name == phase.controller_stage_name) {
+                return static_cast<int>(i);
+            }
+        }
+    }
+    return static_cast<int>(stages.size() - 1);
+}
+
+bool controller_query_matches_phase(
+    const CaseConfig& config,
+    const MetricQuery& query,
+    int phase_index)
+{
+    if (!query.controller_scope) {
+        return true;
+    }
+    if (phase_index < 0 || static_cast<std::size_t>(phase_index) >= config.phases.size()) {
+        return false;
+    }
+    const PhaseConfig& phase = config.phases[static_cast<std::size_t>(phase_index)];
+    if (phase.controller_detached_stage != query.controller_detached_stage) {
+        return false;
+    }
+    if (!query.controller_detached_stage) {
+        return true;
+    }
+    const int phase_stage_index = phase_controller_stage_index_for_metric(config, phase);
+    if (query.controller_stage_index >= 0) {
+        return phase_stage_index == query.controller_stage_index;
+    }
+    const std::vector<post2::vehicle::StageConfig> stages =
+        post2::vehicle::effective_stage_configs(config.vehicle);
+    if (phase_stage_index >= 0 && static_cast<std::size_t>(phase_stage_index) < stages.size()) {
+        return canonical_controller_token(stages[static_cast<std::size_t>(phase_stage_index)].name) ==
+            query.controller_name;
+    }
+    return canonical_controller_token(phase.controller_stage_name) == query.controller_name;
+}
+
 std::vector<const LaunchVehicleStateLogEntry*> entries_for_metric(
     const StateLog& state_log,
+    const CaseConfig& config,
     const MetricQuery& query)
 {
     std::vector<const LaunchVehicleStateLogEntry*> entries;
     for (const auto& entry : state_log.entries()) {
-        if (query.phase_index < 0 || entry.phase_index == query.phase_index) {
+        if ((query.phase_index < 0 || entry.phase_index == query.phase_index) &&
+            controller_query_matches_phase(config, query, entry.phase_index)) {
             entries.push_back(&entry);
         }
     }
@@ -82,16 +196,18 @@ std::vector<const LaunchVehicleStateLogEntry*> entries_for_metric(
 
 const LaunchVehicleStateLogEntry* terminal_entry_for_metric(
     const StateLog& state_log,
+    const CaseConfig& config,
     const MetricQuery& query)
 {
     if (state_log.empty()) {
         return nullptr;
     }
-    if (query.phase_index < 0) {
+    if (query.phase_index < 0 && !query.controller_scope) {
         return &state_log.back();
     }
     for (auto it = state_log.entries().rbegin(); it != state_log.entries().rend(); ++it) {
-        if (it->phase_index == query.phase_index) {
+        if ((query.phase_index < 0 || it->phase_index == query.phase_index) &&
+            controller_query_matches_phase(config, query, it->phase_index)) {
             return &(*it);
         }
     }
@@ -446,12 +562,37 @@ bool parse_metric_query(const std::string& metric, MetricQuery* query)
     query->metric = metric;
     query->base_metric = query->metric;
     query->phase_index = -1;
+    query->controller_name.clear();
+    query->controller_stage_index = -1;
+    query->controller_scope = false;
+    query->controller_detached_stage = false;
     std::string_view text(query->metric);
     int phase_index = -1;
     if (consume_indexed(&text, "phases", &phase_index) && !text.empty() && text.front() == '.') {
         text.remove_prefix(1);
         query->phase_index = phase_index;
         query->base_metric = text;
+        return true;
+    }
+    text = query->metric;
+    std::string_view controller_token;
+    if ((consume_bracket_token(&text, "controllers", &controller_token) ||
+            consume_bracket_token(&text, "controller", &controller_token)) &&
+        !text.empty() && text.front() == '.') {
+        text.remove_prefix(1);
+        query->controller_scope = true;
+        query->controller_name = canonical_controller_token(controller_token);
+        query->base_metric = text;
+        if (query->controller_name == "main" ||
+            query->controller_name == "main_stack" ||
+            query->controller_name == "root" ||
+            query->controller_name == "root_stack" ||
+            query->controller_name == "stack") {
+            query->controller_detached_stage = false;
+        } else {
+            query->controller_detached_stage = true;
+            parse_nonnegative_int_token(controller_token, &query->controller_stage_index);
+        }
     }
     return true;
 }
@@ -477,9 +618,9 @@ bool evaluate_trajectory_metric(
     }
 
     const std::vector<const LaunchVehicleStateLogEntry*> entries =
-        entries_for_metric(state_log, query);
+        entries_for_metric(state_log, config, query);
     const LaunchVehicleStateLogEntry* terminal =
-        terminal_entry_for_metric(state_log, query);
+        terminal_entry_for_metric(state_log, config, query);
     if (!terminal) {
         return false;
     }

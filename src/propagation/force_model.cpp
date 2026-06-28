@@ -1,7 +1,9 @@
 #include "post2/propagation/force_model.hpp"
 
+#include "post2/aero/aero_model.hpp"
 #include "post2/aero/aero_table.hpp"
 #include "post2/propagation/force_models.hpp"
+#include "post2/vehicle/runtime_state.hpp"
 
 #include <cmath>
 #include <string>
@@ -89,101 +91,25 @@ const post2::aero::AeroTable* load_cached_aero_table(const std::string& path)
     return stored.ok ? &stored.table : nullptr;
 }
 
-// Lowest/highest still-attached stage indices (the currently-attached
-// configuration). Returns false when no stage is attached.
-bool attached_stage_range(const post2::vehicle::VehicleRuntimeState& runtime,
-                          int* lo, int* hi)
-{
-    int first = -1;
-    int last = -1;
-    for (std::size_t i = 0; i < runtime.stages.size(); ++i) {
-        if (runtime.stages[i].attached) {
-            if (first < 0) {
-                first = static_cast<int>(i);
-            }
-            last = static_cast<int>(i);
-        }
-    }
-    if (first < 0) {
-        return false;
-    }
-    *lo = first;
-    *hi = last;
-    return true;
-}
-
 struct ActiveAeroTable {
     std::string path;
     double reference_area_m2 = 0.0;
 };
 
 // Picks the aero table matching the vehicle's currently-attached components.
-// The attached stages form a contiguous range [lo, hi]:
-//   * If the topmost stage is still attached (the normal ascending vehicle),
-//     use the open-top upper-stack table for the lowest attached stage (the
-//     full stack when lo == 0).
-//   * Otherwise the vehicle is a separated stage / sub-stack flying alone -- use
-//     the bounded table whose [lo, hi] matches exactly (e.g. a recovered
-//     booster).
-// Falls back to the single legacy table, then the nearest lower activation
-// level, so older configs and partial table sets still resolve to something.
+// The configuration selection itself lives in select_active_aero_stage_table
+// (shared with the heat-flux diagnostic); this just unwraps the chosen entry's
+// table path / reference area, falling back to the single legacy table.
 ActiveAeroTable select_active_aero_table(const post2::vehicle::AeroConfig& aero,
                                          const post2::vehicle::VehicleRuntimeState& runtime)
 {
     ActiveAeroTable result;
-    if (aero.stage_tables.empty()) {
+    const post2::vehicle::AeroStageTable* best =
+        post2::vehicle::select_active_aero_stage_table(aero, runtime);
+    if (best == nullptr) {
         result.path = aero.aero_table_path;
         result.reference_area_m2 = aero.reference_area_m2;
         return result;
-    }
-
-    const int stage_count = static_cast<int>(runtime.stages.size());
-    int lo = 0;
-    int hi = stage_count > 0 ? stage_count - 1 : 0;
-    const bool any_attached = attached_stage_range(runtime, &lo, &hi);
-    if (!any_attached) {
-        lo = 0;
-        hi = stage_count > 0 ? stage_count - 1 : 0;
-    }
-    const bool top_attached = stage_count == 0 || hi == stage_count - 1;
-
-    const post2::vehicle::AeroStageTable* best = nullptr;
-
-    // 1) Exact bounded match: a separated stage / sub-stack flying on its own.
-    for (const auto& entry : aero.stage_tables) {
-        if (entry.max_attached_stage >= 0 &&
-            entry.activate_at_min_attached_stage == lo &&
-            entry.max_attached_stage == hi) {
-            best = &entry;
-            break;
-        }
-    }
-
-    // 2) Open-top upper-stack table for the ascending vehicle: the largest
-    //    activation level not exceeding the lowest attached stage.
-    if (best == nullptr && top_attached) {
-        for (const auto& entry : aero.stage_tables) {
-            if (entry.max_attached_stage < 0 &&
-                entry.activate_at_min_attached_stage <= lo &&
-                (best == nullptr ||
-                 entry.activate_at_min_attached_stage > best->activate_at_min_attached_stage)) {
-                best = &entry;
-            }
-        }
-    }
-
-    // 3) Generic fallback: nearest table at or below the lowest attached stage.
-    if (best == nullptr) {
-        for (const auto& entry : aero.stage_tables) {
-            if (entry.activate_at_min_attached_stage <= lo &&
-                (best == nullptr ||
-                 entry.activate_at_min_attached_stage > best->activate_at_min_attached_stage)) {
-                best = &entry;
-            }
-        }
-    }
-    if (best == nullptr) {
-        best = &aero.stage_tables.front();  // current config below all entries -> first
     }
     result.path = best->table_path;
     result.reference_area_m2 =
@@ -218,9 +144,24 @@ AeroFlow compute_aero_flow(const ForceModelContext& context,
     const double a = context.environment->speed_of_sound_mps;
     flow.mach = a > 0.0 ? flow.speed_mps / a : 0.0;
 
+    // Body axis: the live thrust direction while firing, else the last commanded
+    // attitude (runtime.engine.direction_body holds the steering's ECI command
+    // even at zero throttle). Using the commanded attitude while coasting is
+    // essential for a retrograde-steered booster descent -- otherwise alpha
+    // defaults to 0 (nose-first) and the bluff-body base-first drag is missed.
     const double thrust_mag = post2::vehicle::norm(context.thrust_acceleration_eci_mps2);
+    post2::core::Vec3 body_axis{0.0, 0.0, 0.0};
     if (thrust_mag > 1.0e-9) {
-        flow.body_axis = scale_vec(context.thrust_acceleration_eci_mps2, 1.0 / thrust_mag);
+        body_axis = scale_vec(context.thrust_acceleration_eci_mps2, 1.0 / thrust_mag);
+    } else if (context.runtime) {
+        const post2::core::Vec3 commanded = context.runtime->engine.direction_body;
+        const double cmag = post2::vehicle::norm(commanded);
+        if (cmag > 1.0e-9) {
+            body_axis = scale_vec(commanded, 1.0 / cmag);
+        }
+    }
+    if (post2::vehicle::norm(body_axis) > 1.0e-9) {
+        flow.body_axis = body_axis;
         flow.has_body_axis = true;
         const post2::core::Vec3 v_hat = scale_vec(flow.v_rel_mps, 1.0 / flow.speed_mps);
         const double c = std::max(-1.0, std::min(1.0, dot_vec(flow.body_axis, v_hat)));
@@ -293,12 +234,27 @@ ForceModelOutput AtmosphericDragModel::evaluate(
                                                               : active.reference_area_m2;
         }
     }
-    if (cd <= 0.0) {
+
+    double cd_area_m2 = cd * reference_area_m2;
+    // Base-first descent (booster reentry, alpha > 90 deg): the slender-body
+    // tables only model nose-first flight and badly under-predict the bluff-body
+    // drag, so substitute the configured descent Cd (referenced to the active
+    // cross-section) plus the deployed grid fins' Mach-dependent drag (post2::aero
+    // grid-fin model). This is what brings a returning booster subsonic before the
+    // landing burn.
+    if (aero.descent_cd > 0.0 && flow.alpha_deg > 90.0) {
+        cd_area_m2 = aero.descent_cd * reference_area_m2;
+        const double fin_area = aero.grid_fins.total_area_m2();
+        if (fin_area > 0.0) {
+            cd_area_m2 += post2::aero::grid_fin_drag_coefficient(flow.mach) * fin_area;
+        }
+    }
+    if (cd_area_m2 <= 0.0) {
         return zero_output();
     }
 
     const double factor =
-        -0.5 * context.environment->density_kgpm3 * cd * reference_area_m2 /
+        -0.5 * context.environment->density_kgpm3 * cd_area_m2 /
         context.runtime->vehicle.total_mass_kg * flow.speed_mps;
     return {flow.v_rel_mps * factor};
 }

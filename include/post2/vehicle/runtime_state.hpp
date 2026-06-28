@@ -31,6 +31,17 @@ double active_max_thrust_n(const VehicleConfig& config, const VehicleRuntimeStat
 bool set_stage_active(VehicleRuntimeState* runtime, std::size_t stage_index, bool active);
 bool set_stage_attached(VehicleRuntimeState* runtime, std::size_t stage_index, bool attached);
 
+// Selects the per-staging-configuration AeroStageTable matching the vehicle's
+// currently-attached stages (the contiguous attached range [lo, hi]):
+//   * exact bounded match for a separated stage / sub-stack flying alone;
+//   * else the open-top upper-stack table for the ascending vehicle;
+//   * else the nearest table at or below the lowest attached stage.
+// Returns nullptr only when aero.stage_tables is empty. Used by both the force
+// model (CD/CL table) and the heat-flux diagnostic so they stay consistent.
+const AeroStageTable* select_active_aero_stage_table(
+    const AeroConfig& aero,
+    const VehicleRuntimeState& runtime);
+
 // Tank addressing across stages. (stage_index, tank_index) is the canonical
 // ordering - flat_tank_index walks runtime.stages[*].tanks[*] in declaration
 // order. Detached stages keep their slots so the ODE state vector size is

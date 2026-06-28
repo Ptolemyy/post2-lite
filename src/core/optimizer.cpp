@@ -22,6 +22,7 @@ constexpr double kPi = 3.141592653589793238462643383279502884;
 struct ResolvedPath {
     double* value = nullptr;
     bool* flag = nullptr;
+    int* integer = nullptr;
     int phase_index = -1;
 };
 
@@ -98,6 +99,15 @@ bool finish_flag(std::string_view text, bool* source, ResolvedPath* target)
         return false;
     }
     target->flag = source;
+    return true;
+}
+
+bool finish_integer(std::string_view text, int* source, ResolvedPath* target)
+{
+    if (!text.empty()) {
+        return false;
+    }
+    target->integer = source;
     return true;
 }
 
@@ -238,6 +248,29 @@ bool resolve_segmented_steering_poly(
     return false;
 }
 
+bool resolve_entry_burn(EntryBurnConfig* entry_burn, std::string_view text, ResolvedPath* target)
+{
+    if (text == "q_limit_pa") {
+        return finish_value({}, &entry_burn->q_limit_pa, target);
+    }
+    if (text == "heat_flux_limit_wpm2") {
+        return finish_value({}, &entry_burn->heat_flux_limit_wpm2, target);
+    }
+    if (text == "trigger_fraction") {
+        return finish_value({}, &entry_burn->trigger_fraction, target);
+    }
+    if (text == "drag_cd") {
+        return finish_value({}, &entry_burn->drag_cd, target);
+    }
+    if (text == "safety_margin") {
+        return finish_value({}, &entry_burn->safety_margin, target);
+    }
+    if (text == "max_entry_engines") {
+        return finish_integer({}, &entry_burn->max_entry_engines, target);
+    }
+    return false;
+}
+
 bool resolve_throttle(ThrottleModelConfig* throttle, std::string_view text, ResolvedPath* target)
 {
     if (text == "c0") {
@@ -259,6 +292,11 @@ bool resolve_throttle(ThrottleModelConfig* throttle, std::string_view text, Reso
     std::string_view working = text;
     if (consume_identifier(&working, "segmented_poly") && consume_dot(&working)) {
         return resolve_segmented_poly(&throttle->segmented_poly, working, target);
+    }
+
+    working = text;
+    if (consume_identifier(&working, "entry_burn") && consume_dot(&working)) {
+        return resolve_entry_burn(&throttle->entry_burn, working, target);
     }
 
     std::size_t index = 0;
@@ -337,6 +375,32 @@ bool resolve_steering(SteeringModelConfig* steering, std::string_view text, Reso
         }
         if (upfg_view == "inclination_deg") {
             return finish_value({}, &steering->upfg.inclination_deg, target);
+        }
+        return false;
+    }
+
+    std::string_view gfold_view = text;
+    if (consume_identifier(&gfold_view, "gfold") && consume_dot(&gfold_view)) {
+        if (gfold_view == "min_throttle") {
+            return finish_value({}, &steering->gfold.min_throttle, target);
+        }
+        if (gfold_view == "max_throttle") {
+            return finish_value({}, &steering->gfold.max_throttle, target);
+        }
+        if (gfold_view == "max_tilt_deg") {
+            return finish_value({}, &steering->gfold.max_tilt_deg, target);
+        }
+        if (gfold_view == "glide_slope_deg") {
+            return finish_value({}, &steering->gfold.glide_slope_deg, target);
+        }
+        if (gfold_view == "tf_min_s") {
+            return finish_value({}, &steering->gfold.tf_min_s, target);
+        }
+        if (gfold_view == "tf_max_s") {
+            return finish_value({}, &steering->gfold.tf_max_s, target);
+        }
+        if (gfold_view == "free_landing") {
+            return finish_flag({}, &steering->gfold.free_landing, target);
         }
         return false;
     }
@@ -1117,6 +1181,37 @@ LocalOptimResult run_local_augmented_lagrangian(
     consider_feasible(init_pe, z);
     consider_least_infeasible(init_pe, z);
 
+    // Live-progress streaming: report counters + the log lines accumulated since
+    // the previous callback, once per outer iteration (see OptimizerProgress).
+    std::size_t emitted_messages = messages ? messages->size() : 0;
+    const auto emit_progress = [&]() {
+        if (!options.progress) {
+            return;
+        }
+        OptimizerProgress p;
+        p.iterations = out.iterations;
+        p.evaluations = evaluator.evaluations();
+        p.found_feasible = out.found_feasible;
+        p.best_objective = out.found_feasible ? best_feasible_pe.objective_f
+                                              : best_pe.objective_f;
+        p.max_constraint_violation = best_pe.max_violation;
+        // Always synthesize a one-line iteration summary so the log streams even
+        // when the inner solver is quiet, then append any raw lines it did emit.
+        std::ostringstream line;
+        line << "iter " << p.iterations << " | eval " << p.evaluations
+             << " | obj " << p.best_objective
+             << " | infeas " << p.max_constraint_violation
+             << (p.found_feasible ? " | feasible" : " | searching");
+        p.new_messages.push_back(line.str());
+        if (messages) {
+            for (std::size_t i = emitted_messages; i < messages->size(); ++i) {
+                p.new_messages.push_back((*messages)[i]);
+            }
+            emitted_messages = messages->size();
+        }
+        options.progress(p);
+    };
+
     for (int outer = 0; outer < max_outer && bfgs_budget > 0; ++outer) {
         const int per_outer_iters =
             std::max(3, std::min(bfgs_budget, initial_budget / 4 + 5));
@@ -1136,6 +1231,7 @@ LocalOptimResult run_local_augmented_lagrangian(
         best_pe = inner.pe;
         consider_feasible(inner.pe, z);
         consider_least_infeasible(inner.pe, z);
+        emit_progress();
 
         // KKT-style convergence: feasibility and inner-loop stationarity.
         if (inner.converged_grad && best_pe.max_violation < tol) {
@@ -2359,6 +2455,7 @@ OptimizerOptions optimizer_options_from_config(
         : 0.01;
     options.finite_difference.parallel =
         optimization.parallel_fd && service.supports_parallel_simulation();
+    options.progress = run_options.progress;
     return options;
 }
 
@@ -3224,7 +3321,11 @@ bool read_optimization_variable(
         return false;
     }
     if (!resolved.value) {
-        return fail(error, "variable path is not numeric: " + path);
+        if (!resolved.integer) {
+            return fail(error, "variable path is not numeric: " + path);
+        }
+        *value = static_cast<double>(*resolved.integer);
+        return true;
     }
     *value = *resolved.value;
     return true;
@@ -3241,7 +3342,11 @@ bool write_optimization_variable(
         return false;
     }
     if (!resolved.value) {
-        return fail(error, "variable path is not numeric: " + path);
+        if (!resolved.integer) {
+            return fail(error, "variable path is not numeric: " + path);
+        }
+        *resolved.integer = static_cast<int>(std::lround(value));
+        return true;
     }
     *resolved.value = value;
     return true;

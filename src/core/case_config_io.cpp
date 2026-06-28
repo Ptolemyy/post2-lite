@@ -162,6 +162,14 @@ JsonValue engine_to_json(const post2::vehicle::EngineConfig& engine)
         {"thrust_buildup_s", number(engine.thrust_buildup_s)},
         {"shutdown_delay_s", number(engine.shutdown_delay_s)},
         {"engine_count", number(static_cast<double>(engine.engine_count))},
+        {"ignition_count_options", [&] {
+            JsonValue::Array options;
+            options.reserve(engine.ignition_count_options.size());
+            for (int n : engine.ignition_count_options) {
+                options.push_back(number(static_cast<double>(n)));
+            }
+            return JsonValue::array(std::move(options));
+        }()},
         {"gimbal_max_rad", number(engine.gimbal_max_rad)},
         {"gimbal_rate_rad_s", number(engine.gimbal_rate_rad_s)},
         {"direction_body", vec3_to_json(engine.direction_body)},
@@ -216,6 +224,7 @@ JsonValue aero_stage_table_to_json(const post2::vehicle::AeroStageTable& entry)
         {"body_length_m", number(entry.body_length_m)},
         {"nose_length_m", number(entry.nose_length_m)},
         {"base_diameter_m", number(entry.base_diameter_m)},
+        {"nose_radius_m", number(entry.nose_radius_m)},
         {"max_attached_stage",
          number(static_cast<double>(entry.max_attached_stage))},
     });
@@ -239,6 +248,12 @@ JsonValue aero_to_json(const post2::vehicle::AeroConfig& aero)
         {"body_length_m", number(aero.body_length_m)},
         {"nose_length_m", number(aero.nose_length_m)},
         {"base_diameter_m", number(aero.base_diameter_m)},
+        {"nose_radius_m", number(aero.nose_radius_m)},
+        {"descent_cd", number(aero.descent_cd)},
+        {"grid_fins", JsonValue::object({
+            {"count", number(aero.grid_fins.count)},
+            {"area_per_fin_m2", number(aero.grid_fins.area_per_fin_m2)},
+        })},
         {"stage_tables", JsonValue::array(std::move(stage_tables))},
         {"first_stage_table", aero_stage_table_to_json(aero.first_stage_table)},
     });
@@ -327,6 +342,18 @@ JsonValue vehicle_to_json(const post2::vehicle::VehicleConfig& vehicle)
     });
 }
 
+JsonValue entry_burn_to_json(const EntryBurnConfig& eb)
+{
+    return JsonValue::object({
+        {"q_limit_pa", number(eb.q_limit_pa)},
+        {"heat_flux_limit_wpm2", number(eb.heat_flux_limit_wpm2)},
+        {"trigger_fraction", number(eb.trigger_fraction)},
+        {"drag_cd", number(eb.drag_cd)},
+        {"safety_margin", number(eb.safety_margin)},
+        {"max_entry_engines", number(static_cast<double>(eb.max_entry_engines))},
+    });
+}
+
 JsonValue throttle_to_json(const ThrottleModelConfig& throttle)
 {
     JsonValue::Array points;
@@ -346,6 +373,7 @@ JsonValue throttle_to_json(const ThrottleModelConfig& throttle)
         {"continuity", boolean(throttle.continuity)},
         {"points", JsonValue::array(std::move(points))},
         {"segmented_poly", segmented_poly_to_json(throttle.segmented_poly)},
+        {"entry_burn", entry_burn_to_json(throttle.entry_burn)},
     });
 }
 
@@ -367,6 +395,21 @@ JsonValue upfg_to_json(const UpfgConfig& upfg)
         {"periapsis_km", number(upfg.periapsis_km)},
         {"apoapsis_km", number(upfg.apoapsis_km)},
         {"inclination_deg", number(upfg.inclination_deg)},
+    });
+}
+
+JsonValue gfold_to_json(const GfoldConfig& gfold)
+{
+    return JsonValue::object({
+        {"engine_count", number(gfold.engine_count)},
+        {"min_throttle", number(gfold.min_throttle)},
+        {"max_throttle", number(gfold.max_throttle)},
+        {"max_tilt_deg", number(gfold.max_tilt_deg)},
+        {"glide_slope_deg", number(gfold.glide_slope_deg)},
+        {"num_nodes", number(gfold.num_nodes)},
+        {"tf_min_s", number(gfold.tf_min_s)},
+        {"tf_max_s", number(gfold.tf_max_s)},
+        {"free_landing", JsonValue::boolean(gfold.free_landing)},
     });
 }
 
@@ -397,6 +440,7 @@ JsonValue steering_to_json(const SteeringModelConfig& steering)
         {"elevation", poly_to_json(steering.elevation_deg)},
         {"tangent", tangent_to_json(steering.tangent)},
         {"upfg", upfg_to_json(steering.upfg)},
+        {"gfold", gfold_to_json(steering.gfold)},
         {"fixed_direction_eci", vec3_to_json(steering.fixed_direction_eci)},
         {"points", JsonValue::array(std::move(points))},
         {"segments", JsonValue::array(std::move(segments))},
@@ -887,6 +931,37 @@ bool read_upfg(const JsonValue& object, const char* key, UpfgConfig* target, std
     return !value || parse_upfg(*value, target, error);
 }
 
+bool parse_gfold(const JsonValue& value, GfoldConfig* target, std::string* error)
+{
+    if (!value.is_object()) {
+        return fail(error, "steering_model.gfold must be an object");
+    }
+    GfoldConfig parsed = *target;
+    double engine_count = static_cast<double>(parsed.engine_count);
+    double num_nodes = static_cast<double>(parsed.num_nodes);
+    if (!read_number(value, "engine_count", &engine_count, error) ||
+        !read_number(value, "min_throttle", &parsed.min_throttle, error) ||
+        !read_number(value, "max_throttle", &parsed.max_throttle, error) ||
+        !read_number(value, "max_tilt_deg", &parsed.max_tilt_deg, error) ||
+        !read_number(value, "glide_slope_deg", &parsed.glide_slope_deg, error) ||
+        !read_number(value, "num_nodes", &num_nodes, error) ||
+        !read_number(value, "tf_min_s", &parsed.tf_min_s, error) ||
+        !read_number(value, "tf_max_s", &parsed.tf_max_s, error) ||
+        !read_bool(value, "free_landing", &parsed.free_landing, error)) {
+        return false;
+    }
+    parsed.engine_count = static_cast<int>(engine_count);
+    parsed.num_nodes = static_cast<int>(num_nodes);
+    *target = parsed;
+    return true;
+}
+
+bool read_gfold(const JsonValue& object, const char* key, GfoldConfig* target, std::string* error)
+{
+    const JsonValue* value = find_member(object, key);
+    return !value || parse_gfold(*value, target, error);
+}
+
 bool parse_gravity_model(const JsonValue& value, GravityModelConfig* target, std::string* error)
 {
     if (!value.is_object()) {
@@ -970,6 +1045,8 @@ bool parse_aero_stage_table(const JsonValue& item, post2::vehicle::AeroStageTabl
         !read_number(item, "body_length_m", &entry->body_length_m, error) ||
         !read_number(item, "nose_length_m", &entry->nose_length_m, error) ||
         !read_number(item, "base_diameter_m", &entry->base_diameter_m, error) ||
+        // Optional; "auto" (0) when absent for back-compat.
+        !read_number(item, "nose_radius_m", &entry->nose_radius_m, error) ||
         // Optional; defaults to -1 (open-top) when absent for back-compat.
         !read_number(item, "max_attached_stage", &max_attached, error)) {
         return false;
@@ -995,8 +1072,21 @@ bool parse_vehicle_aero(const JsonValue& value, post2::vehicle::AeroConfig* targ
         !read_number(value, "ref_diameter_m", &parsed.ref_diameter_m, error) ||
         !read_number(value, "body_length_m", &parsed.body_length_m, error) ||
         !read_number(value, "nose_length_m", &parsed.nose_length_m, error) ||
-        !read_number(value, "base_diameter_m", &parsed.base_diameter_m, error)) {
+        !read_number(value, "base_diameter_m", &parsed.base_diameter_m, error) ||
+        !read_number(value, "nose_radius_m", &parsed.nose_radius_m, error) ||
+        !read_number(value, "descent_cd", &parsed.descent_cd, error)) {
         return false;
+    }
+    if (const JsonValue* fins = find_member(value, "grid_fins")) {
+        if (!fins->is_object()) {
+            return fail(error, "vehicle.aero.grid_fins must be an object");
+        }
+        double count = static_cast<double>(parsed.grid_fins.count);
+        if (!read_number(*fins, "count", &count, error) ||
+            !read_number(*fins, "area_per_fin_m2", &parsed.grid_fins.area_per_fin_m2, error)) {
+            return false;
+        }
+        parsed.grid_fins.count = static_cast<int>(count);
     }
     if (const JsonValue* tables = find_member(value, "stage_tables")) {
         if (!tables->is_array()) {
@@ -1142,6 +1232,20 @@ bool parse_vehicle(const JsonValue& value, post2::vehicle::VehicleConfig* target
             }
             engine_config->engine_count =
                 std::max(1, static_cast<int>(count->number_value));
+        }
+        if (const JsonValue* options = find_member(engine, "ignition_count_options")) {
+            if (!options->is_array()) {
+                return fail(error, "engine.ignition_count_options must be an array");
+            }
+            engine_config->ignition_count_options.clear();
+            engine_config->ignition_count_options.reserve(options->array_value.size());
+            for (const JsonValue& item : options->array_value) {
+                if (!item.is_number()) {
+                    return fail(error, "engine.ignition_count_options entries must be numbers");
+                }
+                engine_config->ignition_count_options.push_back(
+                    std::max(1, static_cast<int>(item.number_value)));
+            }
         }
         if (const JsonValue* curve = find_member(engine, "throttle_curve")) {
             if (!curve->is_array()) {
@@ -1316,6 +1420,22 @@ bool parse_throttle(const JsonValue& value, ThrottleModelConfig* target, std::st
         return false;
     }
 
+    if (const JsonValue* eb = find_member(value, "entry_burn")) {
+        if (!eb->is_object()) {
+            return fail(error, "throttle_model.entry_burn must be an object");
+        }
+        double max_engines = static_cast<double>(parsed.entry_burn.max_entry_engines);
+        if (!read_number(*eb, "q_limit_pa", &parsed.entry_burn.q_limit_pa, error) ||
+            !read_number(*eb, "heat_flux_limit_wpm2", &parsed.entry_burn.heat_flux_limit_wpm2, error) ||
+            !read_number(*eb, "trigger_fraction", &parsed.entry_burn.trigger_fraction, error) ||
+            !read_number(*eb, "drag_cd", &parsed.entry_burn.drag_cd, error) ||
+            !read_number(*eb, "safety_margin", &parsed.entry_burn.safety_margin, error) ||
+            !read_number(*eb, "max_entry_engines", &max_engines, error)) {
+            return false;
+        }
+        parsed.entry_burn.max_entry_engines = std::max(1, static_cast<int>(max_engines));
+    }
+
     if (const JsonValue* points = find_member(value, "points")) {
         if (!points->is_array()) {
             return fail(error, "throttle_model.points must be an array");
@@ -1352,6 +1472,7 @@ bool parse_steering(const JsonValue& value, SteeringModelConfig* target, std::st
         !read_poly(value, "elevation", &parsed.elevation_deg, error) ||
         !read_tangent(value, "tangent", &parsed.tangent, error) ||
         !read_upfg(value, "upfg", &parsed.upfg, error) ||
+        !read_gfold(value, "gfold", &parsed.gfold, error) ||
         !read_vec3(value, "fixed_direction_eci", &parsed.fixed_direction_eci, error) ||
         !read_segmented_steering_poly(value, "segmented_poly", &parsed.segmented_poly, error)) {
         return false;

@@ -20,6 +20,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <iomanip>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -123,6 +124,9 @@ constexpr int kVehicleAeroTableImport = 1420;
 constexpr int kVehicleAeroTableView = 1421;
 constexpr int kVehicleAeroTableEditStage = 1422;
 constexpr int kVehicleAeroTableDelete = 1423;
+constexpr int kVehicleEngineIgnitionOptions = 1424;
+constexpr int kVehicleGridFinCount = 1425;
+constexpr int kVehicleGridFinArea = 1426;
 constexpr int kLaunchLatitudeEdit = 1701;
 constexpr int kLaunchLongitudeEdit = 1702;
 constexpr int kLaunchAltitudeEdit = 1703;
@@ -160,6 +164,10 @@ constexpr int kOptObjectiveEdit = 2128;
 constexpr int kOptObjectiveDelete = 2129;
 constexpr int kOptEnvelopeSamplesEdit = 2130;
 constexpr UINT kOptimizationFinishedMessage = WM_APP + 1;
+// Timer that polls the background optimizer's live-progress buffer (the worker
+// thread cannot touch UI directly) and refreshes the status line / outputs.
+constexpr UINT_PTR kOptimizationProgressTimerId = 0xF002;
+constexpr UINT kOptimizationProgressIntervalMs = 250;
 
 // Sub-dialog control IDs for the phase-action / trigger-condition / event
 // modal editors. They live in their own range to avoid colliding with the
@@ -202,10 +210,16 @@ constexpr int kViewButtonQ = 2502;
 constexpr int kViewButtonThrottle = 2503;
 constexpr int kViewButtonSpeed = 2504;
 constexpr int kViewButtonMass = 2505;
-constexpr int kViewButtonCount = 6;
+constexpr int kViewButtonHeatFlux = 2506;
+constexpr int kViewButtonCount = 7;
 constexpr int kViewButtonHeight = 30;
 constexpr int kViewButtonGap = 4;
-constexpr int kViewButtonTop = 84;
+// Controller selector row sits above the view buttons; the charts plot all
+// phases of the chosen controller (main stack vs a detached/recovered stage).
+constexpr int kControllerComboTop = 84;
+constexpr int kControllerCombo = 2520;
+constexpr int kSceneOverviewToggle = 2521;
+constexpr int kViewButtonTop = 122;
 
 enum class ViewKind {
     Scene3D = 0,
@@ -214,7 +228,8 @@ enum class ViewKind {
     Throttle = 3,
     Speed = 4,
     Mass = 5,
-    Count = 6,
+    HeatFlux = 6,
+    Count = 7,
 };
 
 HINSTANCE g_instance = nullptr;
@@ -234,24 +249,64 @@ post2::gui::OpenGLSceneRenderer g_scene_renderer;
 HWND g_scene_hwnd = nullptr;
 ViewKind g_active_view = ViewKind::Scene3D;
 std::array<HWND, kViewButtonCount> g_view_buttons = {};
+
+// Controllers present in the current result: the main stack and any detached /
+// recovered stage that flew its own phases. The chart selector picks one; every
+// 2D chart then plots ALL phases of that controller (the 3D scene is unaffected).
+struct ChartController {
+    std::wstring label;
+    bool detached = false;
+    int stage_index = -1;  // controlled stage (-1 = main stack)
+};
+std::vector<ChartController> g_chart_controllers;
+int g_selected_chart_controller = 0;
+HWND g_controller_combo = nullptr;
+HWND g_scene_overview_button = nullptr;
+
 post2::gui::ChartPanel g_chart_profile;
 post2::gui::ChartPanel g_chart_q;
 post2::gui::ChartPanel g_chart_throttle;
 post2::gui::ChartPanel g_chart_speed;
 post2::gui::ChartPanel g_chart_mass;
+post2::gui::ChartPanel g_chart_heatflux;
 
 struct PendingOptimizationResult {
     CaseConfig case_config;
     OptimizationResult result;
 };
 
+// Live-progress buffer shared between the optimizer worker thread (writer, via
+// the OptimizationRunOptions::progress callback) and the UI timer (reader). All
+// access is guarded by g_optimization_mutex.
+struct OptimizationProgressState {
+    bool active = false;   // a run is currently streaming
+    bool dirty = false;    // new data since the last UI refresh
+    int iterations = 0;
+    int evaluations = 0;
+    bool found_feasible = false;
+    double best_objective = 0.0;
+    double max_violation = 0.0;
+    std::vector<std::string> log;  // accumulated progress lines
+};
+
 std::mutex g_optimization_mutex;
 bool g_optimization_running = false;
 std::optional<PendingOptimizationResult> g_pending_optimization;
+OptimizationProgressState g_optimization_progress;
 
 void populate_charts();
 void switch_view(HWND hwnd, ViewKind view);
+void apply_scene_camera_fit(bool reset_view);
+// Defined later (after the controller-stage helpers); used by populate_charts.
+ChartController chart_controller_for_phase(int phase_index);
+std::optional<int> resolve_stage_index(
+    const post2::vehicle::VehicleConfig& vehicle,
+    int stage_index,
+    const std::string& stage_name);
+void rebuild_chart_controllers();
+void refresh_controller_combo();
 bool g_camera_initialized = false;
+bool g_scene_overview = false;
 bool g_case_initialized = false;
 bool g_dragging = false;
 POINT g_last_mouse = {};
@@ -264,6 +319,7 @@ HWND g_phase_add_button = nullptr;
 HWND g_phase_delete_button = nullptr;
 HWND g_phase_name_edit = nullptr;
 HWND g_phase_termination_label = nullptr;
+HWND g_phase_termination_edit_button = nullptr;
 HWND g_phase_inherit_initial = nullptr;
 HWND g_phase_hold_down_initial = nullptr;
 HWND g_phase_optimize_enabled = nullptr;
@@ -359,6 +415,7 @@ void clear_phase_editor_handles()
 {
     g_phase_name_edit = nullptr;
     g_phase_termination_label = nullptr;
+    g_phase_termination_edit_button = nullptr;
     g_phase_inherit_initial = nullptr;
     g_phase_hold_down_initial = nullptr;
     g_phase_optimize_enabled = nullptr;
@@ -411,6 +468,8 @@ struct VehicleSettingsDialogState {
     HWND dry_mass_edit = nullptr;
     HWND aero_enabled = nullptr;
     HWND aero_table_list = nullptr;
+    HWND grid_fin_count = nullptr;
+    HWND grid_fin_area = nullptr;
     HWND gl_preview = nullptr;  // embedded OpenGL vehicle preview child window
     HWND stage_list = nullptr;
     post2::vehicle::VehicleConfig config;
@@ -432,6 +491,7 @@ struct StageEditorDialogState {
     HWND engine_enabled = nullptr;
     HWND engine_thrust_edit = nullptr;
     HWND engine_isp_edit = nullptr;
+    HWND engine_ignition_options_edit = nullptr;
     HWND engine_dir_x_edit = nullptr;
     HWND engine_dir_y_edit = nullptr;
     HWND engine_dir_z_edit = nullptr;
@@ -615,6 +675,17 @@ std::string lowercase(std::string text)
     return text;
 }
 
+std::string controller_metric_token(std::string text)
+{
+    text = lowercase(text);
+    for (char& ch : text) {
+        if (ch == ' ' || ch == '-') {
+            ch = '_';
+        }
+    }
+    return text;
+}
+
 std::wstring get_window_text(HWND hwnd)
 {
     const int length = GetWindowTextLengthW(hwnd);
@@ -712,6 +783,57 @@ std::string optimizing_status_text()
         " | remote: " + remote_endpoint_text();
 }
 
+// UI-thread poll of the optimizer's live-progress buffer. Renders the latest
+// counters into the status line and streams the accumulated log into the
+// outputs panel. No-op when nothing new has arrived since the last tick.
+void refresh_optimization_progress(HWND hwnd)
+{
+    int iterations = 0;
+    int evaluations = 0;
+    bool found_feasible = false;
+    double best_objective = 0.0;
+    double max_violation = 0.0;
+    std::vector<std::string> log_tail;
+    {
+        std::lock_guard<std::mutex> lock(g_optimization_mutex);
+        if (!g_optimization_progress.active || !g_optimization_progress.dirty) {
+            return;
+        }
+        g_optimization_progress.dirty = false;
+        iterations = g_optimization_progress.iterations;
+        evaluations = g_optimization_progress.evaluations;
+        found_feasible = g_optimization_progress.found_feasible;
+        best_objective = g_optimization_progress.best_objective;
+        max_violation = g_optimization_progress.max_violation;
+        // Bound the rendered log so the edit control stays cheap to repaint.
+        const auto& log = g_optimization_progress.log;
+        constexpr std::size_t kMaxLines = 400;
+        const std::size_t start = log.size() > kMaxLines ? log.size() - kMaxLines : 0;
+        log_tail.assign(log.begin() + static_cast<std::ptrdiff_t>(start), log.end());
+    }
+
+    std::ostringstream status;
+    status << "optimizing... | iter " << iterations << " | eval " << evaluations
+           << " | best " << std::setprecision(6) << best_objective
+           << " | infeas " << std::setprecision(3) << max_violation
+           << (found_feasible ? " | feasible" : " | searching")
+           << " | mode: " << post2::core::core_mode_name(g_mode);
+    g_status = status.str();
+
+    std::ostringstream out;
+    out << "Optimizing...\r\n"
+        << "iterations: " << iterations << "   evaluations: " << evaluations << "\r\n"
+        << "best objective: " << std::setprecision(8) << best_objective << "\r\n"
+        << "max constraint violation: " << std::setprecision(4) << max_violation
+        << (found_feasible ? "   (feasible)" : "   (searching for feasible)") << "\r\n"
+        << "----\r\n";
+    for (const auto& line : log_tail) {
+        out << line << "\r\n";
+    }
+    set_outputs_text(out.str());
+    InvalidateRect(hwnd, nullptr, FALSE);
+}
+
 std::string format_metric_lines(const std::vector<post2::core::OptimizationMetricValue>& metrics)
 {
     std::ostringstream output;
@@ -777,18 +899,11 @@ void run_simulation(HWND hwnd)
     g_predicted_paths = (g_result.ok && !g_result.state_log.empty())
         ? post2::core::predict_phase_end_trajectory_paths(g_case, g_result.state_log)
         : std::vector<post2::core::PredictedTrajectoryPath>{};
-    if (g_result.ok && !g_result.state_log.empty()) {
-        const double scene_radius_m =
-            post2::gui::compute_scene_radius_m(g_result.state_log, g_predicted_paths);
-        if (!g_camera_initialized) {
-            g_camera.reset(scene_radius_m);
-            g_camera_initialized = true;
-        } else {
-            g_camera.set_scene_radius(scene_radius_m);
-        }
-    }
     update_status();
     set_outputs_text(format_run_outputs(g_result));
+    rebuild_chart_controllers();
+    refresh_controller_combo();
+    apply_scene_camera_fit(false);
     populate_charts();
     sync_scene_window(hwnd);
     InvalidateRect(hwnd, nullptr, TRUE);
@@ -806,6 +921,8 @@ void execute_optimization(HWND hwnd)
         } else {
             g_optimization_running = true;
             g_pending_optimization.reset();
+            g_optimization_progress = OptimizationProgressState{};
+            g_optimization_progress.active = true;
         }
     }
     if (already_running) {
@@ -821,17 +938,35 @@ void execute_optimization(HWND hwnd)
     g_status = optimizing_status_text();
     set_outputs_text("Optimizing...");
     InvalidateRect(hwnd, nullptr, TRUE);
+    SetTimer(hwnd, kOptimizationProgressTimerId, kOptimizationProgressIntervalMs, nullptr);
+
+    // Streamed live from the optimizer's worker thread. Only touches the
+    // mutex-guarded buffer; the UI timer renders it (never touch HWNDs here).
+    post2::core::OptimizationRunOptions run_options;
+    run_options.progress = [](const post2::core::OptimizerProgress& p) {
+        std::lock_guard<std::mutex> lock(g_optimization_mutex);
+        g_optimization_progress.iterations = p.iterations;
+        g_optimization_progress.evaluations = p.evaluations;
+        g_optimization_progress.found_feasible = p.found_feasible;
+        g_optimization_progress.best_objective = p.best_objective;
+        g_optimization_progress.max_violation = p.max_constraint_violation;
+        for (const auto& line : p.new_messages) {
+            g_optimization_progress.log.push_back(line);
+        }
+        g_optimization_progress.dirty = true;
+    };
 
     std::thread([hwnd,
                  working_case = std::move(working_case),
                  mode,
                  remote_host,
-                 remote_port]() mutable {
+                 remote_port,
+                 run_options = std::move(run_options)]() mutable {
         OptimizationResult result;
         try {
             const auto service =
                 post2::core::make_trajectory_service(mode, remote_host, remote_port);
-            result = post2::core::optimize_case(&working_case, *service);
+            result = post2::core::optimize_case(&working_case, *service, run_options);
         } catch (const std::exception& ex) {
             result.error = ex.what();
         } catch (...) {
@@ -849,12 +984,14 @@ void execute_optimization(HWND hwnd)
 
 void finish_optimization(HWND hwnd)
 {
+    KillTimer(hwnd, kOptimizationProgressTimerId);
     std::optional<PendingOptimizationResult> pending;
     {
         std::lock_guard<std::mutex> lock(g_optimization_mutex);
         pending = std::move(g_pending_optimization);
         g_pending_optimization.reset();
         g_optimization_running = false;
+        g_optimization_progress.active = false;
     }
     if (!pending.has_value()) {
         return;
@@ -884,17 +1021,10 @@ void finish_optimization(HWND hwnd)
     g_predicted_paths = (g_result.ok && !g_result.state_log.empty())
         ? post2::core::predict_phase_end_trajectory_paths(g_case, g_result.state_log)
         : std::vector<post2::core::PredictedTrajectoryPath>{};
-    if (g_result.ok && !g_result.state_log.empty()) {
-        const double scene_radius_m =
-            post2::gui::compute_scene_radius_m(g_result.state_log, g_predicted_paths);
-        if (!g_camera_initialized) {
-            g_camera.reset(scene_radius_m);
-            g_camera_initialized = true;
-        } else {
-            g_camera.set_scene_radius(scene_radius_m);
-        }
-    }
     update_status();
+    rebuild_chart_controllers();
+    refresh_controller_combo();
+    apply_scene_camera_fit(false);
     populate_charts();
     sync_scene_window(hwnd);
     InvalidateRect(hwnd, nullptr, TRUE);
@@ -926,6 +1056,7 @@ post2::gui::ChartPanel* chart_for_view(ViewKind view)
     case ViewKind::Throttle:         return &g_chart_throttle;
     case ViewKind::Speed:            return &g_chart_speed;
     case ViewKind::Mass:             return &g_chart_mass;
+    case ViewKind::HeatFlux:         return &g_chart_heatflux;
     default:                          return nullptr;
     }
 }
@@ -937,6 +1068,147 @@ void update_camera_viewport(HWND hwnd)
     viewport.right = std::max(0L, rect.right - rect.left);
     viewport.bottom = std::max(0L, rect.bottom - rect.top);
     g_camera.set_viewport(viewport);
+}
+
+ChartController selected_chart_controller()
+{
+    return (g_selected_chart_controller >= 0 &&
+            g_selected_chart_controller < static_cast<int>(g_chart_controllers.size()))
+        ? g_chart_controllers[static_cast<std::size_t>(g_selected_chart_controller)]
+        : ChartController{L"Main stack", false, -1};
+}
+
+bool chart_controller_matches(const ChartController& lhs, const ChartController& rhs)
+{
+    return lhs.detached == rhs.detached && lhs.stage_index == rhs.stage_index;
+}
+
+std::vector<int> detached_controller_phase_indices()
+{
+    std::vector<int> phases;
+    if (g_case.phases.empty()) {
+        return phases;
+    }
+
+    for (std::size_t i = 0; i < g_case.phases.size(); ++i) {
+        if (g_case.phases[i].controller_detached_stage) {
+            phases.push_back(static_cast<int>(i));
+        }
+    }
+    return phases;
+}
+
+post2::gui::SceneRenderOptions current_scene_render_options()
+{
+    post2::gui::SceneRenderOptions options;
+    options.overview_mode = g_scene_overview;
+    options.earth_fixed_view = g_scene_overview;
+    if (g_scene_overview) {
+        options.primary_phase_indices = detached_controller_phase_indices();
+    }
+    return options;
+}
+
+void apply_scene_camera_fit(bool reset_view)
+{
+    if (!g_result.ok || g_result.state_log.empty()) {
+        return;
+    }
+
+    if (!g_scene_overview) {
+        const double scene_radius_m =
+            post2::gui::compute_scene_radius_m(g_result.state_log, g_predicted_paths);
+        if (!g_camera_initialized || reset_view) {
+            g_camera.reset(scene_radius_m, {0.0, 0.0, 0.0});
+            g_camera_initialized = true;
+        } else {
+            g_camera.set_target({0.0, 0.0, 0.0});
+            g_camera.set_scene_radius(scene_radius_m);
+        }
+        return;
+    }
+
+    post2::core::Vec3 min_m{
+        std::numeric_limits<double>::max(),
+        std::numeric_limits<double>::max(),
+        std::numeric_limits<double>::max(),
+    };
+    post2::core::Vec3 max_m{
+        -std::numeric_limits<double>::max(),
+        -std::numeric_limits<double>::max(),
+        -std::numeric_limits<double>::max(),
+    };
+    std::size_t point_count = 0;
+    post2::core::Vec3 radial_sum{0.0, 0.0, 0.0};
+
+    auto add_point = [&](const post2::core::LaunchVehicleStateLogEntry& entry) {
+        const double theta_rad = post2::core::frames::earth_rotation_angle_rad(
+            g_case.earth_rotation_at_epoch_rad,
+            g_case.earth_rotation_rad_per_s,
+            entry.time_s);
+        const post2::core::Vec3 position =
+            post2::core::frames::eci_to_ecef_position(entry.state.position_m, theta_rad);
+        min_m.x = std::min(min_m.x, position.x);
+        min_m.y = std::min(min_m.y, position.y);
+        min_m.z = std::min(min_m.z, position.z);
+        max_m.x = std::max(max_m.x, position.x);
+        max_m.y = std::max(max_m.y, position.y);
+        max_m.z = std::max(max_m.z, position.z);
+        const double norm = post2::vehicle::norm(position);
+        if (norm > 1.0) {
+            radial_sum = radial_sum + position / norm;
+        }
+        ++point_count;
+    };
+
+    for (const auto& entry : g_result.state_log.entries()) {
+        add_point(entry);
+    }
+
+    if (point_count == 0) {
+        const double scene_radius_m =
+            post2::gui::compute_scene_radius_m(g_result.state_log, g_predicted_paths);
+        g_camera.reset(scene_radius_m, {0.0, 0.0, 0.0});
+        g_camera_initialized = true;
+        return;
+    }
+
+    const post2::core::Vec3 center_m{
+        0.5 * (min_m.x + max_m.x),
+        0.5 * (min_m.y + max_m.y),
+        0.5 * (min_m.z + max_m.z),
+    };
+    double radius_m = 1.0;
+    for (const auto& entry : g_result.state_log.entries()) {
+        const double theta_rad = post2::core::frames::earth_rotation_angle_rad(
+            g_case.earth_rotation_at_epoch_rad,
+            g_case.earth_rotation_rad_per_s,
+            entry.time_s);
+        const post2::core::Vec3 position =
+            post2::core::frames::eci_to_ecef_position(entry.state.position_m, theta_rad);
+        radius_m = std::max(radius_m, post2::vehicle::norm(position - center_m));
+    }
+    radius_m = std::max(radius_m * 1.25, 100000.0);
+
+    const post2::core::Vec3 outward =
+        post2::vehicle::norm(radial_sum) > 1.0e-9
+            ? radial_sum / post2::vehicle::norm(radial_sum)
+            : (post2::vehicle::norm(center_m) > 1.0e-9
+                ? center_m / post2::vehicle::norm(center_m)
+                : post2::core::Vec3{1.0, 0.0, 0.0});
+    const post2::core::Vec3 eye_direction =
+        post2::vehicle::norm(outward + post2::core::Vec3{0.0, 0.0, 0.28}) > 1.0e-9
+            ? outward + post2::core::Vec3{0.0, 0.0, 0.28}
+            : outward;
+
+    if (!g_camera_initialized || reset_view) {
+        g_camera.reset(radius_m, center_m);
+        g_camera.set_eye_direction(eye_direction);
+        g_camera_initialized = true;
+    } else {
+        g_camera.set_target(center_m);
+        g_camera.set_scene_radius(radius_m);
+    }
 }
 
 bool scene_has_state()
@@ -958,6 +1230,9 @@ void apply_active_view_visibility()
     if (window_is_live(g_scene_hwnd)) {
         ShowWindow(g_scene_hwnd, show_scene ? SW_SHOWNA : SW_HIDE);
     }
+    if (window_is_live(g_scene_overview_button)) {
+        ShowWindow(g_scene_overview_button, g_active_view == ViewKind::Scene3D ? SW_SHOWNA : SW_HIDE);
+    }
     auto sync_chart = [&](post2::gui::ChartPanel& panel, ViewKind v) {
         const bool show_chart = has_data && g_active_view == v;
         if (show_chart) panel.show(); else panel.hide();
@@ -967,6 +1242,7 @@ void apply_active_view_visibility()
     sync_chart(g_chart_throttle, ViewKind::Throttle);
     sync_chart(g_chart_speed, ViewKind::Speed);
     sync_chart(g_chart_mass, ViewKind::Mass);
+    sync_chart(g_chart_heatflux, ViewKind::HeatFlux);
 }
 
 void sync_scene_window(HWND hwnd)
@@ -992,6 +1268,7 @@ void sync_scene_window(HWND hwnd)
     move_chart(g_chart_throttle);
     move_chart(g_chart_speed);
     move_chart(g_chart_mass);
+    move_chart(g_chart_heatflux);
     apply_active_view_visibility();
     invalidate_scene_window();
 }
@@ -1009,13 +1286,29 @@ void switch_view(HWND hwnd, ViewKind view)
     InvalidateRect(hwnd, nullptr, FALSE);
 }
 
+void set_scene_overview(HWND hwnd, bool enabled)
+{
+    g_scene_overview = enabled;
+    if (window_is_live(g_scene_overview_button)) {
+        Button_SetCheck(g_scene_overview_button, enabled ? BST_CHECKED : BST_UNCHECKED);
+    }
+    apply_scene_camera_fit(true);
+    invalidate_scene_window();
+    InvalidateRect(hwnd, nullptr, FALSE);
+}
+
 double great_circle_arc_m(double lat1_rad, double lon1_rad, double lat2_rad, double lon2_rad)
 {
+    const double radius_m = g_case.earth_radius_m > 0.0
+        ? g_case.earth_radius_m
+        : post2::core::frames::Wgs84::a_m;
+    const double dlat = lat2_rad - lat1_rad;
     const double dlon = lon2_rad - lon1_rad;
-    const double cos_arg = std::sin(lat1_rad) * std::sin(lat2_rad)
-        + std::cos(lat1_rad) * std::cos(lat2_rad) * std::cos(dlon);
-    const double clamped = std::max(-1.0, std::min(1.0, cos_arg));
-    return post2::core::frames::Wgs84::a_m * std::acos(clamped);
+    const double hav =
+        std::sin(dlat * 0.5) * std::sin(dlat * 0.5) +
+        std::cos(lat1_rad) * std::cos(lat2_rad) *
+            std::sin(dlon * 0.5) * std::sin(dlon * 0.5);
+    return 2.0 * radius_m * std::asin(std::sqrt(std::min(1.0, std::max(0.0, hav))));
 }
 
 void populate_charts()
@@ -1029,6 +1322,7 @@ void populate_charts()
         g_chart_throttle.set_data(empty);
         g_chart_speed.set_data(empty);
         g_chart_mass.set_data(empty);
+        g_chart_heatflux.set_data(empty);
         return;
     }
     const auto& entries = g_result.state_log.entries();
@@ -1036,47 +1330,55 @@ void populate_charts()
     const double launch_lat = g_case.launch_site.latitude_deg * kDegToRadLocal;
     const double launch_lon = g_case.launch_site.longitude_deg * kDegToRadLocal;
 
-    // 2D profile range: from takeoff (first non-clamped entry) to last entry
-    // with engine_thrust_n > 0 (all-engines-off cutoff).
-    std::size_t profile_start = 0;
+    // Plot every phase that belongs to the selected controller (main stack vs a
+    // detached / recovered stage). No powered clipping: the full span of that
+    // controller's phases is shown, so e.g. a booster's coast + entry burn +
+    // descent to landing all appear.
+    const ChartController selected = selected_chart_controller();
+    const auto entry_in_controller = [&](const auto& e) {
+        const ChartController c = chart_controller_for_phase(e.phase_index);
+        return chart_controller_matches(c, selected);
+    };
+
+    ChartSeries profile_s, q_s, throttle_s, speed_s, mass_s, heatflux_s;
+    profile_s.x.reserve(entries.size());
+    profile_s.y.reserve(entries.size());
+
+    bool have_previous_profile_geo = false;
+    post2::core::frames::Geodetic previous_profile_geo;
+    double profile_ground_track_m = 0.0;
+
     for (std::size_t i = 0; i < entries.size(); ++i) {
-        if (!entries[i].hold_down_clamp_active) {
-            profile_start = i;
-            break;
-        }
-    }
-    std::size_t profile_end = profile_start;
-    bool found_thrust = false;
-    for (std::size_t i = profile_start; i < entries.size(); ++i) {
-        if (entries[i].engine_thrust_n > 0.0) {
-            profile_end = i;
-            found_thrust = true;
-        }
-    }
-    if (!found_thrust) {
-        profile_end = entries.size() - 1;
-    }
-
-    ChartSeries profile_s, q_s, throttle_s, speed_s, mass_s;
-    const std::size_t powered_count = profile_end - profile_start + 1;
-    profile_s.x.reserve(powered_count);
-    profile_s.y.reserve(powered_count);
-    q_s.x.reserve(powered_count);
-    q_s.y.reserve(powered_count);
-    throttle_s.x.reserve(powered_count);
-    throttle_s.y.reserve(powered_count);
-    speed_s.x.reserve(powered_count);
-    speed_s.y.reserve(powered_count);
-    mass_s.x.reserve(powered_count);
-    mass_s.y.reserve(powered_count);
-
-    for (std::size_t i = profile_start; i <= profile_end; ++i) {
         const auto& entry = entries[i];
+        if (!entry_in_controller(entry)) {
+            continue;
+        }
+        const double theta_rad = post2::core::frames::earth_rotation_angle_rad(
+            g_case.earth_rotation_at_epoch_rad,
+            g_case.earth_rotation_rad_per_s,
+            entry.time_s);
+        const post2::core::Vec3 position_ecef =
+            post2::core::frames::eci_to_ecef_position(entry.state.position_m, theta_rad);
         const post2::core::frames::Geodetic geo =
-            post2::core::frames::ecef_to_geodetic(entry.state.position_m);
-        const double downrange_m = great_circle_arc_m(
-            launch_lat, launch_lon, geo.latitude_rad, geo.longitude_rad);
-        profile_s.x.push_back(downrange_m / 1000.0);
+            post2::core::frames::ecef_to_geodetic(position_ecef);
+        if (have_previous_profile_geo) {
+            profile_ground_track_m += great_circle_arc_m(
+                previous_profile_geo.latitude_rad,
+                previous_profile_geo.longitude_rad,
+                geo.latitude_rad,
+                geo.longitude_rad);
+        } else {
+            // Keep the ascent/main-stack chart on the familiar launch-site
+            // downrange origin, while detached booster charts start at their
+            // own first displayed state and then accumulate monotonically.
+            if (!selected.detached) {
+                profile_ground_track_m = great_circle_arc_m(
+                    launch_lat, launch_lon, geo.latitude_rad, geo.longitude_rad);
+            }
+            have_previous_profile_geo = true;
+        }
+        previous_profile_geo = geo;
+        profile_s.x.push_back(profile_ground_track_m / 1000.0);
         profile_s.y.push_back(entry.altitude_m / 1000.0);
         q_s.x.push_back(entry.time_s);
         q_s.y.push_back(entry.dynamic_pressure_pa / 1000.0);
@@ -1086,11 +1388,13 @@ void populate_charts()
         speed_s.y.push_back(entry.speed_mps);
         mass_s.x.push_back(entry.time_s);
         mass_s.y.push_back(entry.total_mass_kg);
+        heatflux_s.x.push_back(entry.time_s);
+        heatflux_s.y.push_back(entry.heat_flux_wpm2 / 1000.0);
     }
 
     ChartConfig profile_cfg;
-    profile_cfg.title = L"Launch profile (liftoff to engine cutoff)";
-    profile_cfg.x_label = L"Downrange [km]";
+    profile_cfg.title = L"Trajectory profile";
+    profile_cfg.x_label = selected.detached ? L"Ground track [km]" : L"Downrange [km]";
     profile_cfg.y_label = L"Altitude";
     profile_cfg.y_unit = L"km";
     profile_cfg.data = std::move(profile_s);
@@ -1128,6 +1432,15 @@ void populate_charts()
     mass_cfg.y_unit = L"kg";
     mass_cfg.data = std::move(mass_s);
     g_chart_mass.set_data(std::move(mass_cfg));
+
+    ChartConfig heatflux_cfg;
+    heatflux_cfg.title = L"Aerodynamic heat flux (stagnation point)";
+    heatflux_cfg.x_label = L"Time [s]";
+    heatflux_cfg.y_label = L"Heat flux";
+    heatflux_cfg.y_unit = L"kW/m^2";
+    heatflux_cfg.data = std::move(heatflux_s);
+    heatflux_cfg.mark_peak = true;
+    g_chart_heatflux.set_data(std::move(heatflux_cfg));
 }
 
 void draw_text_line(HDC hdc, int x, int y, const std::string& text)
@@ -1775,6 +2088,18 @@ void create_vehicle_dialog_controls(VehicleSettingsDialogState* state)
 
     Button_SetCheck(state->aero_enabled, state->config.aero.enabled ? BST_CHECKED : BST_UNCHECKED);
 
+    // Grid fins (deployed on the returning booster). Count + per-fin planform
+    // area; baked into the booster-only aero table at generation time and used in
+    // the base-first descent drag.
+    create_label(state->hwnd, 160, 88, 70, L"Grid fins #", font);
+    state->grid_fin_count = create_edit(
+        state->hwnd, kVehicleGridFinCount, 232, 84, 48,
+        widen(std::to_string(state->config.aero.grid_fins.count)), font);
+    create_label(state->hwnd, 292, 88, 64, L"area m²", font);
+    state->grid_fin_area = create_edit(
+        state->hwnd, kVehicleGridFinArea, 360, 84, 90,
+        format_double(state->config.aero.grid_fins.area_per_fin_m2), font);
+
     // Aero tables: one CD/CL(Mach, alpha) table per staging configuration. The
     // reference area is a property of each table's geometry, so there is no longer
     // a standalone area / Cd / Cl field -- those came from the table set instead.
@@ -2150,6 +2475,17 @@ void create_stage_editor_controls(StageEditorDialogState* state)
     create_label(state->hwnd, 258, 180, 55, L"Isp s", font);
     state->engine_isp_edit = create_edit(state->hwnd, kVehicleEngineIspEdit, 318, 176, 100, format_double(engine.isp_vac_s), font);
 
+    // Discrete cluster-ignition counts (comma-separated, e.g. "1,3,9"). Empty
+    // means any count 1..engine_count is allowed.
+    std::wstring ignition_options_text;
+    for (std::size_t i = 0; i < engine.ignition_count_options.size(); ++i) {
+        if (i != 0) ignition_options_text += L",";
+        ignition_options_text += std::to_wstring(engine.ignition_count_options[i]);
+    }
+    create_label(state->hwnd, 430, 180, 78, L"Ignite opts", font);
+    state->engine_ignition_options_edit = create_edit(
+        state->hwnd, kVehicleEngineIgnitionOptions, 510, 176, 120, ignition_options_text, font);
+
     create_label(state->hwnd, 18, 214, 90, L"Engine dir", font);
     state->engine_dir_x_edit = create_edit(state->hwnd, kVehicleEngineDirXEdit, 118, 210, 70, format_double(engine.direction_body.x), font);
     state->engine_dir_y_edit = create_edit(state->hwnd, kVehicleEngineDirYEdit, 198, 210, 70, format_double(engine.direction_body.y), font);
@@ -2193,6 +2529,23 @@ bool accept_stage_editor_dialog(StageEditorDialogState* state)
         !read_double_field(state->hwnd, state->engine_dir_y_edit, L"Engine dir Y", &stage.engine.direction_body.y) ||
         !read_double_field(state->hwnd, state->engine_dir_z_edit, L"Engine dir Z", &stage.engine.direction_body.z)) {
         return false;
+    }
+    // Parse the comma-separated discrete ignition counts ("1,3,9"); blank clears
+    // the restriction (any count allowed). Non-numeric/empty tokens are skipped.
+    {
+        const std::string options_text = narrow(get_window_text(state->engine_ignition_options_edit));
+        std::vector<int> options;
+        std::stringstream stream(options_text);
+        std::string token;
+        while (std::getline(stream, token, ',')) {
+            try {
+                const int n = std::stoi(token);
+                if (n >= 1) options.push_back(n);
+            } catch (const std::exception&) {
+                // skip blanks / non-numeric tokens
+            }
+        }
+        stage.engine.ignition_count_options = std::move(options);
     }
     if (stage.dry_mass_kg < 0.0) {
         MessageBoxW(state->hwnd, L"Dry mass cannot be negative.", L"Stage", MB_ICONWARNING);
@@ -2606,6 +2959,17 @@ bool accept_vehicle_dialog(VehicleSettingsDialogState* state)
         return false;
     }
     config.aero.enabled = Button_GetCheck(state->aero_enabled) == BST_CHECKED;
+    {
+        // Grid fins: count (integer) + per-fin planform area.
+        double fin_count = static_cast<double>(config.aero.grid_fins.count);
+        double fin_area = config.aero.grid_fins.area_per_fin_m2;
+        if (!read_double_field(state->hwnd, state->grid_fin_count, L"Grid fin count", &fin_count) ||
+            !read_double_field(state->hwnd, state->grid_fin_area, L"Grid fin area", &fin_area)) {
+            return false;
+        }
+        config.aero.grid_fins.count = std::max(0, static_cast<int>(fin_count));
+        config.aero.grid_fins.area_per_fin_m2 = std::max(0.0, fin_area);
+    }
     // The aero table set (config.aero.stage_tables) is edited in place by the
     // Import / Edit stage / Delete handlers; reference area / Cd / Cl no longer
     // have dialog fields (they derive from the tables). Keep the legacy primary
@@ -3565,6 +3929,58 @@ void add_metric_items(HWND combo)
     add_combo_item(combo, L"max_throttle");
     if (!g_case_initialized) {
         return;
+    }
+    struct MetricControllerOption {
+        std::string token;
+        bool detached = false;
+        int stage_index = -1;
+    };
+    std::vector<MetricControllerOption> controller_options;
+    controller_options.push_back({"main", false, -1});
+    const auto add_controller_metric_option = [&](const std::string& token, bool detached, int stage_index) {
+        if (token.empty()) {
+            return;
+        }
+        const auto existing = std::find_if(
+            controller_options.begin(),
+            controller_options.end(),
+            [&](const MetricControllerOption& option) {
+                return option.token == token ||
+                    (option.detached == detached && option.stage_index == stage_index);
+            });
+        if (existing == controller_options.end()) {
+            controller_options.push_back({token, detached, stage_index});
+        }
+    };
+    const auto stages = post2::vehicle::effective_stage_configs(g_case.vehicle);
+    for (const auto& phase : g_case.phases) {
+        if (!phase.controller_detached_stage) {
+            continue;
+        }
+        std::optional<int> stage_index =
+            resolve_stage_index(g_case.vehicle, phase.controller_stage_index, phase.controller_stage_name);
+        std::string token = controller_metric_token(phase.controller_stage_name);
+        if (stage_index.has_value() &&
+            static_cast<std::size_t>(*stage_index) < stages.size()) {
+            token = controller_metric_token(stages[static_cast<std::size_t>(*stage_index)].name);
+        }
+        add_controller_metric_option(token, true, stage_index.value_or(-1));
+    }
+    const char* controller_metrics[] = {
+        "propellant_remaining_kg",
+        "max_q_pa",
+        "max_dynamic_pressure_pa",
+        "max_accel_mps2",
+        "min_throttle",
+        "max_throttle",
+    };
+    for (const auto& controller : controller_options) {
+        for (const char* metric : controller_metrics) {
+            std::ostringstream item;
+            item << "controllers[" << controller.token << "]." << metric;
+            const std::wstring wide = widen(item.str());
+            add_combo_item(combo, wide.c_str());
+        }
     }
     const char* phase_metrics[] = {
         "terminal_altitude_m",
@@ -5740,6 +6156,72 @@ int phase_controller_stage_index(const post2::core::PhaseConfig& phase)
     return top_stage_index_for_vehicle(g_case.vehicle);
 }
 
+// The controller (main stack vs a detached/recovered stage) that flew a given
+// state-log phase. Phase indices past the configured phases (coast/predicted
+// tails) map to the main stack.
+ChartController chart_controller_for_phase(int phase_index)
+{
+    ChartController c;
+    if (phase_index >= 0 && static_cast<std::size_t>(phase_index) < g_case.phases.size()) {
+        const post2::core::PhaseConfig& phase = g_case.phases[static_cast<std::size_t>(phase_index)];
+        if (phase.controller_detached_stage) {
+            c.detached = true;
+            c.stage_index = phase_controller_stage_index(phase);
+            const std::string name = stage_name_for_index(g_case.vehicle, c.stage_index);
+            c.label = widen(name.empty() ? "detached stage" : name);
+            return c;
+        }
+    }
+    c.detached = false;
+    c.stage_index = -1;
+    c.label = L"Main stack";
+    return c;
+}
+
+// Rebuild the list of controllers present in the current result (distinct, in
+// order of first appearance). Keeps the current selection if still valid.
+void rebuild_chart_controllers()
+{
+    g_chart_controllers.clear();
+    if (g_result.ok && !g_result.state_log.empty()) {
+        for (const auto& entry : g_result.state_log.entries()) {
+            const ChartController c = chart_controller_for_phase(entry.phase_index);
+            bool present = false;
+            for (const auto& existing : g_chart_controllers) {
+                if (existing.detached == c.detached && existing.stage_index == c.stage_index) {
+                    present = true;
+                    break;
+                }
+            }
+            if (!present) {
+                g_chart_controllers.push_back(c);
+            }
+        }
+    }
+    if (g_chart_controllers.empty()) {
+        g_chart_controllers.push_back(ChartController{L"Main stack", false, -1});
+    }
+    if (g_selected_chart_controller < 0 ||
+        g_selected_chart_controller >= static_cast<int>(g_chart_controllers.size())) {
+        g_selected_chart_controller = 0;
+    }
+}
+
+void refresh_controller_combo()
+{
+    if (!window_is_live(g_controller_combo)) {
+        return;
+    }
+    SendMessageW(g_controller_combo, CB_RESETCONTENT, 0, 0);
+    for (const auto& c : g_chart_controllers) {
+        SendMessageW(g_controller_combo, CB_ADDSTRING, 0,
+                     reinterpret_cast<LPARAM>(c.label.c_str()));
+    }
+    SendMessageW(g_controller_combo, CB_SETCURSEL,
+                 static_cast<WPARAM>(g_selected_chart_controller), 0);
+    EnableWindow(g_controller_combo, g_chart_controllers.size() > 1 ? TRUE : FALSE);
+}
+
 int phase_action_min_stage_index(const post2::core::PhaseConfig& phase)
 {
     return phase.controller_detached_stage ? phase_controller_stage_index(phase) : 0;
@@ -6274,6 +6756,19 @@ bool phase_editor_steering_is_upfg()
     return lowercase(get_combo_text(g_phase_steering_type)) == "upfg";
 }
 
+bool phase_editor_steering_is_gfold()
+{
+    return lowercase(get_combo_text(g_phase_steering_type)) == "gfold";
+}
+
+// Both UPFG and G-FOLD are closed-loop guidances that own their throttle (UPFG
+// flies full-throttle; G-FOLD's throttle comes from the descent solve), so the
+// throttle editor is greyed out for either.
+bool phase_editor_steering_owns_throttle()
+{
+    return phase_editor_steering_is_upfg() || phase_editor_steering_is_gfold();
+}
+
 bool is_phase_throttle_path(const std::string& path)
 {
     return path.find(".throttle_model.") != std::string::npos ||
@@ -6301,6 +6796,27 @@ void remove_phase_throttle_optimization_variables(
 void update_phase_upfg_throttle_state()
 {
     const bool upfg = phase_editor_steering_is_upfg();
+    const bool gfold = phase_editor_steering_is_gfold();
+    // Either closed-loop guidance owns the throttle and its own phase cutoff.
+    const bool owns = upfg || gfold;
+
+    // The guidance self-terminates (UPFG at orbit insertion; G-FOLD at touchdown
+    // from the descent solve), so the manual terminal condition is redundant --
+    // lock its editor and label it as algorithm-managed.
+    if (window_is_live(g_phase_termination_edit_button)) {
+        EnableWindow(g_phase_termination_edit_button, owns ? FALSE : TRUE);
+    }
+    if (owns && window_is_live(g_phase_termination_label)) {
+        SetWindowTextW(g_phase_termination_label,
+                       upfg ? L"managed by UPFG (cutoff at orbit insertion, tgo<=0)"
+                            : L"managed by GFOLD (cutoff at powered-descent touchdown)");
+    } else if (window_is_live(g_phase_termination_label)) {
+        if (const auto* phase = selected_phase()) {
+            SetWindowTextW(g_phase_termination_label,
+                           trigger_summary(phase->termination).c_str());
+        }
+    }
+
     if (upfg && window_is_live(g_phase_throttle_type)) {
         select_combo_text(g_phase_throttle_type, "poly");
     }
@@ -6312,17 +6828,17 @@ void update_phase_upfg_throttle_state()
     }
 
     if (window_is_live(g_phase_throttle_type)) {
-        EnableWindow(g_phase_throttle_type, upfg ? FALSE : TRUE);
+        EnableWindow(g_phase_throttle_type, owns ? FALSE : TRUE);
     }
     for (const auto& row : g_phase_numeric_rows) {
         if (!is_phase_throttle_path(row.path)) {
             continue;
         }
-        EnableWindow(row.value_edit, upfg ? FALSE : TRUE);
-        EnableWindow(row.opt_check, upfg ? FALSE : TRUE);
-        EnableWindow(row.min_edit, upfg ? FALSE : TRUE);
-        EnableWindow(row.max_edit, upfg ? FALSE : TRUE);
-        if (upfg) {
+        EnableWindow(row.value_edit, owns ? FALSE : TRUE);
+        EnableWindow(row.opt_check, owns ? FALSE : TRUE);
+        EnableWindow(row.min_edit, owns ? FALSE : TRUE);
+        EnableWindow(row.max_edit, owns ? FALSE : TRUE);
+        if (owns) {
             Button_SetCheck(row.opt_check, BST_UNCHECKED);
         }
     }
@@ -6330,8 +6846,8 @@ void update_phase_upfg_throttle_state()
         if (!is_phase_throttle_path(row.path)) {
             continue;
         }
-        EnableWindow(row.check, upfg ? FALSE : TRUE);
-        if (upfg) {
+        EnableWindow(row.check, owns ? FALSE : TRUE);
+        if (owns) {
             Button_SetCheck(row.check, BST_UNCHECKED);
         } else {
             update_opt_state_for_continuity_row(row);
@@ -6508,6 +7024,49 @@ void add_phase_segmented_throttle_rows(
     }
 }
 
+void add_phase_entry_burn_rows(
+    HWND parent,
+    int* y,
+    const post2::core::EntryBurnConfig& entry_burn,
+    const std::string& path,
+    HFONT font)
+{
+    create_phase_section(parent, y, L"Entry burn", font);
+    add_phase_numeric_row(parent, y, "Q limit Pa", path + ".q_limit_pa", entry_burn.q_limit_pa, font);
+    add_phase_numeric_row(
+        parent,
+        y,
+        "Heat flux limit W/m2",
+        path + ".heat_flux_limit_wpm2",
+        entry_burn.heat_flux_limit_wpm2,
+        font);
+    add_phase_numeric_row(
+        parent,
+        y,
+        "Trigger fraction",
+        path + ".trigger_fraction",
+        entry_burn.trigger_fraction,
+        font);
+    add_phase_numeric_row(parent, y, "Predictor drag Cd", path + ".drag_cd", entry_burn.drag_cd, font);
+    add_phase_numeric_row(
+        parent,
+        y,
+        "Safety margin",
+        path + ".safety_margin",
+        entry_burn.safety_margin,
+        font);
+    NumericBindingRow engines_row = add_phase_numeric_row(
+        parent,
+        y,
+        "Max entry engines",
+        path + ".max_entry_engines",
+        static_cast<double>(entry_burn.max_entry_engines),
+        font);
+    EnableWindow(engines_row.opt_check, FALSE);
+    EnableWindow(engines_row.min_edit, FALSE);
+    EnableWindow(engines_row.max_edit, FALSE);
+}
+
 void add_phase_throttle_rows(
     HWND parent,
     int* y,
@@ -6538,6 +7097,13 @@ void add_phase_throttle_rows(
         throttle.segmented_poly,
         path + ".segmented_poly",
         font);
+
+    add_phase_entry_burn_rows(
+        parent,
+        y,
+        throttle.entry_burn,
+        path + ".entry_burn",
+        font);
 }
 
 void add_phase_upfg_rows(
@@ -6551,6 +7117,24 @@ void add_phase_upfg_rows(
     add_phase_numeric_row(parent, y, label_prefix + "UPFG periapsis km", path + ".periapsis_km", upfg.periapsis_km, font);
     add_phase_numeric_row(parent, y, label_prefix + "UPFG apoapsis km", path + ".apoapsis_km", upfg.apoapsis_km, font);
     add_phase_numeric_row(parent, y, label_prefix + "UPFG inclination", path + ".inclination_deg", upfg.inclination_deg, font);
+}
+
+void add_phase_gfold_rows(
+    HWND parent,
+    int* y,
+    const post2::core::GfoldConfig& gfold,
+    const std::string& path,
+    const std::string& label_prefix,
+    HFONT font)
+{
+    add_phase_numeric_row(parent, y, label_prefix + "GFOLD min throttle", path + ".min_throttle", gfold.min_throttle, font);
+    add_phase_numeric_row(parent, y, label_prefix + "GFOLD max throttle", path + ".max_throttle", gfold.max_throttle, font);
+    add_phase_numeric_row(parent, y, label_prefix + "GFOLD max tilt deg", path + ".max_tilt_deg", gfold.max_tilt_deg, font);
+    add_phase_numeric_row(parent, y, label_prefix + "GFOLD glide slope deg", path + ".glide_slope_deg", gfold.glide_slope_deg, font);
+    // Golden-section search interval over time-of-flight (the one non-convex
+    // parameter); fuel is unimodal in tf, so these bound the 1-D search.
+    add_phase_numeric_row(parent, y, label_prefix + "GFOLD tf min s", path + ".tf_min_s", gfold.tf_min_s, font);
+    add_phase_numeric_row(parent, y, label_prefix + "GFOLD tf max s", path + ".tf_max_s", gfold.tf_max_s, font);
 }
 
 void add_phase_segmented_steering_rows(
@@ -6634,6 +7218,7 @@ void add_phase_steering_rows(
     add_phase_numeric_row(parent, y, label_prefix + "Fixed ECI z", path + ".fixed_direction_eci.z", steering.fixed_direction_eci.z, font);
 
     add_phase_upfg_rows(parent, y, steering.upfg, path + ".upfg", label_prefix, font);
+    add_phase_gfold_rows(parent, y, steering.gfold, path + ".gfold", label_prefix, font);
     add_phase_segmented_steering_rows(
         parent,
         y,
@@ -6794,7 +7379,11 @@ bool apply_phase_controls(HWND hwnd)
 
     edited.throttle_model.type = get_combo_text(g_phase_throttle_type);
     edited.steering_model.type = get_combo_text(g_phase_steering_type);
-    const bool steering_upfg = lowercase(edited.steering_model.type) == "upfg";
+    const std::string steering_type_lc = lowercase(edited.steering_model.type);
+    const bool steering_upfg = steering_type_lc == "upfg";
+    // UPFG and G-FOLD both own the throttle, so the throttle editor is skipped
+    // and any throttle optimization variables are dropped for either.
+    const bool steering_owns_throttle = steering_upfg || steering_type_lc == "gfold";
 
     if (!update_selected_action_from_controls(hwnd, &edited)) {
         return false;
@@ -6803,7 +7392,7 @@ bool apply_phase_controls(HWND hwnd)
     candidate.phases[static_cast<std::size_t>(g_selected_phase_index)] = edited;
 
     for (const auto& row : g_phase_numeric_rows) {
-        if (steering_upfg && is_phase_throttle_path(row.path)) {
+        if (steering_owns_throttle && is_phase_throttle_path(row.path)) {
             continue;
         }
         const std::wstring text = get_window_text(row.value_edit);
@@ -6812,6 +7401,27 @@ bool apply_phase_controls(HWND hwnd)
             MessageBoxW(hwnd, widen(row.label + " must be a number.").c_str(), L"Phase", MB_ICONWARNING);
             SetFocus(row.value_edit);
             return false;
+        }
+        if (row.path.find(".entry_burn.max_entry_engines") != std::string::npos) {
+            value = std::round(value);
+            if (value < 1.0) {
+                MessageBoxW(hwnd, L"Max entry engines must be at least 1.", L"Phase", MB_ICONWARNING);
+                SetFocus(row.value_edit);
+                return false;
+            }
+            SetWindowTextW(row.value_edit, format_double(value).c_str());
+        } else if (row.path.find(".entry_burn.trigger_fraction") != std::string::npos) {
+            if (value < 0.0) {
+                MessageBoxW(hwnd, L"Trigger fraction cannot be negative.", L"Phase", MB_ICONWARNING);
+                SetFocus(row.value_edit);
+                return false;
+            }
+        } else if (row.path.find(".entry_burn.safety_margin") != std::string::npos) {
+            if (value < 0.0 || value >= 1.0) {
+                MessageBoxW(hwnd, L"Safety margin must be in [0, 1).", L"Phase", MB_ICONWARNING);
+                SetFocus(row.value_edit);
+                return false;
+            }
         }
 
         std::string path_error;
@@ -6823,13 +7433,24 @@ bool apply_phase_controls(HWND hwnd)
             }
             continue;
         }
+        if (row.path.find(".entry_burn.max_entry_engines") != std::string::npos) {
+            candidate.optimization.variables.erase(
+                std::remove_if(
+                    candidate.optimization.variables.begin(),
+                    candidate.optimization.variables.end(),
+                    [&](const post2::core::OptimizationVariableConfig& variable) {
+                        return variable.path == row.path;
+                    }),
+                candidate.optimization.variables.end());
+            continue;
+        }
         if (!apply_numeric_variable_controls(hwnd, row, value, &candidate.optimization, L"Phase")) {
             return false;
         }
     }
 
     for (const auto& row : g_phase_continuity_rows) {
-        if (steering_upfg && is_phase_throttle_path(row.path)) {
+        if (steering_owns_throttle && is_phase_throttle_path(row.path)) {
             continue;
         }
         const bool flag_value = Button_GetCheck(row.check) == BST_CHECKED;
@@ -6837,7 +7458,7 @@ bool apply_phase_controls(HWND hwnd)
         post2::core::write_optimization_flag(&candidate, row.path, flag_value, &flag_error);
     }
 
-    if (steering_upfg) {
+    if (steering_owns_throttle) {
         auto& throttle = candidate.phases[static_cast<std::size_t>(g_selected_phase_index)].throttle_model;
         throttle = post2::core::ThrottleModelConfig{};
         throttle.type = "poly";
@@ -6990,7 +7611,8 @@ void create_phase_editor_controls(HWND hwnd)
         g_phase_scroll_pane, nullptr, g_instance, nullptr);
     set_child_font(termination_label, font);
     g_phase_termination_label = termination_label;
-    create_button(g_phase_scroll_pane, kPhaseTerminationEditButton, 504, y, 76, 26, L"Edit...", font);
+    g_phase_termination_edit_button = create_button(
+        g_phase_scroll_pane, kPhaseTerminationEditButton, 504, y, 76, 26, L"Edit...", font);
     y += 38;
 
     create_phase_section(g_phase_scroll_pane, &y, L"Throttle", font);
@@ -7000,6 +7622,7 @@ void create_phase_editor_controls(HWND hwnd)
     add_combo_item(g_phase_throttle_type, L"segmented_poly");
     add_combo_item(g_phase_throttle_type, L"t2w");
     add_combo_item(g_phase_throttle_type, L"interpolated");
+    add_combo_item(g_phase_throttle_type, L"entry_burn");
     y += 38;
     add_phase_throttle_rows(g_phase_scroll_pane, &y, phase->throttle_model, prefix + ".throttle_model", font);
 
@@ -7010,11 +7633,14 @@ void create_phase_editor_controls(HWND hwnd)
     add_combo_item(g_phase_steering_type, L"segmented_poly");
     add_combo_item(g_phase_steering_type, L"rpy_poly");
     add_combo_item(g_phase_steering_type, L"fixed_eci");
+    add_combo_item(g_phase_steering_type, L"retrograde");
+    add_combo_item(g_phase_steering_type, L"prograde");
     add_combo_item(g_phase_steering_type, L"generic_quat_interp");
     add_combo_item(g_phase_steering_type, L"generic_selectable");
     add_combo_item(g_phase_steering_type, L"linear_tangent");
     add_combo_item(g_phase_steering_type, L"bilinear_tangent");
     add_combo_item(g_phase_steering_type, L"upfg");
+    add_combo_item(g_phase_steering_type, L"gfold");
     y += 38;
     add_phase_steering_rows(g_phase_scroll_pane, &y, phase->steering_model, prefix + ".steering_model", "", font);
 
@@ -7380,6 +8006,52 @@ std::vector<std::string> format_pre_takeoff_lines()
     return lines;
 }
 
+std::vector<std::string> format_droneship_lines()
+{
+    std::vector<std::string> lines;
+    if (!g_result.ok || g_result.state_log.empty()) {
+        lines.push_back("(no result yet)");
+        return lines;
+    }
+
+    const post2::core::LaunchVehicleStateLogEntry* booster_tail = nullptr;
+    const auto& entries = g_result.state_log.entries();
+    for (auto it = entries.rbegin(); it != entries.rend(); ++it) {
+        const ChartController c = chart_controller_for_phase(it->phase_index);
+        if (c.detached) {
+            booster_tail = &(*it);
+            break;
+        }
+    }
+    if (booster_tail == nullptr) {
+        lines.push_back("(no booster landing)");
+        return lines;
+    }
+
+    constexpr double kDegToRadLocal = 3.141592653589793238462643383279502884 / 180.0;
+    constexpr double kRadToDegLocal = 180.0 / 3.141592653589793238462643383279502884;
+    const double theta_rad = post2::core::frames::earth_rotation_angle_rad(
+        g_case.earth_rotation_at_epoch_rad,
+        g_case.earth_rotation_rad_per_s,
+        booster_tail->time_s);
+    const post2::core::Vec3 position_ecef =
+        post2::core::frames::eci_to_ecef_position(booster_tail->state.position_m, theta_rad);
+    const post2::core::frames::Geodetic geo =
+        post2::core::frames::ecef_to_geodetic(position_ecef);
+    const double launch_lat = g_case.launch_site.latitude_deg * kDegToRadLocal;
+    const double launch_lon = g_case.launch_site.longitude_deg * kDegToRadLocal;
+    const double downrange_m = great_circle_arc_m(
+        launch_lat,
+        launch_lon,
+        geo.latitude_rad,
+        geo.longitude_rad);
+
+    lines.push_back("Downrange: " + format_double_short(downrange_m / 1000.0, 2) + " km");
+    lines.push_back("Latitude: " + format_double_short(geo.latitude_rad * kRadToDegLocal, 5) + " deg");
+    lines.push_back("Longitude: " + format_double_short(geo.longitude_rad * kRadToDegLocal, 5) + " deg");
+    return lines;
+}
+
 std::vector<std::string> format_final_lines()
 {
     std::vector<std::string> lines;
@@ -7387,7 +8059,22 @@ std::vector<std::string> format_final_lines()
         lines.push_back("(no result yet)");
         return lines;
     }
-    const auto& tail = g_result.state_log.back();
+    // Show the final state of the SELECTED controller (e.g. the main stack's
+    // orbit, or a recovered booster's landing), not just the global last entry.
+    const ChartController selected = selected_chart_controller();
+    const auto& entries = g_result.state_log.entries();
+    const post2::core::LaunchVehicleStateLogEntry* tail_ptr = &g_result.state_log.back();
+    for (auto it = entries.rbegin(); it != entries.rend(); ++it) {
+        const ChartController c = chart_controller_for_phase(it->phase_index);
+        if (chart_controller_matches(c, selected)) {
+            tail_ptr = &(*it);
+            break;
+        }
+    }
+    if (g_chart_controllers.size() > 1) {
+        lines.push_back("Controller: " + narrow(selected.label));
+    }
+    const auto& tail = *tail_ptr;
     lines.push_back("Time: " + format_double_short(tail.time_s, 1) + " s");
     lines.push_back("Altitude: " + format_double_short(tail.altitude_m / 1000.0, 2) + " km");
     lines.push_back("Speed: " + format_double_short(tail.speed_mps, 1) + " m/s");
@@ -7399,7 +8086,14 @@ std::vector<std::string> format_final_lines()
     // generated phase-end prediction, which is normally the terminal state.
     const post2::core::PredictedTrajectoryPath* final_prediction = nullptr;
     for (const auto& predicted : g_predicted_paths) {
-        if (!predicted.state_log.empty()) {
+        if (predicted.state_log.empty()) {
+            continue;
+        }
+        // Prefer the terminal prediction of the selected controller.
+        const bool matches_selected =
+            predicted.controller_detached_stage == selected.detached &&
+            (!selected.detached || predicted.controller_stage_index == selected.stage_index);
+        if (matches_selected) {
             final_prediction = &predicted;
         }
     }
@@ -7476,11 +8170,23 @@ void paint_scene(HWND hwnd, HDC hdc)
     int y = 16;
     SelectObject(hdc, section_font);
     SetTextColor(hdc, RGB(30, 41, 59));
-    draw_text_line(hdc, col_x, y, "Pre-takeoff vehicle");
+    draw_text_line(hdc, col_x, y, "Initial state");
     y += 22;
     SelectObject(hdc, body_font);
     SetTextColor(hdc, RGB(51, 65, 85));
     for (const auto& line : format_pre_takeoff_lines()) {
+        draw_text_line(hdc, col_x, y, line);
+        y += 18;
+    }
+
+    y += 12;
+    SelectObject(hdc, section_font);
+    SetTextColor(hdc, RGB(30, 41, 59));
+    draw_text_line(hdc, col_x, y, "Droneship state");
+    y += 22;
+    SelectObject(hdc, body_font);
+    SetTextColor(hdc, RGB(51, 65, 85));
+    for (const auto& line : format_droneship_lines()) {
         draw_text_line(hdc, col_x, y, line);
         y += 18;
     }
@@ -7673,7 +8379,7 @@ LRESULT CALLBACK scene_window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARA
         return 0;
 
     case WM_LBUTTONDBLCLK:
-        g_camera.reset(g_camera.scene_radius_m());
+        apply_scene_camera_fit(true);
         invalidate_scene_window();
         return 0;
 
@@ -7694,7 +8400,7 @@ LRESULT CALLBACK scene_window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARA
             g_predicted_paths,
             g_case.earth_rotation_at_epoch_rad,
             g_case.earth_rotation_rad_per_s,
-            false);
+            current_scene_render_options());
         EndPaint(hwnd, &ps);
         return 0;
     }
@@ -7762,6 +8468,7 @@ void create_view_buttons(HWND parent)
         {kViewButtonThrottle, L"Throttle",  0},
         {kViewButtonSpeed,    L"Speed",     0},
         {kViewButtonMass,     L"Mass",      0},
+        {kViewButtonHeatFlux, L"Heat Flux", 0},
     };
     constexpr int kButtonWidth = 92;
     int x = kContentColumnX;
@@ -7787,6 +8494,38 @@ void create_view_buttons(HWND parent)
         x += kButtonWidth + kViewButtonGap;
     }
     Button_SetCheck(g_view_buttons[0], BST_CHECKED);
+
+    // Controller selector row above the view buttons: charts plot all phases of
+    // the chosen controller (main stack vs a detached / recovered stage).
+    HWND controller_label = CreateWindowExW(
+        0, L"STATIC", L"Controller:", WS_CHILD | WS_VISIBLE,
+        kContentColumnX, kControllerComboTop + 4, 66, 20,
+        parent, nullptr, g_instance, nullptr);
+    SendMessageW(controller_label, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+    g_controller_combo = CreateWindowExW(
+        0, L"COMBOBOX", L"",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL,
+        kContentColumnX + 70, kControllerComboTop, 220, 220,
+        parent, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kControllerCombo)),
+        g_instance, nullptr);
+    SendMessageW(g_controller_combo, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+    g_scene_overview_button = CreateWindowExW(
+        0,
+        L"BUTTON",
+        L"Overview",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX | BS_PUSHLIKE,
+        kContentColumnX + 300,
+        kControllerComboTop,
+        92,
+        24,
+        parent,
+        reinterpret_cast<HMENU>(static_cast<INT_PTR>(kSceneOverviewToggle)),
+        g_instance,
+        nullptr);
+    SendMessageW(g_scene_overview_button, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+    Button_SetCheck(g_scene_overview_button, g_scene_overview ? BST_CHECKED : BST_UNCHECKED);
+    rebuild_chart_controllers();
+    refresh_controller_combo();
 }
 
 void create_chart_panels(HWND parent)
@@ -7797,6 +8536,7 @@ void create_chart_panels(HWND parent)
     g_chart_throttle.initialize(parent, rect);
     g_chart_speed.initialize(parent, rect);
     g_chart_mass.initialize(parent, rect);
+    g_chart_heatflux.initialize(parent, rect);
 }
 
 LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam)
@@ -7843,7 +8583,7 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
         return 0;
 
     case WM_LBUTTONDBLCLK:
-        g_camera.reset(g_camera.scene_radius_m());
+        apply_scene_camera_fit(true);
         invalidate_scene_window();
         return 0;
 
@@ -7859,6 +8599,13 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
         finish_optimization(hwnd);
         return 0;
 
+    case WM_TIMER:
+        if (wparam == kOptimizationProgressTimerId) {
+            refresh_optimization_progress(hwnd);
+            return 0;
+        }
+        break;
+
     case WM_COMMAND:
         if (optimization_is_running()) {
             switch (LOWORD(wparam)) {
@@ -7868,6 +8615,12 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
             case kViewButtonThrottle:  switch_view(hwnd, ViewKind::Throttle); return 0;
             case kViewButtonSpeed:     switch_view(hwnd, ViewKind::Speed); return 0;
             case kViewButtonMass:      switch_view(hwnd, ViewKind::Mass); return 0;
+            case kViewButtonHeatFlux:  switch_view(hwnd, ViewKind::HeatFlux); return 0;
+            case kSceneOverviewToggle:
+                set_scene_overview(
+                    hwnd,
+                    Button_GetCheck(g_scene_overview_button) == BST_CHECKED);
+                return 0;
             case kMenuOptimizationExecute:
                 execute_optimization(hwnd);
                 return 0;
@@ -7899,6 +8652,30 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
         case kViewButtonThrottle:  switch_view(hwnd, ViewKind::Throttle); return 0;
         case kViewButtonSpeed:     switch_view(hwnd, ViewKind::Speed); return 0;
         case kViewButtonMass:      switch_view(hwnd, ViewKind::Mass); return 0;
+        case kViewButtonHeatFlux:  switch_view(hwnd, ViewKind::HeatFlux); return 0;
+        case kSceneOverviewToggle:
+            set_scene_overview(
+                hwnd,
+                Button_GetCheck(g_scene_overview_button) == BST_CHECKED);
+            return 0;
+        case kControllerCombo:
+            if (HIWORD(wparam) == CBN_SELCHANGE) {
+                const int sel = static_cast<int>(
+                    SendMessageW(g_controller_combo, CB_GETCURSEL, 0, 0));
+                if (sel >= 0 && sel != g_selected_chart_controller) {
+                    g_selected_chart_controller = sel;
+                    apply_scene_camera_fit(g_scene_overview);
+                    populate_charts();
+                    post2::gui::ChartPanel* panel = chart_for_view(g_active_view);
+                    if (panel != nullptr && window_is_live(panel->hwnd())) {
+                        InvalidateRect(panel->hwnd(), nullptr, FALSE);
+                    }
+                    invalidate_scene_window();
+                    InvalidateRect(hwnd, nullptr, FALSE);  // redraw the Final-state panel
+                }
+                return 0;
+            }
+            break;
         case kMenuRefresh:
             run_simulation(hwnd);
             return 0;

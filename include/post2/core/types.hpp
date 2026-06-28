@@ -1,5 +1,6 @@
 #pragma once
 
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -150,6 +151,21 @@ struct ThrottlePoint {
     double throttle = 0.0;
 };
 
+// Parameters of the "entry_burn" throttle model: a single re-entry deceleration
+// burn whose size the model solves for (via the Clarabel guidance) so q and heat
+// flux stay under their limits. <=0 limits are disabled.
+struct EntryBurnConfig {
+    double q_limit_pa = 0.0;
+    double heat_flux_limit_wpm2 = 0.0;
+    // The model solves (and arms) once the live dynamic pressure first reaches
+    // this fraction of the q limit (or heat flux of its limit). Keeps the solver
+    // from running high in the thin upper atmosphere every step.
+    double trigger_fraction = 0.3;
+    double drag_cd = 0.8;            // representative descent Cd for the predictor
+    double safety_margin = 0.05;     // size the burn for limit*(1-margin)
+    int max_entry_engines = 3;       // upper thrust bound = this many engines @100%
+};
+
 struct ThrottleModelConfig {
     std::string type = "poly";
     double c0 = 1.0;
@@ -163,6 +179,7 @@ struct ThrottleModelConfig {
     bool continuity = false;
     std::vector<ThrottlePoint> points;
     SegmentedPolyConfig segmented_poly;
+    EntryBurnConfig entry_burn;
 };
 
 struct Quaternion {
@@ -209,6 +226,27 @@ struct UpfgConfig {
     double inclination_deg = kDefaultInclinationDeg;
 };
 
+// G-FOLD fuel-optimal powered-descent guidance (steering type "gfold"). Like
+// "upfg" it is a closed-loop guidance that owns its whole phase: the phase does
+// NOT integrate. Instead a 2D lossless-convexification min-fuel SOCP (Acikmese
+// et al., solved via Clarabel) is solved in the vehicle's 2.5-DOF vertical
+// plane, the fuel-optimal time-of-flight is found by golden-section search (min
+// fuel is unimodal in tf), and the discrete solution (position, velocity,
+// thrust direction, throttle) is written straight into the state log. Mass and
+// thrust come from the runtime landing stack; only the convex-problem knobs and
+// the engine count for the landing burn live here. See post2/core/gfold_solver.
+struct GfoldConfig {
+    int engine_count = 1;          // landing-burn engines: Tmax = count * per-engine
+    double min_throttle = 0.2;     // rho1 = min_throttle * Tmax (min thrust while firing)
+    double max_throttle = 1.0;     // rho2 = max_throttle * Tmax
+    double max_tilt_deg = 45.0;    // thrust pointing: max tilt from local vertical
+    double glide_slope_deg = 5.0;  // min glide-slope angle above ground
+    int num_nodes = 40;            // SOCP discretization node count
+    double tf_min_s = 2.0;         // golden-section search lower bound (GUI-editable)
+    double tf_max_s = 80.0;        // golden-section search upper bound (GUI-editable)
+    bool free_landing = true;      // free downrange touchdown (zero terminal velocity only)
+};
+
 struct SteeringModelConfig;
 
 struct SelectableSteeringSegment {
@@ -225,6 +263,7 @@ struct SteeringModelConfig {
     Poly2Config elevation_deg;
     LinearTangentConfig tangent;
     UpfgConfig upfg;
+    GfoldConfig gfold;
     Vec3 fixed_direction_eci = {1.0, 0.0, 0.0};
     std::vector<QuaternionPoint> points;
     std::vector<SelectableSteeringSegment> segments;
@@ -431,11 +470,26 @@ struct PredictedTrajectoryPath {
     ColorRgb color = {13, 148, 136};
 };
 
+// Live progress snapshot emitted by the optimizer during a run (see
+// OptimizerOptions::progress). Reported at outer-iteration granularity so a UI
+// can show counters and stream the per-step log without waiting for completion.
+struct OptimizerProgress {
+    int iterations = 0;            // outer iterations completed so far
+    int evaluations = 0;          // trajectory simulations run so far
+    bool found_feasible = false;  // a constraint-satisfying point found yet?
+    double best_objective = 0.0;  // current best/working objective value
+    double max_constraint_violation = 0.0;
+    std::vector<std::string> new_messages;  // log lines added since last callback
+};
+
 struct OptimizationRunOptions {
     int max_iterations = -1;
     double tolerance = -1.0;
     double initial_step_fraction = -1.0;
     bool run_final_simulation = true;
+    // Optional live-progress sink. Invoked on the optimizer's own thread during
+    // solve(); keep it cheap and thread-safe (it must not touch UI directly).
+    std::function<void(const OptimizerProgress&)> progress;
 };
 
 struct OptimizationVariableChange {

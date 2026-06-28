@@ -7,6 +7,11 @@ namespace post2::propagation {
 struct EnginePerformanceInputs {
     double throttle_command = 0.0;     // commanded throttle in [0, 1]
     double ambient_pressure_pa = 0.0;  // local atmospheric pressure
+    // Number of engines actually lit this step. Negative means "all of them"
+    // (engine_count), preserving the legacy full-cluster behavior. A subset
+    // (e.g. the re-entry burn lighting 3 of 9) scales thrust/mdot by this count
+    // instead, clamped to [0, engine_count].
+    int ignited_engine_count = -1;
 };
 
 struct EnginePerformanceOutputs {

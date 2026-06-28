@@ -16,6 +16,7 @@ add_library(post2_core STATIC
     src/core/json.cpp
     src/core/ksp_vehicle_site_import.cpp
     src/core/finite_difference.cpp
+    src/core/gfold_solver.cpp
     src/core/nlp_evaluator.cpp
     src/core/nlp_problem.cpp
     src/core/optimization.cpp
@@ -24,6 +25,7 @@ add_library(post2_core STATIC
     src/core/frames.cpp
     src/core/projection.cpp
     src/core/qp_solver.cpp
+    src/core/reentry_solver.cpp
     src/core/remote_service.cpp
     src/core/simulation_driver.cpp
     src/core/state_log.cpp
@@ -52,6 +54,46 @@ if(WIN32)
     target_compile_definitions(post2_core PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
     target_link_libraries(post2_core PUBLIC ws2_32)
 endif()
+
+# Optional Clarabel conic solver for the re-entry burn guidance (milestone of
+# the entry-burn feature). OFF by default so the standard build/tests need no
+# clarabel_c.dll. Turn on with -DPOST2_USE_CLARABEL=ON; the headers + prebuilt
+# import lib come from the vendored Clarabel.cpp under gfold2d/ (build it first
+# per gfold2d/README: cargo build --release). When enabled, post2_core links
+# the import lib PUBLIC and defines POST2_HAVE_CLARABEL, and every executable
+# gets the DLL copied next to it (see the deploy loop at the end of this file).
+option(POST2_USE_CLARABEL "Build the Clarabel-based re-entry burn guidance" OFF)
+set(POST2_CLARABEL_DLL "")
+if(POST2_USE_CLARABEL)
+    set(POST2_CLARABEL_ROOT
+        "${CMAKE_CURRENT_SOURCE_DIR}/gfold2d/external/Clarabel.cpp"
+        CACHE PATH "Root of the vendored Clarabel.cpp")
+    set(POST2_CLARABEL_INC "${POST2_CLARABEL_ROOT}/include")
+    set(POST2_CLARABEL_LIBDIR "${POST2_CLARABEL_ROOT}/rust_wrapper/target/release")
+    if(EXISTS "${POST2_CLARABEL_INC}/clarabel.h" AND
+       EXISTS "${POST2_CLARABEL_LIBDIR}/clarabel_c.dll.lib")
+        target_include_directories(post2_core PUBLIC "${POST2_CLARABEL_INC}")
+        target_link_libraries(post2_core PUBLIC "${POST2_CLARABEL_LIBDIR}/clarabel_c.dll.lib")
+        target_compile_definitions(post2_core PUBLIC POST2_HAVE_CLARABEL)
+        set(POST2_CLARABEL_DLL "${POST2_CLARABEL_LIBDIR}/clarabel_c.dll")
+        message(STATUS "Clarabel: enabled (${POST2_CLARABEL_LIBDIR})")
+    else()
+        message(WARNING
+            "POST2_USE_CLARABEL=ON but Clarabel not found under ${POST2_CLARABEL_ROOT} "
+            "(build the vendored Clarabel.cpp first). Building without it.")
+    endif()
+endif()
+
+# Copies clarabel_c.dll next to a target's executable when Clarabel is enabled.
+# No-op otherwise. post2_core links the import lib PUBLIC, so every executable
+# that uses post2_core needs the DLL on its PATH at run time.
+function(post2_deploy_clarabel target)
+    if(POST2_CLARABEL_DLL)
+        add_custom_command(TARGET ${target} POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${POST2_CLARABEL_DLL}" "$<TARGET_FILE_DIR:${target}>")
+    endif()
+endfunction()
 
 add_executable(post2_shell
     src/shell/main.cpp
@@ -86,6 +128,10 @@ if(krpc_FOUND)
         target_compile_definitions(post2_player PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
     endif()
     message(STATUS "post2_player: enabled (krpc found)")
+
+    # Standalone grid-fin aerodynamics test tool (its own subproject).
+    add_subdirectory(gridfin_test)
+    message(STATUS "gridfin_test: enabled (krpc found)")
 else()
     message(STATUS "post2_player: skipped (krpc not found; use the vcpkg toolchain)")
 endif()
@@ -166,6 +212,24 @@ if(BUILD_TESTING)
     target_link_libraries(post2_aero_model_test PRIVATE post2_core)
     add_test(NAME post2_aero_model_test COMMAND post2_aero_model_test)
 
+    add_executable(post2_reentry_solver_test
+        tests/reentry_solver_test.cpp
+    )
+    target_link_libraries(post2_reentry_solver_test PRIVATE post2_core)
+    add_test(NAME post2_reentry_solver_test COMMAND post2_reentry_solver_test)
+
+    add_executable(post2_engine_selection_test
+        tests/engine_selection_test.cpp
+    )
+    target_link_libraries(post2_engine_selection_test PRIVATE post2_core)
+    add_test(NAME post2_engine_selection_test COMMAND post2_engine_selection_test)
+
+    add_executable(post2_gfold_solver_test
+        tests/gfold_solver_test.cpp
+    )
+    target_link_libraries(post2_gfold_solver_test PRIVATE post2_core)
+    add_test(NAME post2_gfold_solver_test COMMAND post2_gfold_solver_test)
+
     add_executable(post2_aero_stage_table_test
         tests/aero_stage_table_test.cpp
     )
@@ -200,4 +264,23 @@ if(BUILD_TESTING)
             --no-csv
             --no-svg
     )
+endif()
+
+# Deploy clarabel_c.dll next to every executable when Clarabel is enabled. Must
+# run after all targets are defined; guarded so it is a no-op in the default
+# (Clarabel-off) build.
+if(POST2_CLARABEL_DLL)
+    foreach(_post2_exe
+        post2_shell post2_core_server post2_regen_aero post2_player post2_gui
+        post2_smoke_test post2_frames_test post2_engine_performance_test
+        post2_integrator_test post2_dynamics_dof_test post2_optimization_components_test
+        post2_phase_termination_and_events_test post2_upfg_guidance_test
+        post2_aero_model_test post2_reentry_solver_test post2_engine_selection_test
+        post2_gfold_solver_test
+        post2_aero_stage_table_test post2_guidance_script_test
+        post2_ksp_vehicle_site_import_test)
+        if(TARGET ${_post2_exe})
+            post2_deploy_clarabel(${_post2_exe})
+        endif()
+    endforeach()
 endif()

@@ -8,18 +8,19 @@
   "configurePresets": [
     {
       "name": "default",
-      "displayName": "Default (no vcpkg)",
-      "description": "Core build without the kRPC player",
-      "binaryDir": "${sourceDir}/build"
+      "displayName": "Lightweight (no vcpkg / no Clarabel)",
+      "description": "Core build without the kRPC player or the Clarabel re-entry solver",
+      "binaryDir": "${sourceDir}/build-nodeps"
     },
     {
       "name": "vcpkg",
-      "displayName": "vcpkg (krpc player)",
-      "description": "Configure with the vcpkg toolchain so find_package(krpc) succeeds and post2_player is built",
-      "binaryDir": "${sourceDir}/build-vcpkg",
+      "displayName": "Full (kRPC player + Clarabel re-entry burn)",
+      "description": "Single full build: vcpkg toolchain so find_package(krpc) builds post2_player, plus the Clarabel-based re-entry burn guidance. This is the canonical build/ folder.",
+      "binaryDir": "${sourceDir}/build",
       "toolchainFile": "C:/Users/32796/Downloads/vcpkg/scripts/buildsystems/vcpkg.cmake",
       "cacheVariables": {
-        "VCPKG_TARGET_TRIPLET": "x64-windows"
+        "VCPKG_TARGET_TRIPLET": "x64-windows",
+        "POST2_USE_CLARABEL": "ON"
       }
     }
   ],
